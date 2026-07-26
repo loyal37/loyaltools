@@ -106,7 +106,7 @@ class ExportEFMI:
         mapping_key = (source_ib_key, target_ib_key)
         condition_info = self.cross_ib_vb_condition_mapping.get(mapping_key, {})
         if condition_type == 'source':
-            return condition_info.get('source', "if vs == 200 || vs == 201 || vs == 204")
+            return condition_info.get('source', "if vs == 200 || vs == 201")
         else:
             return condition_info.get('target', "if vs == 202 || vs == 203")
 
@@ -114,9 +114,76 @@ class ExportEFMI:
         object_mapping_key = (obj_name, source_ib_key, target_ib_key)
         condition_info = self.cross_ib_object_vb_condition.get(object_mapping_key, {})
         if condition_type == 'source':
-            return condition_info.get('source', "if vs == 200 || vs == 201 || vs == 204")
+            return condition_info.get('source', "if vs == 200 || vs == 201")
         else:
             return condition_info.get('target', "if vs == 202 || vs == 203")
+
+    # 源块分支路由 (依据 fix-efmi-cross-ib skill / 实测有效Mod结构):
+    # 200 = 捕获/prepass通道 -> ExtractCaptureCB1 提取, 绑到 vs-cb1
+    # 201 = 常规蒙皮/简单阴影通道 -> ExtractCB1 提取, 绑到 vs-cb2
+    # 其余编号(含204未知通道)保守沿用旧行为 ExtractCB1 + vs-cb1
+    _CROSS_IB_SOURCE_ROUTING = {
+        200: ("CustomShader_ExtractCaptureCB1", "vs-cb1"),
+        201: ("CustomShader_ExtractCB1", "vs-cb2"),
+    }
+
+    # 仅由 "if vs == N [|| vs == M ...]" 组成的简单条件才可安全拆分
+    _SIMPLE_VS_CONDITION_PATTERN = re.compile(
+        r'^\s*if\s+vs\s*==\s*\d+(?:\s*\|\|\s*vs\s*==\s*\d+)*\s*$'
+    )
+
+    def _append_cross_ib_source_branches(self, lines, vb_condition, source_identifier, drawindexed_str_list):
+        '''
+        生成源块的跨IB分支。
+        依据 fix-efmi-cross-ib skill: 合并的 "if vs == 200 || vs == 201" 分支会让
+        两条通道共用同一提取shader与CB槽位，导致本体消失/变黑/丢阴影，
+        必须按 filter 编号拆成独立分支 (200走CaptureCB1+vs-cb1, 201走CB1+vs-cb2)，
+        每个分支内完整复制跨IB绘制命令。
+        无法解析的自定义条件保留旧的单分支行为。
+        '''
+        drawindexed_str_list = [line for line in drawindexed_str_list if line.strip()]
+
+        vs_numbers = []
+        if vb_condition and self._SIMPLE_VS_CONDITION_PATTERN.match(vb_condition):
+            seen = set()
+            for match in re.findall(r'vs\s*==\s*(\d+)', vb_condition):
+                vs_number = int(match)
+                if vs_number not in seen:
+                    seen.add(vs_number)
+                    vs_numbers.append(vs_number)
+
+        if vs_numbers:
+            for vs_number in vs_numbers:
+                extract_shader, cb_slot = self._CROSS_IB_SOURCE_ROUTING.get(
+                    vs_number, ("CustomShader_ExtractCB1", "vs-cb1")
+                )
+                lines.append(f"if vs == {vs_number}")
+                lines.append(f"    run = {extract_shader}")
+                lines.append(f"    cs-t2 = ResourceID_{source_identifier}")
+                lines.append(f"    run = CustomShader_RecordBones_{source_identifier}")
+                lines.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
+                lines.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
+                lines.append(f"    {cb_slot} = ResourceFakeCB1_{source_identifier}")
+                lines.append(";所有需要跨 Ib 的物体引用")
+                lines.extend(drawindexed_str_list)
+                lines.append("endif")
+        else:
+            # 自定义/不可解析条件: 保留单分支旧行为 (ExtractCB1 + vs-cb1)
+            # 条件为空 (源槽位全部未勾选) 时不能输出孤立的 endif，
+            # 此时跳过 if/endif 包裹，绘制命令无条件执行
+            has_condition = bool(vb_condition and vb_condition.strip())
+            if has_condition:
+                lines.append(vb_condition)
+            lines.append("    run = CustomShader_ExtractCB1")
+            lines.append(f"    cs-t2 = ResourceID_{source_identifier}")
+            lines.append(f"    run = CustomShader_RecordBones_{source_identifier}")
+            lines.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
+            lines.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
+            lines.append(f"    vs-cb1 = ResourceFakeCB1_{source_identifier}")
+            lines.append(";所有需要跨 Ib 的物体引用")
+            lines.extend(drawindexed_str_list)
+            if has_condition:
+                lines.append("endif")
 
     def _split_drawcalls_by_cross_ib(self, drawcall_model_list, source_ib_key=None, target_ib_key=None):
         cross_ib_drawcalls = []
@@ -189,21 +256,10 @@ class ExportEFMI:
                 continue
 
             lines.append(";跨 iB 区域")
-            lines.append(vb_condition)
-            lines.append("    run = CustomShader_ExtractCB1")
-            lines.append(f"    cs-t2 = ResourceID_{source_identifier}")
-            lines.append(f"    run = CustomShader_RecordBones_{source_identifier}")
-            lines.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
-            lines.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
-            lines.append(f"    vs-cb1 = ResourceFakeCB1_{source_identifier}")
-            lines.append(";所有需要跨 Ib 的物体引用")
-
-            drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(objects)
-            for drawindexed_str in drawindexed_str_list:
-                if drawindexed_str.strip():
-                    lines.append(drawindexed_str)
-
-            lines.append("endif")
+            self._append_cross_ib_source_branches(
+                lines, vb_condition, source_identifier,
+                M_IniHelper.get_drawindexed_instanced_str_list(objects),
+            )
 
         lines.append(";不需要跨 Ib 的物体引用")
 
@@ -215,6 +271,7 @@ class ExportEFMI:
 
         lines.append("")
         lines.append(f"post vs-cb1 = null")
+        lines.append(f"post vs-cb2 = null")
         lines.append(f"post vs-t0 = null")
         lines.append(f"post cs-t2 = null")
 
@@ -301,6 +358,21 @@ class ExportEFMI:
         present_section.append("ResourceDumpedCB1_SRV = copy ResourceDumpedCB1_UAV")
         present_section.new_line()
 
+        # 200 捕获通道专用提取shader (capture cbuffer 位于 register(b1)，
+        # 见 res/extract_capture_cb1_vs.hlsl；依据 fix-efmi-cross-ib skill)
+        present_section.append("[CustomShader_ExtractCaptureCB1]")
+        present_section.append("vs = ./res/extract_capture_cb1_vs.hlsl")
+        present_section.append("ps = ./res/extract_cb1_ps.hlsl")
+        present_section.append("ps-u7 = ResourceDumpedCB1_UAV")
+        present_section.append("depth_enable = false")
+        present_section.append("blend = ADD SRC_ALPHA INV_SRC_ALPHA")
+        present_section.append("cull = none")
+        present_section.append("topology = point_list")
+        present_section.append("draw = 4096, 0")
+        present_section.append("ps-u7 = null")
+        present_section.append("ResourceDumpedCB1_SRV = copy ResourceDumpedCB1_UAV")
+        present_section.new_line()
+
         for identifier in sorted(all_identifiers):
             present_section.append(f"[CustomShader_RecordBones_{identifier}]")
             present_section.append("cs = ./res/record_bones_cs.hlsl")
@@ -325,21 +397,23 @@ class ExportEFMI:
             present_section.append(f"ResourceFakeCB1_{identifier} = copy ResourceFakeCB1_UAV_{identifier}")
             present_section.new_line()
 
+        # VS Hash -> filter_index 路由基线 (fix-efmi-cross-ib skill hash-routing.md，
+        # 与实测有效Mod一致；200=捕获/prepass提取CB1, 201=常规蒙皮/简单阴影提取CB2,
+        # 202/203=跨IB回放通道(经vs-cb2回放), 204=已知但暂不处理的通道)
         shader_overrides = [
-            ("ShaderOverridevs1000", "241383a9d64b4978", "200"),
-            ("ShaderOverridevs1001", "6733250da4e23fd6", "200"),
-            ("ShaderOverridevs1002", "d66e2204be43808b", "200"),
-            ("ShaderOverridevs1003", "9bac7486f7930a24", "201"),
-            ("ShaderOverridevs1004", "f2c6f6a1e116c2bf", "201"),
-            ("ShaderOverridevs1005", "a33eb5546f729a5d", "201"),
-            ("ShaderOverridevs1006", "1bd133ecc1915893", "201"),
-            ("ShaderOverridevs1007", "b30cc5ad521e0700", "202"),
-            ("ShaderOverridevs1008", "5eb5517c9d2c7e6c", "202"),
-            ("ShaderOverridevs1009", "4921f64a7c74226d", "203"),
-            ("ShaderOverridevs1010", "1b835d0e8dbbfb8f", "203"),
+            ("ShaderOverridevs1000", "f11c7e1dbf876a69", "200"),
+            ("ShaderOverridevs1001", "303f45d5266d0369", "201"),
+            ("ShaderOverridevs1002", "7b3a141f99cd9b39", "201"),
+            ("ShaderOverridevs1003", "1479b2b594b9c91a", "202"),
+            ("ShaderOverridevs1004", "c6e55aaa8f4b3218", "202"),
+            ("ShaderOverridevs1005", "784f11ae11c97112", "203"),
+            ("ShaderOverridevs1006", "f1b10202c73c72c3", "204"),
+            ("ShaderOverridevs1007", "12ad3cc5f56f853c", "204"),
+            ("ShaderOverridevs1008", "86cb3bc0a3e2e013", "204"),
+            ("ShaderOverridevs1009", "906a3976f3e33cfb", "204"),
+            ("ShaderOverridevs1010", "0ba16985f9f74f8d", "204"),
             ("ShaderOverridevs1011", "06c94dd56f447210", "204"),
             ("ShaderOverridevs1012", "f47b1f797f5831d0", "204"),
-            ("ShaderOverridevs1013", "906a3976f3e33cfb", "204"),
         ]
 
         for name, hash_val, filter_idx in shader_overrides:
@@ -539,21 +613,13 @@ class ExportEFMI:
                         continue
 
                     texture_override_ib_section.append(";跨 iB 区域")
-                    texture_override_ib_section.append(vb_condition)
-                    texture_override_ib_section.append("    run = CustomShader_ExtractCB1")
-                    texture_override_ib_section.append(f"    cs-t2 = ResourceID_{current_identifier}")
-                    texture_override_ib_section.append(f"    run = CustomShader_RecordBones_{current_identifier}")
-                    texture_override_ib_section.append(f"    run = CustomShader_RedirectCB1_{current_identifier}")
-                    texture_override_ib_section.append(f"    vs-t0 = ResourceFakeT0_SRV_{current_identifier}")
-                    texture_override_ib_section.append(f"    vs-cb1 = ResourceFakeCB1_{current_identifier}")
-                    texture_override_ib_section.append(";所有需要跨 Ib 的物体引用")
-
-                    drawindexed_str_list = M_IniHelper.get_drawindexed_instanced_str_list(objects)
-                    for drawindexed_str in drawindexed_str_list:
-                        if drawindexed_str.strip():
-                            texture_override_ib_section.append(drawindexed_str)
-
-                    texture_override_ib_section.append("endif")
+                    source_branch_lines = []
+                    self._append_cross_ib_source_branches(
+                        source_branch_lines, vb_condition, current_identifier,
+                        M_IniHelper.get_drawindexed_instanced_str_list(objects),
+                    )
+                    for source_branch_line in source_branch_lines:
+                        texture_override_ib_section.append(source_branch_line)
 
                 texture_override_ib_section.append(";不需要跨 Ib 的物体引用")
 
@@ -570,6 +636,7 @@ class ExportEFMI:
 
                 texture_override_ib_section.append("")
                 texture_override_ib_section.append("post vs-cb1 = null")
+                texture_override_ib_section.append("post vs-cb2 = null")
                 texture_override_ib_section.append("post vs-t0 = null")
                 texture_override_ib_section.append("post cs-t2 = null")
 
@@ -597,6 +664,7 @@ class ExportEFMI:
 
                 texture_override_ib_section.append("")
                 texture_override_ib_section.append("post vs-cb1 = null")
+                texture_override_ib_section.append("post vs-cb2 = null")
                 texture_override_ib_section.append("post vs-t0 = null")
                 texture_override_ib_section.append("post cs-t2 = null")
 
@@ -711,7 +779,8 @@ class ExportEFMI:
                 section.append(f"    cs-t2 = ResourceID_{source_identifier}")
                 section.append(f"    run = CustomShader_RedirectCB1_{source_identifier}")
                 section.append(f"    vs-t0 = ResourceFakeT0_SRV_{source_identifier}")
-                section.append(f"    vs-cb1 = ResourceFakeCB1_{source_identifier}")
+                # 202/203 回放通道通过 vs-cb2 重放记录的本体数据 (fix-efmi-cross-ib skill)
+                section.append(f"    vs-cb2 = ResourceFakeCB1_{source_identifier}")
                 section.append("    ;跨 IB 块数据区域")
 
                 source_unique_str = source_submesh.unique_str
@@ -729,7 +798,9 @@ class ExportEFMI:
                     if drawindexed_str.strip():
                         section.append(drawindexed_str)
 
-                section.append("endif")
+                # 条件为空 (目标槽位全部未勾选) 时上方没有输出 if，不能输出孤立的 endif
+                if vb_condition_target:
+                    section.append("endif")
 
     def _copy_cross_ib_hlsl_files(self):
         addon_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -742,6 +813,7 @@ class ExportEFMI:
         hlsl_files = [
             'extract_cb1_ps.hlsl',
             'extract_cb1_vs.hlsl',
+            'extract_capture_cb1_vs.hlsl',
             'record_bones_cs.hlsl',
             'redirect_cb1_cs.hlsl'
         ]

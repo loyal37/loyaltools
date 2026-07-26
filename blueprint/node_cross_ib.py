@@ -218,8 +218,8 @@ class SSMTNode_CrossIB(SSMTNodeBase):
 
     vb_slot_204: BoolProperty(
         name="204",
-        description="源块 VS 槽位 204",
-        default=True
+        description="源块 VS 槽位 204 (未知/未处理通道，依据 fix-efmi-cross-ib skill 默认不启用)",
+        default=False
     )
 
     current_logic_name: StringProperty(
@@ -668,6 +668,7 @@ class SSMTNode_PostProcess_CrossIB(SSMTNodeBase):
         hlsl_files = [
             'extract_cb1_ps.hlsl',
             'extract_cb1_vs.hlsl',
+            'extract_capture_cb1_vs.hlsl',
             'record_bones_cs.hlsl',
             'redirect_cb1_cs.hlsl'
         ]
