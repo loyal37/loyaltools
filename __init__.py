@@ -1,0 +1,201 @@
+import bpy
+
+
+from .common import global_properties
+from .common.global_config import GlobalConfig
+
+
+from .ui import ui_panel_basic
+from .ui import ui_panel_sword
+from .ui import ui_func_import
+from .ui import ui_func_import_ssmt
+from .ui import ui_prefix_quick_ops
+
+from . import blueprint
+
+from .ui import ui_func_export
+
+# LoyalTools 新增功能模块：DrawIB 提取 + 贴图标记
+from .ui import ui_panel_extract
+from .ui import ui_panel_texture_mark
+
+from . import toolkit
+
+from . import addon_updater_ops
+
+import importlib
+importlib.reload(addon_updater_ops)
+importlib.reload(global_properties)
+importlib.reload(blueprint)
+importlib.reload(ui_prefix_quick_ops)
+
+bl_info = {
+    "name": "LoyalTools",
+    "description": "明日方舟终末地 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力，无需 SSMT4）",
+    "blender": (4, 5, 0),
+    "version": (1, 3, 0),
+    "location": "View3D",
+    "category": "Generic"
+}
+
+
+class HERTT_OT_SwitchToMainPanel(bpy.types.Operator):
+    """切换回主面板"""
+    bl_idname = "model.switch_to_main_panel"
+    bl_label = "切换回主面板"
+
+    def execute(self, context):
+        context.scene.herta_show_toolkit = False
+        return {'FINISHED'}
+
+
+class HERTT_OT_SwitchToToolkit(bpy.types.Operator):
+    """切换到工具集面板"""
+    bl_idname = "model.switch_to_toolkit"
+    bl_label = "切换到工具集面板"
+    
+    def execute(self, context):
+        context.scene.herta_show_toolkit = True
+        return {'FINISHED'}
+
+
+class UpdaterPanel(bpy.types.Panel):
+    """Update Panel"""
+    bl_label = "检查版本更新"
+    bl_idname = "HERTA_PT_UpdaterPanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LoyalTools"
+    bl_order = 99
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        if not hasattr(context.scene, 'herta_show_toolkit'):
+            return True
+        return not context.scene.herta_show_toolkit
+
+    def draw(self, context):
+        layout = self.layout
+        
+        # Call to check for update in background.
+        # Note: built-in checks ensure it runs at most once, and will run in
+        # the background thread, not blocking or hanging blender.
+        # Internally also checks to see if auto-check enabled and if the time
+        # interval has passed.
+        # addon_updater_ops.check_for_update_background()
+        col = layout.column()
+        col.scale_y = 0.7
+        # Could also use your own custom drawing based on shared variables.
+        if addon_updater_ops.updater.update_ready:
+            layout.label(text="存在可用更新！", icon="INFO")
+
+        # Call built-in function with draw code/checks.
+        # addon_updater_ops.update_notice_box_ui(self, context)
+        addon_updater_ops.update_settings_ui(self, context)
+
+
+class HertaUpdatePreference(bpy.types.AddonPreferences):
+    # Addon updater preferences.
+    bl_label = "LoyalTools 更新器"
+    bl_idname = __package__
+
+
+    auto_check_update: bpy.props.BoolProperty(
+        name="自动检查更新",
+        description="如启用，按设定的时间间隔自动检查更新",
+        default=True) # type: ignore
+
+    updater_interval_months: bpy.props.IntProperty(
+        name='月',
+        description="自动检查更新间隔月数",
+        default=0,
+        min=0) # type: ignore
+
+    updater_interval_days: bpy.props.IntProperty(
+        name='天',
+        description="自动检查更新间隔天数",
+        default=1,
+        min=0,
+        max=31) # type: ignore
+
+    updater_interval_hours: bpy.props.IntProperty(
+        name='小时',
+        description="自动检查更新间隔小时数",
+        default=0,
+        min=0,
+        max=23) # type: ignore
+
+    updater_interval_minutes: bpy.props.IntProperty(
+        name='分钟',
+        description="自动检查更新间隔分钟数",
+        default=0,
+        min=0,
+        max=59) # type: ignore
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "auto_check_update")
+        addon_updater_ops.update_settings_ui(self, context)
+
+def register():
+    global_properties.register()
+    GlobalConfig.read_from_main_json_ssmt4()
+    
+    bpy.types.Scene.herta_show_toolkit = bpy.props.BoolProperty(
+        name="显示工具集",
+        description="切换显示工具集面板",
+        default=False
+    )
+    
+    bpy.utils.register_class(HERTT_OT_SwitchToMainPanel)
+    bpy.utils.register_class(HERTT_OT_SwitchToToolkit)
+    
+    addon_updater_ops.register(bl_info)
+    bpy.utils.register_class(UpdaterPanel)
+    bpy.utils.register_class(HertaUpdatePreference)
+
+    blueprint.register()
+    ui_prefix_quick_ops.register()
+    ui_panel_basic.register()
+    ui_panel_sword.register()
+    ui_func_import_ssmt.register()
+    ui_func_import.register()
+    ui_func_export.register()
+
+    # LoyalTools 新增：DrawIB 提取面板 + 贴图标记面板
+    ui_panel_extract.register()
+    ui_panel_texture_mark.register()
+
+    toolkit.register()
+
+
+
+def unregister():
+    toolkit.unregister()
+
+    # LoyalTools 新增模块
+    ui_panel_texture_mark.unregister()
+    ui_panel_extract.unregister()
+
+    ui_func_export.unregister()
+    ui_func_import.unregister()
+    ui_func_import_ssmt.unregister()
+    ui_panel_sword.unregister()
+    ui_panel_basic.unregister()
+    ui_prefix_quick_ops.unregister()
+    blueprint.unregister()
+
+    bpy.utils.unregister_class(HertaUpdatePreference)
+    bpy.utils.unregister_class(UpdaterPanel)
+    addon_updater_ops.unregister()
+    
+    bpy.utils.unregister_class(HERTT_OT_SwitchToToolkit)
+    bpy.utils.unregister_class(HERTT_OT_SwitchToMainPanel)
+    
+    del bpy.types.Scene.herta_show_toolkit
+
+    global_properties.unregister()
+
+
+
+

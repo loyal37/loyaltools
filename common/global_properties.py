@@ -1,0 +1,555 @@
+import bpy
+import os
+
+from .logic_name import LogicName
+
+
+_blueprint_enum_items_cache = []
+
+
+# 独立模式游戏预设可选项，EFMI(终末地)为默认值
+_standalone_game_preset_items = [
+    (LogicName.EFMI, "EFMI (终末地)", "明日方舟：终末地 (默认，LoyalTools主要目标游戏)"),
+    (LogicName.GIMI, "GIMI (原神)", "原神"),
+    (LogicName.HIMI, "HIMI (崩坏3)", "崩坏3"),
+    (LogicName.SRMI, "SRMI (崩坏:星穹铁道)", "崩坏：星穹铁道"),
+    (LogicName.ZZMI, "ZZMI (绝区零)", "绝区零"),
+    (LogicName.WWMI, "WWMI (鸣潮)", "鸣潮"),
+    (LogicName.GF2, "GF2 (少女前线2)", "少女前线2：追放"),
+    (LogicName.IdentityV, "IdentityV (第五人格)", "第五人格"),
+    (LogicName.AILIMIT, "AILIMIT", "AI LIMIT 无限机兵"),
+    (LogicName.DOAV, "DOAV", "死或生沙滩排球维纳斯假期"),
+    (LogicName.SnowBreak, "SnowBreak (尘白禁区)", "尘白禁区"),
+    (LogicName.YYSLS, "YYSLS (燕云十六声)", "燕云十六声"),
+    (LogicName.Naraka, "Naraka (永劫无间)", "永劫无间"),
+    (LogicName.NarakaM, "NarakaM (永劫无间手游)", "永劫无间手游"),
+    (LogicName.NTEMI, "NTEMI (异环)", "异环 (仅测试)"),
+    (LogicName.APMI, "APMI (蓝色星原)", "蓝色星原 (预留)"),
+    (LogicName.NEMI, "NEMI (异环预留)", "异环 (预留)"),
+]
+
+
+def _update_standalone_game_preset(self, context):
+    # 属性变化时立即同步到GlobalConfig，供独立模式下的logic_name回退使用
+    try:
+        from .global_config import GlobalConfig
+        GlobalConfig.set_standalone_logic_name(self.standalone_game_preset)
+    except Exception:
+        pass
+
+
+def _update_force_standalone_preset(self, context):
+    # 属性变化时立即同步到GlobalConfig，重新解析logic_name的优先级
+    try:
+        from .global_config import GlobalConfig
+        GlobalConfig.set_force_standalone_preset(self.force_standalone_preset)
+    except Exception:
+        pass
+
+
+def _get_blueprint_enum_items(self, context):
+    global _blueprint_enum_items_cache
+
+    try:
+        from ..blueprint.export_helper import BlueprintExportHelper
+        _blueprint_enum_items_cache = BlueprintExportHelper.get_blueprint_enum_items(context=context)
+    except Exception:
+        _blueprint_enum_items_cache = [
+            ("__NONE__", "当前没有蓝图", "当前没有可选蓝图，请先打开蓝图界面或执行一键导入"),
+        ]
+
+    return _blueprint_enum_items_cache
+
+
+def _get_workspace_enum_items(self, context):
+    try:
+        from .global_config import GlobalConfig
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_root = GlobalConfig.path_current_game_total_workspace_folder()
+        if not workspace_root or not os.path.isdir(workspace_root):
+            return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+        workspace_names = sorted(
+            [entry.name for entry in os.scandir(workspace_root) if entry.is_dir()]
+        )
+        if not workspace_names:
+            return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+        return [(name, name, "") for name in workspace_names]
+    except Exception:
+        return [("", "当前没有工作空间", "当前游戏配置下未找到可用工作空间")]
+
+
+def _default_parallel_instance_count() -> int:
+    cpu_count = os.cpu_count() or 4
+    return max(1, min(4, cpu_count))
+
+
+def _update_parallel_preprocess_toggle(self, context):
+    if self.enable_parallel_preprocess and not self.parallel_blender_executable:
+        self.parallel_blender_executable = bpy.app.binary_path or ""
+
+
+class GlobalProterties(bpy.types.PropertyGroup):
+    object_swap_variable_counter: bpy.props.IntProperty(
+        name="Object Swap Variable Counter",
+        default=0,
+        min=0,
+        options={'HIDDEN'},
+    ) # type: ignore
+
+    allocated_variable_names_csv: bpy.props.StringProperty(
+        name="Allocated Variable Names",
+        default="",
+        options={'HIDDEN'},
+    ) # type: ignore
+
+    selected_blueprint_name: bpy.props.EnumProperty(
+        name="当前蓝图",
+        description="选择要打开或快捷生成 Mod 的蓝图",
+        items=_get_blueprint_enum_items,
+    ) # type: ignore
+
+    open_mod_folder_after_generate_mod: bpy.props.BoolProperty(
+        name="生成后打开Mod文件夹",
+        description="勾选后，在生成Mod完成后自动打开Mod文件夹",
+        default=True,
+    ) # type: ignore
+
+    zzz_use_slot_fix: bpy.props.BoolProperty(
+        name="槽位风格贴图使用SlotFix技术",
+        description="仅适用于槽位风格贴图，勾选后，特定名称标记的贴图将使用SlotFix风格，能一定程度上解决槽位风格贴图跨槽位的问题，跨Pixel槽位指的是在前一个DrawCall中是ps-t3但是下一个DrawCall变为ps-t5这种情况，但由于负责维护的人也在偷懒所以并不可靠",
+        default=True,
+    ) # type: ignore
+
+    gimi_use_orfix: bpy.props.BoolProperty(
+        name="槽位风格贴图使用ORFix",
+        description="勾选后，在使用槽位风格贴图标记时，如果偷懒不想手动维护由于贴图槽位变化导致的贴图损坏问题，可以勾选此选项将问题交给ORFix维护者来解决，仅GIMI可用\n注意，如果你不懂ORFix和NNFix的原理，请不要取消勾选，取消勾选会严格按照贴图标记来执行贴图部分ini生成，默认你会在ini中自行写判断语句修复来替代实现ORFix和NNFix的功能",
+        default=True,
+    ) # type: ignore
+
+    forbid_auto_texture_ini: bpy.props.BoolProperty(
+        name="禁止自动贴图流程",
+        description="生成Mod时禁止生成贴图相关ini部分",
+        default=False,
+    ) # type: ignore
+
+    use_rabbitfx_slot: bpy.props.BoolProperty(
+        name="使用RabbitFX槽位风格",
+        description="勾选后，使用RabbitFX槽位风格生成贴图相关ini部分",
+        default=False,
+    ) # type: ignore
+
+    recalculate_tangent: bpy.props.BoolProperty(
+        name="向量归一化法线存入TANGENT(全局)",
+        description="使用向量相加归一化重计算所有模型的TANGENT值，勾选此项后无法精细控制具体某个模型是否计算，是偷懒选项,在不勾选时默认使用右键菜单中标记的选项。\n用途:\n1.一般用于修复GI角色,HI3 1.0角色,HSR角色轮廓线。\n2.用于修复模型由于TANGENT不正确导致的黑色色块儿问题，比如HSR的薄裙子可能会出现此问题。",
+        default=False,
+    ) # type: ignore
+
+    recalculate_color: bpy.props.BoolProperty(
+        name="算术平均归一化法线存入COLOR(全局)",
+        description="使用算术平均归一化重计算所有模型的COLOR值，勾选此项后无法精细控制具体某个模型是否计算，是偷懒选项,在不勾选时默认使用右键菜单中标记的选项，仅用于HI3 2.0角色修复轮廓线",
+        default=False,
+    ) # type: ignore
+
+    use_specific_generate_mod_folder_path: bpy.props.BoolProperty(
+        name="生成Mod到指定的文件夹中",
+        description="勾选后将生成Mod到你指定的文件夹中",
+        default=False,
+    ) # type: ignore
+
+    generate_mod_folder_path: bpy.props.StringProperty(
+        name="生成Mod文件夹路径",
+        description="选择的生成Mod的文件夹路径",
+        default="",
+        subtype='DIR_PATH',
+    ) # type: ignore
+
+    standalone_game_preset: bpy.props.EnumProperty(
+        name="独立模式游戏预设",
+        description="未安装SSMT4时(独立模式)使用的游戏预设，SSMT4配置存在时以SSMT4配置为准",
+        items=_standalone_game_preset_items,
+        default=LogicName.EFMI,
+        update=_update_standalone_game_preset,
+    ) # type: ignore
+
+    force_standalone_preset: bpy.props.BoolProperty(
+        name="强制使用独立预设",
+        description="忽略SSMT4配置，强制使用上方选择的游戏预设 (无SSMT4时无需开启)",
+        default=False,
+        update=_update_force_standalone_preset,
+    ) # type: ignore
+
+    workspace_source_mode: bpy.props.EnumProperty(
+        name="工作空间模式",
+        description="控制当前使用的工作空间来源",
+        items=[
+            ("SYNC", "同步SSMT选择", "使用 SSMT 配置文件中当前同步的工作空间"),
+            ("SPECIFIC", "使用指定工作空间", "从当前游戏配置下的工作空间列表中手动选择"),
+            ("CUSTOM", "使用自定义目录", "直接使用你指定的工作空间目录"),
+        ],
+        default="SYNC",
+    ) # type: ignore
+
+    specific_workspace_name: bpy.props.EnumProperty(
+        name="指定工作空间",
+        description="当前游戏配置下可选的工作空间列表",
+        items=_get_workspace_enum_items,
+    ) # type: ignore
+
+    custom_workspace_folder_path: bpy.props.StringProperty(
+        name="自定义工作空间目录",
+        description="手动指定工作空间目录路径",
+        default="",
+        subtype='DIR_PATH',
+    ) # type: ignore
+
+    import_merged_vgmap: bpy.props.BoolProperty(
+        name="使用融合统一顶点组",
+        description="导入时是否导入融合后的顶点组 (Unreal的合并顶点组技术会用到)，一般鸣潮Mod需要勾选来降低制作Mod的复杂度",
+        default=True,
+    ) # type: ignore
+
+    ignore_muted_shape_keys: bpy.props.BoolProperty(
+        name="忽略未启用的形态键",
+        description="勾选此项后，未勾选启用的形态键在生成Mod时会被忽略，勾选的形态键会参与生成Mod",
+        default=True,
+    ) # type: ignore
+
+    apply_all_modifiers: bpy.props.BoolProperty(
+        name="应用所有修改器",
+        description="勾选此项后，生成Mod之前会自动对物体应用所有修改器",
+        default=False,
+    ) # type: ignore
+
+    import_skip_empty_vertex_groups: bpy.props.BoolProperty(
+        name="跳过空顶点组",
+        description="勾选此项后，导入时会跳过空的顶点组",
+        default=True,
+    ) # type: ignore
+
+    export_add_missing_vertex_groups: bpy.props.BoolProperty(
+        name="导出时添加缺失顶点组",
+        description="勾选此项后，生成Mod时会自动重新排列并填补数字顶点组间的间隙空缺",
+        default=True,
+    ) # type: ignore
+
+    use_normal_map: bpy.props.BoolProperty(
+        name="自动上贴图时使用法线贴图",
+        description="启用后在导入模型时自动附加法线贴图节点，在材质预览模式下得到略微更好的视觉效果",
+        default=False,
+    ) # type: ignore
+
+    enable_non_mirror_workflow: bpy.props.BoolProperty(
+        name="非镜像工作流",
+        description="启用后，导入时会先将模型镜像、应用变换并翻转面；导出前处理时会对副本再次执行同样操作以恢复原始朝向",
+        default=True,
+    ) # type: ignore
+
+    enable_preprocess_cache: bpy.props.BoolProperty(
+        name="启用前处理缓存",
+        description="启用后，前处理结果会被缓存到本地文件。当物体数据未变化时，下次导出将直接使用缓存，减少重复计算",
+        default=True,
+    ) # type: ignore
+
+    enable_parallel_preprocess: bpy.props.BoolProperty(
+        name="启用并行前处理",
+        description="通过多个独立 Blender 子进程并行执行未命中的前处理任务，以提升大量物体场景下的处理速度",
+        default=False,
+        update=_update_parallel_preprocess_toggle,
+    ) # type: ignore
+
+    enable_parallel_export_rounds: bpy.props.BoolProperty(
+        name="启用并行多轮导出",
+        description="将多文件导出和形态键导出的中间轮次分发到多个 Blender 子进程并行执行。首轮与尾轮仍保留在主线程中",
+        default=False,
+        update=_update_parallel_preprocess_toggle,
+    ) # type: ignore
+
+    parallel_blender_executable: bpy.props.StringProperty(
+        name="Blender 可执行文件",
+        description="用于启动并行前处理子进程的 Blender 可执行文件路径。留空时会默认使用当前运行实例的路径",
+        default="",
+        subtype='FILE_PATH',
+    ) # type: ignore
+
+    parallel_preprocess_instances: bpy.props.IntProperty(
+        name="并行实例数",
+        description="用于并行前处理的最大 Blender 子进程数，同时作为任务分组上限",
+        default=_default_parallel_instance_count(),
+        min=1,
+        soft_max=16,
+    ) # type: ignore
+
+    parallel_preprocess_timeout_seconds: bpy.props.IntProperty(
+        name="单任务超时(秒)",
+        description="单个并行前处理任务允许执行的最长时间，超时后会终止并报错",
+        default=1800,
+        min=30,
+        soft_max=7200,
+    ) # type: ignore
+
+    parallel_preprocess_keep_temp_files: bpy.props.BoolProperty(
+        name="保留临时文件",
+        description="保留并行前处理生成的快照、任务清单与子工程结果，便于调试问题",
+        default=False,
+    ) # type: ignore
+
+    prefix_quick_apply_to_object_name: bpy.props.BoolProperty(
+        name="前缀写入物体名称",
+        description="勾选时直接替换物体名称中的前缀；取消勾选时仅把前缀写入对应的物体信息节点",
+        default=True,
+    ) # type: ignore
+
+    expand_import_quick_tools: bpy.props.BoolProperty(
+        name="展开导入子菜单",
+        description="展开后显示导入 FMT 与导入 SSMT 的快捷按钮",
+        default=False,
+    ) # type: ignore
+
+    expand_prefix_quick_ops: bpy.props.BoolProperty(
+        name="展开前缀快捷操作",
+        description="展开前缀快捷操作面板",
+        default=False,
+    ) # type: ignore
+
+    expand_preprocess_cache: bpy.props.BoolProperty(
+        name="展开前处理缓存",
+        description="展开前处理缓存面板",
+        default=False,
+    ) # type: ignore
+
+    expand_parallel_processing: bpy.props.BoolProperty(
+        name="展开并行处理",
+        description="展开并行处理面板",
+        default=False,
+    ) # type: ignore
+
+    deduplicate_POSITION: bpy.props.BoolProperty(
+        name="位置数据",
+        description="位置数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_NORMAL: bpy.props.BoolProperty(
+        name="法线数据",
+        description="法线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_TANGENT: bpy.props.BoolProperty(
+        name="切线数据",
+        description="切线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BINORMAL: bpy.props.BoolProperty(
+        name="副法线数据",
+        description="副法线数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_TEXCOORD: bpy.props.BoolProperty(
+        name="UV坐标数据",
+        description="UV坐标数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_COLOR: bpy.props.BoolProperty(
+        name="顶点颜色数据",
+        description="顶点颜色数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BLENDWEIGHT: bpy.props.BoolProperty(
+        name="骨骼权重数据",
+        description="骨骼权重数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    deduplicate_BLENDINDICES: bpy.props.BoolProperty(
+        name="骨骼索引数据",
+        description="骨骼索引数据是否参与顶点去重判断",
+        default=True,
+    ) # type: ignore
+
+    @classmethod
+    def _instance(cls):
+        return bpy.context.scene.global_properties
+
+    @classmethod
+    def open_mod_folder_after_generate_mod(cls):
+        return cls._instance().open_mod_folder_after_generate_mod
+
+    @classmethod
+    def zzz_use_slot_fix(cls):
+        return cls._instance().zzz_use_slot_fix
+
+    @classmethod
+    def gimi_use_orfix(cls):
+        return cls._instance().gimi_use_orfix
+
+    @classmethod
+    def forbid_auto_texture_ini(cls):
+        return cls._instance().forbid_auto_texture_ini
+
+    @classmethod
+    def use_rabbitfx_slot(cls):
+        return cls._instance().use_rabbitfx_slot
+
+    @classmethod
+    def generate_branch_mod_gui(cls):
+        try:
+            from ..blueprint.export_helper import BlueprintExportHelper
+            return BlueprintExportHelper.has_mod_panel_node()
+        except Exception:
+            return False
+
+    @classmethod
+    def generate_branch_mod_gui_flow_effect(cls):
+        try:
+            from ..blueprint.export_helper import BlueprintExportHelper
+            return BlueprintExportHelper.is_mod_panel_flow_effect_enabled()
+        except Exception:
+            return False
+
+    @classmethod
+    def recalculate_tangent(cls):
+        return cls._instance().recalculate_tangent
+
+    @classmethod
+    def recalculate_color(cls):
+        return cls._instance().recalculate_color
+
+    @classmethod
+    def use_specific_generate_mod_folder_path(cls):
+        return cls._instance().use_specific_generate_mod_folder_path
+
+    @classmethod
+    def generate_mod_folder_path(cls):
+        return cls._instance().generate_mod_folder_path
+
+    @classmethod
+    def standalone_game_preset(cls):
+        return cls._instance().standalone_game_preset
+
+    @classmethod
+    def force_standalone_preset(cls):
+        return cls._instance().force_standalone_preset
+
+    @classmethod
+    def workspace_source_mode(cls):
+        return cls._instance().workspace_source_mode
+
+    @classmethod
+    def specific_workspace_name(cls):
+        return cls._instance().specific_workspace_name
+
+    @classmethod
+    def custom_workspace_folder_path(cls):
+        return cls._instance().custom_workspace_folder_path
+
+    @classmethod
+    def import_merged_vgmap(cls):
+        return cls._instance().import_merged_vgmap
+
+    @classmethod
+    def ignore_muted_shape_keys(cls):
+        return cls._instance().ignore_muted_shape_keys
+
+    @classmethod
+    def apply_all_modifiers(cls):
+        return cls._instance().apply_all_modifiers
+
+    @classmethod
+    def import_skip_empty_vertex_groups(cls):
+        return cls._instance().import_skip_empty_vertex_groups
+
+    @classmethod
+    def export_add_missing_vertex_groups(cls):
+        return cls._instance().export_add_missing_vertex_groups
+
+    @classmethod
+    def use_normal_map(cls):
+        return cls._instance().use_normal_map
+
+    @classmethod
+    def enable_non_mirror_workflow(cls):
+        return cls._instance().enable_non_mirror_workflow
+
+    @classmethod
+    def enable_preprocess_cache(cls):
+        return cls._instance().enable_preprocess_cache
+
+    @classmethod
+    def enable_parallel_preprocess(cls):
+        return cls._instance().enable_parallel_preprocess
+
+    @classmethod
+    def enable_parallel_export_rounds(cls):
+        return cls._instance().enable_parallel_export_rounds
+
+    @classmethod
+    def parallel_blender_executable(cls):
+        return cls._instance().parallel_blender_executable
+
+    @classmethod
+    def parallel_preprocess_instances(cls):
+        return cls._instance().parallel_preprocess_instances
+
+    @classmethod
+    def parallel_preprocess_timeout_seconds(cls):
+        return cls._instance().parallel_preprocess_timeout_seconds
+
+    @classmethod
+    def parallel_preprocess_keep_temp_files(cls):
+        return cls._instance().parallel_preprocess_keep_temp_files
+
+    @classmethod
+    def prefix_quick_apply_to_object_name(cls):
+        return cls._instance().prefix_quick_apply_to_object_name
+
+    @classmethod
+    def selected_blueprint_name(cls):
+        return cls._instance().selected_blueprint_name
+
+    @classmethod
+    def get_deduplicate_element_set(cls) -> set:
+        instance = cls._instance()
+        element_set = set()
+        if instance.deduplicate_POSITION:
+            element_set.add("POSITION")
+        if instance.deduplicate_NORMAL:
+            element_set.add("NORMAL")
+        if instance.deduplicate_TANGENT:
+            element_set.add("TANGENT")
+        if instance.deduplicate_BINORMAL:
+            element_set.add("BINORMAL")
+        if instance.deduplicate_TEXCOORD:
+            element_set.add("TEXCOORD")
+        if instance.deduplicate_COLOR:
+            element_set.add("COLOR")
+        if instance.deduplicate_BLENDWEIGHT:
+            element_set.add("BLENDWEIGHT")
+        if instance.deduplicate_BLENDINDICES:
+            element_set.add("BLENDINDICES")
+        return element_set
+
+
+def register():
+    bpy.utils.register_class(GlobalProterties)
+    bpy.types.Scene.global_properties = bpy.props.PointerProperty(type=GlobalProterties)
+
+    # 注册时向GlobalConfig写入安全的独立模式默认预设(EFMI)，
+    # 保证未安装SSMT4时logic_name不为空；SSMT4配置存在时该值会被gamePreset覆盖
+    try:
+        from .global_config import GlobalConfig
+        GlobalConfig.set_standalone_logic_name(LogicName.EFMI)
+    except Exception:
+        pass
+
+
+def unregister():
+    del bpy.types.Scene.global_properties
+    bpy.utils.unregister_class(GlobalProterties)
