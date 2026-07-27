@@ -828,12 +828,11 @@ class ExportEFMI:
             target_file = os.path.join(res_dir, hlsl_file)
 
             if os.path.exists(source_file):
-                if not os.path.exists(target_file):
-                    shutil.copy2(source_file, target_file)
-                    print(f"[CrossIB] 已复制: {hlsl_file}")
-                    copied_count += 1
-                else:
-                    print(f"[CrossIB] 文件已存在，跳过: {hlsl_file}")
+                # 框架 HLSL 必须与生成的 ini 结构保持一致，始终覆盖旧副本
+                # (否则修复 shader 后重新生成 Mod 仍会残留过期版本，如旧的 b1 版 extract_cb1_vs)
+                shutil.copy2(source_file, target_file)
+                print(f"[CrossIB] 已复制: {hlsl_file}")
+                copied_count += 1
             else:
                 print(f"[CrossIB] 警告: 源文件不存在: {source_file}")
 
