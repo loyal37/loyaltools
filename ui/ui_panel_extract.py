@@ -136,6 +136,26 @@ def get_or_create_workspace_import_collection(context):
     return collection
 
 
+def create_new_workspace_import_collection(context):
+    '''
+    总是新建一个红色集合（不复用已有同名集合）。
+    Blender 的 collections.new() 在名称已存在时会自动追加 .001/.002 等数字后缀，
+    保证每次"导入"都产生独立的集合。
+    '''
+    collection_name = GlobalConfig.get_workspace_name()
+    if not collection_name:
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if workspace_folder:
+            collection_name = os.path.basename(workspace_folder.rstrip("\\/"))
+    if not collection_name:
+        raise ValueError("未解析到工作空间名称，无法创建导入集合。")
+
+    collection = bpy.data.collections.new(collection_name)  # Blender 自动编号
+    collection.color_tag = CollectionColor.Red
+    context.scene.collection.children.link(collection)
+    return collection
+
+
 # 帧模型解析较慢 (大型Dump约10-20秒)，同一个Dump目录缓存一个提取器实例，
 # log.txt 的修改时间变化时自动失效 (只保留最近一个，避免占用过多内存)
 _EXTRACTOR_CACHE: dict = {}
@@ -207,7 +227,8 @@ def _resolve_single_object_group(tree, output_node, group_label, group_y):
     return group_node
 
 
-def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict):
+def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict,
+                               tree_name_override=None):
     '''
     (提取自动导入成功后调用) 把导入的物体接入当前工作空间的 SSMT 蓝图节点树。
     树的命名和选中方式与"一键导入SSMT工作空间内容"保持一致
@@ -224,19 +245,27 @@ def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict
     返回蓝图名称；任何失败只打印中文警告并返回 None (不影响已完成的导入)。
     '''
     try:
-        tree_name = GlobalConfig.get_workspace_name()
-        if not tree_name:
-            workspace_folder = GlobalConfig.path_workspace_folder()
-            if workspace_folder:
-                tree_name = os.path.basename(workspace_folder.rstrip("\\/"))
-        if not tree_name:
-            print("[LoyalTools提取] 未解析到工作空间名称，跳过蓝图节点自动连接。")
-            return None
+        if tree_name_override is not None:
+            # 强制新建蓝图树（用于"导入"按钮的重复导入场景）：
+            # tree_name_override 是本次新建集合的实际名称（已含 .001 等后缀），
+            # 直接用它命名新树，不查找也不复用已有树。
+            tree_name = tree_name_override
+            tree = None
+        else:
+            tree_name = GlobalConfig.get_workspace_name()
+            if not tree_name:
+                workspace_folder = GlobalConfig.path_workspace_folder()
+                if workspace_folder:
+                    tree_name = os.path.basename(workspace_folder.rstrip("\\/"))
+            if not tree_name:
+                print("[LoyalTools提取] 未解析到工作空间名称，跳过蓝图节点自动连接。")
+                return None
 
-        tree = bpy.data.node_groups.get(tree_name)
-        if tree is not None and getattr(tree, "bl_idname", "") != 'SSMTBlueprintTreeType':
-            print("[LoyalTools提取] 已存在同名的非SSMT蓝图节点树 \"" + tree_name + "\"，跳过蓝图节点自动连接。")
-            return None
+            tree = bpy.data.node_groups.get(tree_name)
+            if tree is not None and getattr(tree, "bl_idname", "") != 'SSMTBlueprintTreeType':
+                print("[LoyalTools提取] 已存在同名的非SSMT蓝图节点树 \"" + tree_name + "\"，跳过蓝图节点自动连接。")
+                return None
+
         if tree is None:
             tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
             tree.use_fake_user = True
@@ -691,9 +720,10 @@ class LoyalImportWorkspace(bpy.types.Operator):
         except Exception as e:
             print("[LoyalTools导入] 读取别名配置失败 (按无别名处理): " + repr(e))
 
-        # 获取/创建导入集合
+        # 每次导入都新建一个集合（Blender 自动追加 .001/.002 等后缀），
+        # 避免重复导入的物体混入同一个集合
         try:
-            collection = get_or_create_workspace_import_collection(context)
+            collection = create_new_workspace_import_collection(context)
         except ValueError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -728,6 +758,7 @@ class LoyalImportWorkspace(bpy.types.Operator):
 
         blueprint_tree_name = wire_objects_into_blueprint(
             context, imported_entries, drawib_aliasname_dict,
+            tree_name_override=collection_name,
         )
 
         msg = "已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\""
