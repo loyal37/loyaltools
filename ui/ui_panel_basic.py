@@ -74,7 +74,7 @@ class PanelBasicInformation(bpy.types.Panel):
         ssmt4_available = GlobalConfig.is_ssmt4_available()
         current_workspace_name = GlobalConfig.get_workspace_name()
 
-        layout.label(text="LoyalTools v1.3.2", icon="INFO")
+        layout.label(text="LoyalTools v1.3.3", icon="INFO")
         if ssmt4_available:
             layout.label(text=TR.translate("SSMT缓存文件夹路径: ") + GlobalConfig.ssmtlocation)
             layout.label(text=TR.translate("当前配置名称: ") + GlobalConfig.gamename)

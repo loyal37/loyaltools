@@ -20,9 +20,6 @@ from ..utils.collection_utils import CollectionColor, CollectionUtils
 from .ui_prefix_quick_ops import PrefixQuickOpsHelper
 
 
-# DrawIB 列表输出到的文本数据块名称
-DRAWIB_LIST_TEXT_NAME = "LoyalTools_DrawIB列表"
-
 # DrawIB 必须是 8 位十六进制 (3dmigoto CRC32C hash)
 DRAWIB_PATTERN = re.compile(r'^[0-9a-fA-F]{8}$')
 
@@ -372,16 +369,19 @@ class LoyalExtractProperties(bpy.types.PropertyGroup):
         options={'HIDDEN'},
     ) # type: ignore
 
+    # 以下两个属性已不在 UI 中显示，保留仅为向后兼容 (.blend 文件不报错)
     copy_textures: bpy.props.BoolProperty(
         name="提取贴图",
-        description="提取时把该DrawIB用到的贴图复制到工作空间的TYPE_文件夹中",
+        description="(已废弃 UI 控件，提取始终复制贴图)",
         default=True,
+        options={'HIDDEN'},
     ) # type: ignore
 
     auto_import: bpy.props.BoolProperty(
         name="提取后自动导入",
-        description="提取完成后自动把生成的子网格导入到以工作空间命名的红色集合中 (已存在则复用)，并接入SSMT蓝图节点",
+        description="(已废弃 UI 控件，提取始终自动导入)",
         default=True,
+        options={'HIDDEN'},
     ) # type: ignore
 
     # 仅由操作符写入，用于在面板上展示最近一次提取结果 (可含多行，用\n分隔)
@@ -482,72 +482,6 @@ class LoyalExtractIBMove(bpy.types.Operator):
 # 主操作符
 # ----------------------------------------------------------------------
 
-class LoyalListDumpDrawIBs(bpy.types.Operator):
-    bl_idname = "loyal.list_dump_drawibs"
-    bl_label = "列出Dump中的DrawIB"
-    bl_description = "解析帧分析Dump，按索引数从大到小列出所有DrawIB，结果写入文本编辑器的 " + DRAWIB_LIST_TEXT_NAME
-
-    def execute(self, context):
-        props = context.scene.loyal_extract_props
-
-        try:
-            dump_folder = resolve_dump_folder(props)
-        except ValueError as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-
-        # 延迟导入，避免提取模块的导入失败影响插件注册
-        try:
-            from ..extract.dump_workspace_extractor import DumpWorkspaceExtractor, ExtractError
-        except Exception as e:
-            self.report({'ERROR'}, "无法加载提取模块: " + repr(e))
-            return {'CANCELLED'}
-
-        try:
-            extractor = get_cached_extractor(dump_folder)
-            summaries = extractor.list_draw_ibs()
-        except ExtractError as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-        except Exception as e:
-            self.report({'ERROR'}, "解析Dump失败: " + repr(e))
-            return {'CANCELLED'}
-
-        if not summaries:
-            self.report({'WARNING'}, "该Dump中没有找到任何DrawIndexedInstanced绘制调用。")
-            return {'CANCELLED'}
-
-        # 写入文本数据块，方便用户在文本编辑器中查看并复制hash
-        lines = []
-        lines.append("Dump目录: " + dump_folder)
-        lines.append("共找到 " + str(len(summaries)) + " 个DrawIB (按总索引数从大到小排序):")
-        lines.append("")
-        lines.append("DrawIB    绘制次数  总索引数    骨骼权重  贴图数")
-        lines.append("-" * 52)
-        for summary in summaries:
-            lines.append("{0}  {1:>7}  {2:>9}   {3}      {4:>4}".format(
-                summary.ib_hash,
-                summary.draw_call_count,
-                summary.total_index_count,
-                "有" if summary.has_blend else "无",
-                summary.texture_count,
-            ))
-
-        text_block = bpy.data.texts.get(DRAWIB_LIST_TEXT_NAME)
-        if text_block is None:
-            text_block = bpy.data.texts.new(DRAWIB_LIST_TEXT_NAME)
-        text_block.clear()
-        text_block.write("\n".join(lines) + "\n")
-
-        top = summaries[0]
-        self.report(
-            {'INFO'},
-            "共 " + str(len(summaries)) + " 个DrawIB，最大: " + top.ib_hash
-            + " (索引数" + str(top.total_index_count) + ")，完整列表见文本编辑器 \"" + DRAWIB_LIST_TEXT_NAME + "\"",
-        )
-        return {'FINISHED'}
-
-
 class LoyalExtractFromDump(bpy.types.Operator):
     bl_idname = "loyal.extract_from_dump"
     bl_label = "提取"
@@ -589,7 +523,7 @@ class LoyalExtractFromDump(bpy.types.Operator):
             result = extractor.extract(
                 ib_hashes=ib_hashes,
                 workspace_folder=workspace_folder,
-                copy_textures=props.copy_textures,
+                copy_textures=True,
                 aliases=aliases or None,
             )
         except ExtractError as e:
@@ -610,62 +544,62 @@ class LoyalExtractFromDump(bpy.types.Operator):
             self.report({'ERROR'}, message)
             return {'CANCELLED'}
 
-        # 5.自动导入到以工作空间命名的红色集合 (已存在则复用)，并接入蓝图节点
+        # 5.导入到以工作空间命名的红色集合 (已存在则复用)，并接入蓝图节点
         imported_objects = []
         imported_entries = []  # [(unique_str, obj)] 供蓝图连线使用
         import_error_count = 0
         blueprint_tree_name = None
         collection_name = ""
-        if props.auto_import:
-            # 本次填写的别名已由extract()写入工作空间Config.json，这里读回合并后的
-            # 完整别名表 (含之前提取留下的别名)，保证重命名/蓝图分组和"一键导入"行为一致
-            drawib_aliasname_dict = {}
+
+        # 本次填写的别名已由extract()写入工作空间Config.json，这里读回合并后的
+        # 完整别名表 (含之前提取留下的别名)，保证重命名/蓝图分组和"一键导入"行为一致
+        drawib_aliasname_dict = {}
+        try:
+            drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
+        except Exception as e:
+            print("[LoyalTools提取] 读取别名配置失败 (按无别名处理): " + repr(e))
+        drawib_aliasname_dict.update(aliases)
+
+        # 集合命名/颜色与"一键导入"一致：工作空间名 + 红色，重复提取时复用同一个集合
+        try:
+            collection = get_or_create_workspace_import_collection(context)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        collection_name = collection.name
+
+        for json_path in result.json_paths:
+            unique_str = os.path.splitext(os.path.basename(json_path))[0]
             try:
-                drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
-            except Exception as e:
-                print("[LoyalTools提取] 读取别名配置失败 (按无别名处理): " + repr(e))
-            drawib_aliasname_dict.update(aliases)
-
-            # 集合命名/颜色与"一键导入"一致：工作空间名 + 红色，重复提取时复用同一个集合
-            try:
-                collection = get_or_create_workspace_import_collection(context)
-            except ValueError as e:
-                self.report({'ERROR'}, str(e))
-                return {'CANCELLED'}
-            collection_name = collection.name
-
-            for json_path in result.json_paths:
-                unique_str = os.path.splitext(os.path.basename(json_path))[0]
-                try:
-                    # create_mesh_from_json 会以unique_str作为物体名称，
-                    # 该前缀是后续生成Mod时定位工作空间文件夹的关键，不能改名去掉
-                    imported_obj = SSMTImportHelper.create_mesh_from_json(
-                        json_file_path=json_path,
-                        import_collection=collection,
-                    )
-                    if imported_obj is not None:
-                        # 物体名称保持纯 unique_str (drawib-indexcount-firstindex)，
-                        # 不追加别名后缀；别名仅用于蓝图分组标签与工作空间Config.json
-                        if imported_obj.name != unique_str:
-                            imported_obj.name = unique_str
-                            imported_obj.data.name = imported_obj.name
-                        imported_objects.append(imported_obj)
-                        imported_entries.append((unique_str, imported_obj))
-                except Exception as e:
-                    import_error_count += 1
-                    print("[LoyalTools提取] 导入失败 " + json_path + ": " + repr(e))
-
-            if imported_objects:
-                if GlobalProterties.enable_non_mirror_workflow():
-                    NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
-                # 用户习惯导入后为全选状态，同时注册前缀快捷操作条目方便后续导出
-                CollectionUtils.select_collection_objects(collection)
-                PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
-
-                # 物体导入后自动接入蓝图节点 (失败只打印警告，不影响导入结果)
-                blueprint_tree_name = wire_objects_into_blueprint(
-                    context, imported_entries, drawib_aliasname_dict,
+                # create_mesh_from_json 会以unique_str作为物体名称，
+                # 该前缀是后续生成Mod时定位工作空间文件夹的关键，不能改名去掉
+                imported_obj = SSMTImportHelper.create_mesh_from_json(
+                    json_file_path=json_path,
+                    import_collection=collection,
                 )
+                if imported_obj is not None:
+                    # 物体名称保持纯 unique_str (drawib-indexcount-firstindex)，
+                    # 不追加别名后缀；别名仅用于蓝图分组标签与工作空间Config.json
+                    if imported_obj.name != unique_str:
+                        imported_obj.name = unique_str
+                        imported_obj.data.name = imported_obj.name
+                    imported_objects.append(imported_obj)
+                    imported_entries.append((unique_str, imported_obj))
+            except Exception as e:
+                import_error_count += 1
+                print("[LoyalTools提取] 导入失败 " + json_path + ": " + repr(e))
+
+        if imported_objects:
+            if GlobalProterties.enable_non_mirror_workflow():
+                NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
+            # 用户习惯导入后为全选状态，同时注册前缀快捷操作条目方便后续导出
+            CollectionUtils.select_collection_objects(collection)
+            PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
+
+            # 物体导入后自动接入蓝图节点 (失败只打印警告，不影响导入结果)
+            blueprint_tree_name = wire_objects_into_blueprint(
+                context, imported_entries, drawib_aliasname_dict,
+            )
 
         # 6.汇总结果
         # 贴图数量仅作展示，统计各子网格文件夹下的贴图文件
@@ -679,14 +613,13 @@ class LoyalExtractFromDump(bpy.types.Operator):
                             texture_count += 1
 
         report_lines = ["提取完成: " + str(len(result.unique_strs)) + " 个子网格, 贴图 " + str(texture_count) + " 张"]
-        if props.auto_import:
-            report_lines.append("已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\"")
-            if import_error_count > 0:
-                report_lines.append("有 " + str(import_error_count) + " 个子网格导入失败，详见控制台")
-            if blueprint_tree_name:
-                report_lines.append("蓝图节点已连接: \"" + blueprint_tree_name + "\"，可在基础信息面板直接生成所选蓝图Mod")
-            elif imported_objects:
-                report_lines.append("蓝图节点连接失败，详见控制台 (不影响手动连线)")
+        report_lines.append("已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\"")
+        if import_error_count > 0:
+            report_lines.append("有 " + str(import_error_count) + " 个子网格导入失败，详见控制台")
+        if blueprint_tree_name:
+            report_lines.append("蓝图节点已连接: \"" + blueprint_tree_name + "\"，可在基础信息面板直接生成所选蓝图Mod")
+        elif imported_objects:
+            report_lines.append("蓝图节点连接失败，详见控制台 (不影响手动连线)")
         if result.warnings:
             report_lines.append("警告 " + str(len(result.warnings)) + " 条 (详见控制台):")
             for warning in result.warnings[:5]:
@@ -696,6 +629,111 @@ class LoyalExtractFromDump(bpy.types.Operator):
 
         props.last_report = "\n".join(report_lines)
         self.report({'INFO'}, report_lines[0])
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------
+# 独立导入操作符（不重新提取，仅把工作空间现有文件导入到场景）
+# ----------------------------------------------------------------------
+
+class LoyalImportWorkspace(bpy.types.Operator):
+    bl_idname = "loyal.import_workspace"
+    bl_label = "导入"
+    bl_description = "把当前工作空间中已提取的所有子网格导入到场景，可多次重复执行（不会重新提取）"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import json as _json
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if workspace_folder == "":
+            self.report({'ERROR'}, "未解析到工作空间，请在\"基础信息\"面板中把工作空间来源切换为自定义目录并填写路径。")
+            return {'CANCELLED'}
+
+        import_json_path = os.path.join(workspace_folder, "Import.json")
+        if not os.path.isfile(import_json_path):
+            self.report({'ERROR'}, "工作空间中没有找到 Import.json，请先执行提取。")
+            return {'CANCELLED'}
+
+        try:
+            with open(import_json_path, 'r', encoding='utf-8') as f:
+                import_map = _json.load(f)  # {unique_str: gametype_name}
+        except Exception as e:
+            self.report({'ERROR'}, "读取 Import.json 失败: " + repr(e))
+            return {'CANCELLED'}
+
+        if not import_map:
+            self.report({'WARNING'}, "Import.json 为空，工作空间中没有已提取的子网格，请先执行提取。")
+            return {'CANCELLED'}
+
+        # 根据 Import.json 拼出各子网格的 SubmeshJson 路径
+        json_paths = []
+        for unique_str, gametype_name in import_map.items():
+            json_path = os.path.join(
+                workspace_folder, unique_str,
+                "TYPE_" + gametype_name,
+                unique_str + ".json",
+            )
+            if os.path.isfile(json_path):
+                json_paths.append(json_path)
+            else:
+                print("[LoyalTools导入] 找不到子网格JSON: " + json_path)
+
+        if not json_paths:
+            self.report({'ERROR'}, "工作空间中没有找到有效的子网格 JSON 文件，请先执行提取。")
+            return {'CANCELLED'}
+
+        # 读取别名配置
+        drawib_aliasname_dict = {}
+        try:
+            drawib_aliasname_dict = WorkSpaceHelper.get_drawib_aliasname_dict()
+        except Exception as e:
+            print("[LoyalTools导入] 读取别名配置失败 (按无别名处理): " + repr(e))
+
+        # 获取/创建导入集合
+        try:
+            collection = get_or_create_workspace_import_collection(context)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+        collection_name = collection.name
+
+        # 逐个导入
+        imported_objects = []
+        imported_entries = []
+        import_error_count = 0
+        for json_path in json_paths:
+            unique_str = os.path.splitext(os.path.basename(json_path))[0]
+            try:
+                imported_obj = SSMTImportHelper.create_mesh_from_json(
+                    json_file_path=json_path,
+                    import_collection=collection,
+                )
+                if imported_obj is not None:
+                    if imported_obj.name != unique_str:
+                        imported_obj.name = unique_str
+                        imported_obj.data.name = imported_obj.name
+                    imported_objects.append(imported_obj)
+                    imported_entries.append((unique_str, imported_obj))
+            except Exception as e:
+                import_error_count += 1
+                print("[LoyalTools导入] 导入失败 " + json_path + ": " + repr(e))
+
+        if imported_objects:
+            if GlobalProterties.enable_non_mirror_workflow():
+                NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
+            CollectionUtils.select_collection_objects(collection)
+            PrefixQuickOpsHelper.merge_prefixes_from_objects(context, imported_objects)
+
+        blueprint_tree_name = wire_objects_into_blueprint(
+            context, imported_entries, drawib_aliasname_dict,
+        )
+
+        msg = "已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\""
+        if import_error_count > 0:
+            msg += "，" + str(import_error_count) + " 个失败 (详见控制台)"
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -743,15 +781,13 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_UP').direction = 'UP'
         button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_DOWN').direction = 'DOWN'
 
-        toggle_row = layout.row(align=True)
-        toggle_row.prop(props, "copy_textures", toggle=True)
-        toggle_row.prop(props, "auto_import", toggle=True)
-
         extract_row = layout.row()
         extract_row.scale_y = 1.5
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
 
-        layout.operator(LoyalListDumpDrawIBs.bl_idname, text="列出Dump中的DrawIB", icon='VIEWZOOM')
+        import_row = layout.row()
+        import_row.scale_y = 1.2
+        import_row.operator(LoyalImportWorkspace.bl_idname, text="导入", icon='MESH_DATA')
 
         if props.last_report:
             report_box = layout.box()
@@ -766,8 +802,8 @@ classes = (
     LoyalExtractIBAdd,
     LoyalExtractIBRemove,
     LoyalExtractIBMove,
-    LoyalListDumpDrawIBs,
     LoyalExtractFromDump,
+    LoyalImportWorkspace,
     LOYAL_PT_ExtractPanel,
 )
 
