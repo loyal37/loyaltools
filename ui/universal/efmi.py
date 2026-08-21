@@ -14,6 +14,10 @@ from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...utils.timer_utils import TimerUtils
 from ...common.efmi_merged_skeleton import load_profile
+from ...common.efmi_merged_texture import (
+    copy_merged_auto_textures,
+    resolve_merged_auto_textures,
+)
 
 import os
 import re
@@ -131,6 +135,7 @@ class ExportEFMI:
             submesh_model_list=self.submesh_model_list,
             combine_ib=False,
         )
+        self.merged_auto_texture_binding_dict = {}
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
         print(f"[CrossIB EFMI] 初始化: has_cross_ib={self.has_cross_ib}")
@@ -599,8 +604,8 @@ class ExportEFMI:
     ):
         if GlobalProterties.forbid_auto_texture_ini() or drawib_model is None:
             return
-        texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(
-            submesh_model
+        texture_markup_info_list = self._get_merged_texture_binding_list(
+            submesh_model, drawib_model
         )
         if GlobalProterties.use_rabbitfx_slot():
             for texture_info in texture_markup_info_list:
@@ -631,6 +636,59 @@ class ExportEFMI:
                 section.append(
                     indent + texture_info.mark_slot + " = " + texture_info.get_resource_name()
                 )
+
+    def _get_merged_texture_binding_list(self, submesh_model, drawib_model):
+        manual_bindings = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+        if not self.merged_skeleton_mode:
+            return manual_bindings
+
+        unique_str = submesh_model.unique_str
+        cached_bindings = self.merged_auto_texture_binding_dict.get(unique_str)
+        if cached_bindings is None:
+            manual_slot_bindings = [
+                binding for binding in manual_bindings
+                if getattr(binding, "mark_type", "") == "Slot"
+            ]
+            blocked_map_names = {
+                binding.mark_name for binding in manual_slot_bindings
+            }
+            blocked_slots = {
+                binding.mark_slot for binding in manual_slot_bindings
+            }
+            texture_folder = os.path.join(
+                GlobalConfig.path_workspace_folder(),
+                unique_str,
+                "TYPE_" + submesh_model.d3d11_game_type.GameTypeName,
+            )
+            cached_bindings = resolve_merged_auto_textures(
+                texture_folder=texture_folder,
+                unique_str=unique_str,
+                blocked_map_names=blocked_map_names,
+                blocked_slots=blocked_slots,
+            )
+            self.merged_auto_texture_binding_dict[unique_str] = cached_bindings
+            if cached_bindings:
+                print(
+                    "[MergedSkeleton] 自动贴图 " + unique_str + ": "
+                    + ", ".join(
+                        binding.mark_name + "@" + binding.mark_slot
+                        for binding in cached_bindings
+                    )
+                )
+        return list(manual_bindings) + list(cached_bindings)
+
+    def _copy_merged_auto_texture_files(self):
+        if GlobalProterties.forbid_auto_texture_ini():
+            return
+        output_folder = GlobalConfig.path_generatemod_texture_folder(draw_ib="MergedSkeleton")
+        copied_count = 0
+        for bindings in self.merged_auto_texture_binding_dict.values():
+            copied_count += copy_merged_auto_textures(bindings, output_folder)
+        print(
+            "[MergedSkeleton] 自动贴图已准备，组件数: "
+            + str(len(self.merged_auto_texture_binding_dict))
+            + "，新复制文件: " + str(copied_count)
+        )
 
     def _append_merged_draw_lines(self, section, drawcalls):
         for line in M_IniHelper.get_drawindexed_str_list(drawcalls):
@@ -1008,8 +1066,8 @@ class ExportEFMI:
             appended_names = set()
             for drawib_model in self.drawib_model_list:
                 for submesh in drawib_model.submesh_model_list:
-                    for texture_info in drawib_model.get_submesh_texture_markup_info_list(
-                        submesh
+                    for texture_info in self._get_merged_texture_binding_list(
+                        submesh, drawib_model
                     ):
                         if getattr(texture_info, "mark_type", "") != "Slot":
                             continue
@@ -1036,6 +1094,7 @@ class ExportEFMI:
 
         for drawib_model in self.drawib_model_list:
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
+        self._copy_merged_auto_texture_files()
         GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
         M_IniHelper.add_branch_key_sections(
             ini_builder=ini_builder,

@@ -104,6 +104,10 @@ _IB_NUMPY_TYPES = {
 # 有效的贴图文件后缀 (dump_tex dds / jpg)
 _TEXTURE_SUFFIXES = ('.dds', '.jpg')
 
+# 与 EFMI-Tools 0.6.2 默认提取设置一致。该过滤只在骨骼合并提取中使用；
+# 普通 DrawIB 提取仍保留现有的完整贴图候选，供用户手动标记。
+_EFMI_MERGED_TEXTURE_MIN_FILE_SIZE = 256 * 1024
+
 # 权重相关语义
 _BLEND_SEMANTICS = (Semantic.Blendindices, Semantic.Blendweight, Semantic.Blendweights)
 
@@ -579,6 +583,18 @@ class DumpWorkspaceExtractor:
 
             try:
                 build = self._build_submesh(matching_records, unique_str, warnings)
+                if copy_textures:
+                    # MigotoComponent.textures 来自 EFMI-Tools 对当前组件的显式资源归属，
+                    # 比按同 IB 的所有帧调用聚合更准确，可排除其他组件/阴影/屏幕通道贴图。
+                    # 只替换骨骼合并 build 的贴图列表，不触碰普通提取路径。
+                    (
+                        build.texture_entries,
+                        build.call_texture_entries,
+                    ) = self._collect_merged_component_textures(
+                        component=component,
+                        unique_str=unique_str,
+                        warnings=warnings,
+                    )
                 profile_component["vertex_count"] = int(build.vertex_count)
                 json_path = self._write_submesh(
                     build=build,
@@ -625,6 +641,81 @@ class DumpWorkspaceExtractor:
             warnings=warnings,
             workspace_folder=workspace_folder,
         )
+
+    def _collect_merged_component_textures(
+        self,
+        component,
+        unique_str: str,
+        warnings: list[str],
+    ) -> tuple[list[_TextureEntry], list[_TextureEntry]]:
+        '''
+        按 EFMI-Tools 的组件资源归属和默认过滤规则生成贴图条目。
+
+        component.textures 只包含该 MigotoComponent 在显式资源调用中实际使用的
+        ResourceSlot -> Resource 列表，因此不会把帧中相同 IB 或辅助通道的无关贴图
+        混入当前 LoyalTools unique_str。不同组件使用同一 hash 时仍会各自在自己的
+        TYPE_ 目录保留一份候选文件，满足每个 IB 独立编辑贴图的要求。
+        '''
+        texture_filter = TextureFilter(
+            exclude_extensions=["jpg", "buf"],
+            exclude_hashes=[],
+            min_file_size=_EFMI_MERGED_TEXTURE_MIN_FILE_SIZE,
+        )
+
+        call_texture_entries: list[_TextureEntry] = []
+        seen_call_entries = set()
+        for slot, resources in component.textures.items():
+            if slot.shader_type != ShaderType.Pixel or slot.slot_type != SlotType.Texture:
+                continue
+            for resource in resources:
+                tex_hash = str(resource.hash or "").lower()
+                if not tex_hash or tex_hash.startswith("unknown_"):
+                    continue
+                try:
+                    if not texture_filter.is_valid_texture(resource):
+                        continue
+                except (OSError, ValueError, TypeError) as exc:
+                    warnings.append(
+                        unique_str + " 骨骼合并贴图过滤失败 " + tex_hash + ": " + repr(exc)
+                    )
+                    continue
+
+                src_path = Path(resource.bin_path_deduped)
+                format_name = "UNKNOWN"
+                data_descriptor = resource.data_descriptor
+                if data_descriptor is not None and getattr(data_descriptor, "data_format", None):
+                    format_name = str(data_descriptor.data_format)
+
+                usage_descriptor = resource.usage_descriptor
+                call_id = 0
+                if usage_descriptor is not None and getattr(usage_descriptor, "call_id", None) is not None:
+                    call_id = int(usage_descriptor.call_id)
+                dedupe_key = (call_id, int(slot.slot_id), tex_hash)
+                if dedupe_key in seen_call_entries:
+                    continue
+                seen_call_entries.add(dedupe_key)
+                call_texture_entries.append(_TextureEntry(
+                    slot_id=int(slot.slot_id),
+                    tex_hash=tex_hash,
+                    format_name=format_name,
+                    call_id=call_id,
+                    draw_call_id=call_id,
+                    src_path=src_path,
+                ))
+
+        call_texture_entries.sort(
+            key=lambda entry: (entry.draw_call_id, entry.slot_id, entry.tex_hash)
+        )
+        texture_entries: list[_TextureEntry] = []
+        seen_texture_entries = set()
+        for entry in call_texture_entries:
+            dedupe_key = (entry.slot_id, entry.tex_hash)
+            if dedupe_key in seen_texture_entries:
+                continue
+            seen_texture_entries.add(dedupe_key)
+            texture_entries.append(entry)
+        texture_entries.sort(key=lambda entry: (entry.slot_id, entry.tex_hash))
+        return texture_entries, call_texture_entries
 
     @staticmethod
     def _component_resources(component):
@@ -1328,7 +1419,12 @@ class DumpWorkspaceExtractor:
 
         # 贴图
         if copy_textures and build.texture_entries:
-            self._write_textures(build, type_folder, warnings)
+            self._write_textures(
+                build,
+                type_folder,
+                warnings,
+                merged_component_scoped=merged_component is not None,
+            )
 
         # SubmeshJson
         category_hash = {slot_data.category: slot_data.vb_hash for slot_data in build.slot_datas}
@@ -1368,7 +1464,13 @@ class DumpWorkspaceExtractor:
 
         return json_path
 
-    def _write_textures(self, build: _SubmeshBuild, type_folder: str, warnings: list[str]):
+    def _write_textures(
+        self,
+        build: _SubmeshBuild,
+        type_folder: str,
+        warnings: list[str],
+        merged_component_scoped: bool = False,
+    ):
         '''
         复制贴图到 TYPE_ 目录:
         - 每个 hash 只保留一份文件, 命名 "t-<hash>-<FORMAT><后缀>"
@@ -1447,8 +1549,29 @@ class DumpWorkspaceExtractor:
             "slots": slot_map,
             "calls": call_map,
         }
+        if merged_component_scoped:
+            texture_slots_json["EFMIMergedComponentScoped"] = True
+            texture_slots_json["EFMITextureFilter"] = {
+                "exclude_extensions": ["jpg", "buf"],
+                "min_file_size": _EFMI_MERGED_TEXTURE_MIN_FILE_SIZE,
+                "square_only": True,
+            }
         with open(os.path.join(type_folder, "TextureSlots.json"), 'w', encoding='utf-8') as f:
             json.dump(texture_slots_json, f, ensure_ascii=False, indent=4)
+
+        if merged_component_scoped:
+            # 骨骼合并工作空间直接准备与普通流程同名的独立贴图，Blender 材质导入、
+            # 用户后续编辑以及自动导出都读取这些 canonical 文件。
+            from ..common.efmi_merged_texture import (
+                copy_merged_auto_textures,
+                resolve_merged_auto_textures,
+            )
+            merged_bindings = resolve_merged_auto_textures(
+                texture_folder=type_folder,
+                unique_str=build.unique_str,
+            )
+            copy_merged_auto_textures(merged_bindings, type_folder)
+            return
 
         # 漫反射启发式: 最小槽位的 sRGB 贴图优先, 否则最小槽位贴图
         diffuse_entry = None
