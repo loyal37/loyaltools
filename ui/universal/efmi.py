@@ -720,6 +720,17 @@ class ExportEFMI:
         submesh_by_unique = {
             submesh.unique_str: submesh for submesh in self.submesh_model_list
         }
+        exported_components = [
+            component for component in profile["components"]
+            if component["unique_str"] in submesh_by_unique
+        ]
+        omitted_component_count = len(profile["components"]) - len(exported_components)
+        if omitted_component_count:
+            print(
+                "[MergedSkeleton] 蓝图中未包含的 "
+                + str(omitted_component_count)
+                + " 个组件将保留原版绘制，不生成 EntryPoint 或绘制回调。"
+            )
         workspace_name = GlobalConfig.get_workspace_name().replace('"', "'")
 
         M_IniHelper.generate_hash_style_texture_ini(
@@ -775,9 +786,9 @@ class ExportEFMI:
         command_lists.append("endif")
         command_lists.new_line()
 
-        for component in profile["components"]:
+        for component in exported_components:
             component_id = component["component_id"]
-            submesh = submesh_by_unique.get(component["unique_str"])
+            submesh = submesh_by_unique[component["unique_str"]]
             command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
             command_lists.append("run = CommandList\\EFMIv1\\OverrideTextures")
             if component["cpu_posed"]:
@@ -786,24 +797,21 @@ class ExportEFMI:
                 continue
 
             current_key = "indexcount_" + str(component["index_count"])
-            if submesh is not None:
-                self._append_merged_buffer_bindings(command_lists, submesh)
-                self._append_merged_slot_texture_bindings(
-                    command_lists,
-                    submesh,
-                    drawib_drawibmodel_dict.get(submesh.match_draw_ib),
+            self._append_merged_buffer_bindings(command_lists, submesh)
+            self._append_merged_slot_texture_bindings(
+                command_lists,
+                submesh,
+                drawib_drawibmodel_dict.get(submesh.match_draw_ib),
+            )
+            current_key = self._get_submesh_ib_key(submesh)
+            if current_key in self.cross_ib_info_dict:
+                _, own_drawcalls = self._split_drawcalls_by_cross_ib(
+                    submesh.drawcall_model_list,
+                    source_ib_key=current_key,
                 )
-                current_key = self._get_submesh_ib_key(submesh)
-                if current_key in self.cross_ib_info_dict:
-                    _, own_drawcalls = self._split_drawcalls_by_cross_ib(
-                        submesh.drawcall_model_list,
-                        source_ib_key=current_key,
-                    )
-                else:
-                    own_drawcalls = submesh.drawcall_model_list
-                self._append_merged_draw_lines(command_lists, own_drawcalls)
             else:
-                command_lists.append("; 当前组件没有蓝图自定义网格，保留用于骨骼与跨 IB 目标回调")
+                own_drawcalls = submesh.drawcall_model_list
+            self._append_merged_draw_lines(command_lists, own_drawcalls)
             self._append_merged_incoming_cross_ib_draws(
                 command_lists,
                 current_key,
@@ -896,9 +904,9 @@ class ExportEFMI:
         ini_builder.append_section(command_lists)
 
         entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
-        for component in profile["components"]:
+        for component in exported_components:
             component_id = component["component_id"]
-            submesh = submesh_by_unique.get(component["unique_str"])
+            submesh = submesh_by_unique[component["unique_str"]]
             entrypoints.append(
                 "[TextureOverride_EntryPoint_Component" + str(component_id) + "]"
             )
@@ -913,14 +921,14 @@ class ExportEFMI:
             entrypoints.append(
                 "    $\\EFMIv1\\gpu_posed = " + str(int(not component["cpu_posed"]))
             )
-            if submesh is None or component["cpu_posed"]:
+            if component["cpu_posed"]:
                 entrypoints.append("    $\\EFMIv1\\skip_skeleton_override = 1")
             entrypoints.append(
                 "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
                 "ref CommandList_Draw_Component" + str(component_id)
             )
             entrypoints.append("    run = CommandList_Component_DrawInstances")
-            if submesh is not None and self.blueprint_model.keyname_mkey_dict:
+            if self.blueprint_model.keyname_mkey_dict:
                 active_index = draw_ib_active_index_dict.get(submesh.match_draw_ib, 0)
                 entrypoints.append("    $active" + str(active_index) + " = 1")
                 if GlobalProterties.generate_branch_mod_gui():
