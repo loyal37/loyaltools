@@ -3,10 +3,12 @@
 Usage (after opening a .blend on Blender's command line)::
 
     blender --background project.blend --python tests/blender_merged_component_policy_regression.py -- \
-        WORKSPACE_ROOT OUTPUT_DIR TREE_NAME [CPU_UNIQUE_STR]
+        WORKSPACE_ROOT OUTPUT_DIR TREE_NAME [CPU_UNIQUE_STR] [DISCONNECT]
 
 When CPU_UNIQUE_STR is provided, the loaded profile is patched in memory to mark
-that component CPU posed.  No workspace or .blend file is modified.
+that component CPU posed.  DISCONNECT removes its Object_Info node in memory so
+the unconnected policy can be tested even when the saved blueprint is complete.
+No workspace or .blend file is modified.
 """
 
 from __future__ import annotations
@@ -30,11 +32,12 @@ def _main() -> None:
     args = _arguments()
     if len(args) < 3:
         raise RuntimeError(
-            "expected WORKSPACE_ROOT OUTPUT_DIR TREE_NAME [CPU_UNIQUE_STR]"
+            "expected WORKSPACE_ROOT OUTPUT_DIR TREE_NAME [CPU_UNIQUE_STR] [DISCONNECT]"
         )
 
     workspace_root, output_dir, tree_name = args[:3]
     cpu_unique_str = args[3] if len(args) > 3 else ""
+    disconnect_cpu = len(args) > 4 and args[4].upper() == "DISCONNECT"
     os.makedirs(output_dir, exist_ok=True)
 
     if not hasattr(bpy.context.scene, "global_properties"):
@@ -79,6 +82,20 @@ def _main() -> None:
     tree = bpy.data.node_groups.get(tree_name)
     if tree is None:
         raise AssertionError("blueprint tree not found: " + tree_name)
+    if disconnect_cpu:
+        removed_nodes = [
+            node for node in list(tree.nodes)
+            if (
+                node.bl_idname == "SSMTNode_Object_Info"
+                and getattr(node, "object_name", "") == cpu_unique_str
+            )
+        ]
+        if len(removed_nodes) != 1:
+            raise AssertionError(
+                "expected one CPU Object_Info node to disconnect: "
+                + cpu_unique_str + ", found=" + str(len(removed_nodes))
+            )
+        tree.nodes.remove(removed_nodes[0])
 
     model = BluePrintModel(tree=tree, context=bpy.context)
     exporter = efmi_module.ExportEFMI(model)

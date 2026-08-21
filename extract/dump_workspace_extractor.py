@@ -880,11 +880,10 @@ class DumpWorkspaceExtractor:
         其中 vertex_offset 已包含 BaseVertexLocation。
 
         注意: 终末地把所有网格放在巨型共享缓冲区中，3dmigoto 为每个绘制生成
-        带独立 hash 的 view (efmi_extract migoto_calls.MigotoDumpFile)，view 上的
-        format/byte_offset dataclass 字段是默认值，正确的绘制区间元数据在
-        migoto_format (来自 deduped 文件名描述符) 中。因此优先走 vendored 的
-        build_numpy_buffer 管线 (与 EFMI-Tools raw_object_extractor 相同)，
-        仅在其不可用时回退到 IASetIndexBuffer 的原始字段。
+        带独立 hash 的 view。view 上的 dataclass format/byte_offset 字段可能是默认值，
+        正确元数据必须从 `.txt` / migoto_format 读取。同时 ObjectExtractor 会把
+        `ib.buffer` 改成已重定基的组件数据，所以这里必须重读原始 `.buf`，
+        不能复用 vendored 内存 buffer。
         '''
         ib = record.ib
         draw = record.draw_call
@@ -903,62 +902,16 @@ class DumpWorkspaceExtractor:
                 "索引数量 " + str(index_count) + " 不是 3 的倍数, 不是有效的三角形列表绘制。"
             )
 
-        # 主路径: vendored 管线 (deduped 描述符定位绘制区间)
-        indices = None
-        if getattr(ib, "migoto_format", None) is not None or getattr(ib, "data_descriptor", None) is not None:
-            try:
-                if getattr(ib, "buffer", None) is None:
-                    ib.build_numpy_buffer()
-                if getattr(ib, "buffer", None) is not None:
-                    indices = ib.buffer.get_field(Semantic.Index).flatten()
-            except Exception as e:
-                if self.verbose:
-                    print("IB " + str(ib.hash) + " vendored 读取失败，回退手动读取: " + repr(e))
-                indices = None
-
-        if indices is not None:
-            if len(indices) == index_count:
-                pass
-            elif len(indices) >= first_index + index_count:
-                # 描述符覆盖了比本次绘制更大的区间 (如整个缓冲区)，按绘制参数切片
-                indices = indices[first_index:first_index + index_count]
-            elif len(indices) >= index_count:
-                indices = indices[:index_count]
-            else:
-                if self.verbose:
-                    print("IB " + str(ib.hash) + " vendored 数据长度不足 ("
-                          + str(len(indices)) + " < " + str(index_count) + ")，回退手动读取。")
-                indices = None
-
-        if indices is None:
-            # 回退路径: 使用 IASetIndexBuffer 的原始字段直接读取 (非 view 情况)
-            ib_format = ib.format
-            if ib_format not in _IB_NUMPY_TYPES:
-                parent = getattr(ib, "parent", None)
-                if parent is not None and getattr(parent, "format", None) in _IB_NUMPY_TYPES:
-                    ib_format = parent.format
-            np_type = _IB_NUMPY_TYPES.get(ib_format)
-            if np_type is None:
-                raise ExtractError("不支持的索引缓冲区格式: " + str(ib.format))
-
-            bin_path = self._resolve_bin_path(ib)
-            if bin_path is None:
-                raise ExtractError(
-                    "IB " + str(ib.hash) + " 缺少二进制数据文件 (需要在 analyse_options 中包含 buf dump_ib 选项)。"
-                )
-
-            itemsize = numpy.dtype(np_type).itemsize
-            byte_offset = int(ib.byte_offset or 0) + first_index * itemsize
-            byte_size = index_count * itemsize
-
-            file_size = bin_path.stat().st_size
-            if byte_offset + byte_size > file_size:
-                raise ExtractError(
-                    "IB 文件长度不足: " + bin_path.name
-                    + " 需要 " + str(byte_offset + byte_size) + " 字节, 实际 " + str(file_size) + " 字节。"
-                )
-
-            indices = numpy.fromfile(bin_path, dtype=np_type, count=index_count, offset=byte_offset)
+        # 必须从帧分析原始描述符重新读取 IB，不能复用 ib.buffer。
+        # ObjectExtractor.extract_objects() 在构建 EFMI Merged Skeleton 对象时
+        # 会把资源实例上的 ib.buffer 改成已重定基的组件索引。
+        # 如果再用它推导 VB 起点，共享缓冲区中 min(index) > 0 的
+        # 组件会被错切为第 0 行开始，导致网格爆炸/长三角。
+        indices = self._read_original_index_range(
+            ib=ib,
+            first_index=first_index,
+            index_count=index_count,
+        )
 
         indices = indices.astype(numpy.uint32)
 
@@ -976,6 +929,58 @@ class DumpWorkspaceExtractor:
 
         rebased = numpy.ascontiguousarray(indices, dtype='<u4')
         return rebased, total_vertex_offset, vertex_count
+
+    def _read_original_index_range(
+        self,
+        ib: IndexBuffer,
+        first_index: int,
+        index_count: int,
+    ) -> numpy.ndarray:
+        '''从帧分析原始 IB 文件读取本次绘制的索引区间。'''
+        fmt = self._load_txt_format(ib)
+        bin_path = self._resolve_bin_path(ib)
+        if bin_path is None:
+            raise ExtractError(
+                "IB " + str(ib.hash) + " 缺少二进制数据文件 "
+                + "(需要在 analyse_options 中包含 buf dump_ib 选项)。"
+            )
+
+        descriptor_format = getattr(fmt, "format", None) if fmt is not None else None
+        ib_format = descriptor_format
+        if ib_format not in _IB_NUMPY_TYPES:
+            ib_format = getattr(ib, "format", None)
+        if ib_format not in _IB_NUMPY_TYPES:
+            parent = getattr(ib, "parent", None)
+            if parent is not None and getattr(parent, "format", None) in _IB_NUMPY_TYPES:
+                ib_format = parent.format
+        np_type = _IB_NUMPY_TYPES.get(ib_format)
+        if np_type is None:
+            raise ExtractError("不支持的索引缓冲区格式: " + str(ib_format))
+
+        itemsize = numpy.dtype(np_type).itemsize
+        descriptor_byte_offset = int(getattr(fmt, "byte_offset", 0) or 0) if fmt is not None else 0
+
+        # 3dmigoto .txt 中的 byte offset 是 IASetIndexBuffer 绑定起点，
+        # FirstIndex 仍需要另行换算为字节偏移。描述符中即使
+        # index_count 已等于本次绘制数量，.buf 仍是完整共享资源。
+        byte_offset = descriptor_byte_offset + first_index * itemsize
+        if fmt is None:
+            byte_offset = int(getattr(ib, "byte_offset", 0) or 0) + first_index * itemsize
+        byte_size = index_count * itemsize
+        file_size = bin_path.stat().st_size
+        if byte_offset + byte_size > file_size:
+            raise ExtractError(
+                "IB 文件长度不足: " + bin_path.name
+                + " 需要 " + str(byte_offset + byte_size) + " 字节, 实际 " + str(file_size) + " 字节。"
+            )
+
+        indices = numpy.fromfile(bin_path, dtype=np_type, count=index_count, offset=byte_offset)
+        if len(indices) != index_count:
+            raise ExtractError(
+                "IB " + str(ib.hash) + " 数据读取长度不符: "
+                + str(len(indices)) + " != " + str(index_count)
+            )
+        return indices
 
     def _get_ib_topology(self, ib: IndexBuffer) -> Topology | None:
         '''尽力获取 IB 的图元拓扑 (依次尝试帧模型字段 / dump 文件名描述符 / .txt 头部)，未知时返回 None'''
@@ -1013,9 +1018,9 @@ class DumpWorkspaceExtractor:
     # 顶点缓冲区
     # ------------------------------------------------------------------
 
-    def _load_txt_format(self, vb: VertexBuffer) -> MigotoFormat | None:
-        '''解析 VB 对应的 .txt 头部布局 (带缓存)'''
-        for txt_path in (vb.txt_path, vb.txt_path_deduped):
+    def _load_txt_format(self, resource: Resource) -> MigotoFormat | None:
+        '''解析 IB/VB 资源对应的 .txt 头部描述符 (带缓存)'''
+        for txt_path in (resource.txt_path, resource.txt_path_deduped):
             if txt_path is None:
                 continue
             txt_path = Path(txt_path)
