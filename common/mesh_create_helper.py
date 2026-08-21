@@ -38,6 +38,7 @@ class MeshCreateHelper:
         vertex_compression_params:list | None = None,
         import_collection:bpy.types.Collection | None = None,
         vertex_group_map:dict | None = None,
+        vertex_group_count:int | None = None,
     ):
         TimerUtils.Start("Import 3Dmigoto Raw")
         print("导入模型: " + mesh_name)
@@ -192,6 +193,7 @@ class MeshCreateHelper:
         MeshCreateHelper.import_vertex_groups(
             mesh, obj, blend_indices, blend_weights, component,
             vertex_group_map=vertex_group_map,
+            vertex_group_count=vertex_group_count,
         )
         print("导入顶点组完毕")
 
@@ -314,6 +316,7 @@ class MeshCreateHelper:
     def import_vertex_groups(
         mesh, obj, blend_indices, blend_weights, component,
         vertex_group_map:dict | None = None,
+        vertex_group_count:int | None = None,
     ):
         for semantic_index, bone_indices_list in blend_indices.items():
             arr = numpy.array(bone_indices_list)
@@ -363,7 +366,19 @@ class MeshCreateHelper:
                 ]
                 num_vertex_groups = (max(valid_indices) + 1) if valid_indices else 0
             else:
-                num_vertex_groups = (max(effective_vg_map.values()) + 1) if effective_vg_map else 0
+                mapped_group_count = (
+                    max(effective_vg_map.values()) + 1 if effective_vg_map else 0
+                )
+                if vertex_group_count is None:
+                    num_vertex_groups = mapped_group_count
+                else:
+                    num_vertex_groups = int(vertex_group_count)
+                    if num_vertex_groups < mapped_group_count:
+                        raise Fatal(
+                            "骨骼合并全局顶点组总数小于当前组件使用的最大编号，对象: "
+                            + obj.name + "，需要至少 " + str(mapped_group_count)
+                            + "，配置为 " + str(num_vertex_groups)
+                        )
 
             print("num_vertex_groups: " + str(num_vertex_groups))
 

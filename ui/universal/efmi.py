@@ -18,6 +18,7 @@ from ...common.efmi_merged_skeleton import load_profile
 import os
 import re
 import shutil
+import bpy
 
 @dataclass
 class ExportEFMI:
@@ -26,6 +27,19 @@ class ExportEFMI:
 
     submesh_model_list:list[SubMeshModel] = field(default_factory=list,init=False)
     drawib_model_list:list[DrawIBModel] = field(default_factory=list,init=False)
+
+    def _get_tagged_merged_skeleton_unique_strs(self) -> set[str]:
+        tagged_unique_strs = set()
+        objects = getattr(getattr(bpy, "data", None), "objects", None)
+        get_object = getattr(objects, "get", None)
+        if not callable(get_object):
+            return tagged_unique_strs
+
+        for draw_call_model in self.blueprint_model.ordered_draw_obj_data_model_list:
+            obj = get_object(draw_call_model.get_blender_obj_name())
+            if obj is not None and bool(obj.get("LoyalTools:EFMIMergedSkeleton", False)):
+                tagged_unique_strs.add(draw_call_model.get_unique_str())
+        return tagged_unique_strs
 
     def __post_init__(self):
         self.cross_ib_info_dict = self.blueprint_model.cross_ib_info_dict
@@ -39,13 +53,39 @@ class ExportEFMI:
         self.cross_ib_match_mode = self.blueprint_model.cross_ib_match_mode
         self.cross_ib_object_names = self.blueprint_model.cross_ib_object_names
 
-        cross_ib_methods = set(self.cross_ib_method_dict.values())
-        self.merged_skeleton_mode = 'MERGED_SKELETON' in cross_ib_methods
-        if self.merged_skeleton_mode and cross_ib_methods != {'MERGED_SKELETON'}:
+        cross_ib_methods = {
+            method for method in self.cross_ib_method_dict.values() if method
+        }
+        explicit_merged_skeleton = 'MERGED_SKELETON' in cross_ib_methods
+        if explicit_merged_skeleton and cross_ib_methods != {'MERGED_SKELETON'}:
             raise ValueError(
                 "同一次 EFMI 导出不能混用“一般跨 IB”和“骨骼合并”。"
                 "请把蓝图中的 Cross IB 节点统一切换为同一种方式。"
             )
+
+        tree = getattr(self.blueprint_model, "_tree", None)
+        tree_merged_skeleton = bool(
+            tree.get("LoyalTools:EFMIMergedSkeleton", False)
+            if tree is not None and callable(getattr(tree, "get", None))
+            else False
+        )
+        tagged_merged_unique_strs = self._get_tagged_merged_skeleton_unique_strs()
+        automatic_merged_skeleton = (
+            tree_merged_skeleton or bool(tagged_merged_unique_strs)
+        )
+        if (
+            automatic_merged_skeleton
+            and cross_ib_methods
+            and cross_ib_methods != {'MERGED_SKELETON'}
+        ):
+            raise ValueError(
+                "当前蓝图包含骨骼合并物体，但 Cross IB 节点仍为“一般跨 IB”。"
+                "请将节点切换为“骨骼合并”，或改用普通流程导入的物体。"
+            )
+
+        self.merged_skeleton_mode = (
+            explicit_merged_skeleton or automatic_merged_skeleton
+        )
         self.merged_skeleton_profile = None
         merged_gpu_unique_strs = None
         if self.merged_skeleton_mode:
@@ -57,6 +97,29 @@ class ExportEFMI:
                 for component in self.merged_skeleton_profile["components"]
                 if not component["cpu_posed"]
             }
+            exported_unique_strs = {
+                draw_call_model.get_unique_str()
+                for draw_call_model in self.blueprint_model.ordered_draw_obj_data_model_list
+            }
+            unexpected_unique_strs = sorted(
+                exported_unique_strs - merged_gpu_unique_strs
+            )
+            if unexpected_unique_strs:
+                raise ValueError(
+                    "蓝图包含不属于当前骨骼合并 profile 的 GPU 子网格: "
+                    + ", ".join(unexpected_unique_strs)
+                )
+            detection_reason = []
+            if explicit_merged_skeleton:
+                detection_reason.append("Cross IB 节点")
+            if tree_merged_skeleton:
+                detection_reason.append("蓝图标记")
+            if tagged_merged_unique_strs:
+                detection_reason.append("物体标记")
+            print(
+                "[EFMI骨骼合并] 已自动启用，依据: "
+                + "、".join(detection_reason)
+            )
 
         self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(
             self.blueprint_model,
@@ -609,7 +672,7 @@ class ExportEFMI:
         profile = self.merged_skeleton_profile
         if profile is None:
             raise ValueError("缺少 EFMI 骨骼合并工作空间配置。")
-        if self.cross_ib_match_mode != 'INDEX_COUNT':
+        if self.has_cross_ib and self.cross_ib_match_mode != 'INDEX_COUNT':
             raise ValueError("EFMI 骨骼合并 Cross IB 必须使用 IndexCount 识别模式。")
 
         profile_unique_strs = {

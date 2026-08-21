@@ -64,12 +64,18 @@ class SSMTImportHelper:
 				if merged_component is not None and not merged_component.get("cpu_posed", False)
 				else None
 			),
+			vertex_group_count=(
+				int(profile["bones_count"])
+				if merged_component is not None and not merged_component.get("cpu_posed", False)
+				else None
+			),
 		)
 		if obj is not None and merged_component is not None:
 			obj["LoyalTools:EFMIMergedSkeleton"] = True
 			obj["LoyalTools:EFMIComponentId"] = int(merged_component["component_id"])
 			obj["LoyalTools:EFMIVGOffset"] = int(merged_component["vg_offset"])
 			obj["LoyalTools:EFMIVGCount"] = int(merged_component["vg_count"])
+			obj["LoyalTools:EFMIBonesCount"] = int(profile["bones_count"])
 			obj["LoyalTools:EFMIProfile"] = str(embedded["profile"])
 		return obj
 

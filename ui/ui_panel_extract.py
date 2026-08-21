@@ -228,7 +228,7 @@ def _resolve_single_object_group(tree, output_node, group_label, group_y):
 
 
 def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict,
-                               tree_name_override=None):
+                               tree_name_override=None, merged_skeleton=False):
     '''
     (提取自动导入成功后调用) 把导入的物体接入当前工作空间的 SSMT 蓝图节点树。
     树的命名和选中方式与"一键导入SSMT工作空间内容"保持一致
@@ -269,6 +269,10 @@ def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict
         if tree is None:
             tree = bpy.data.node_groups.new(name=tree_name, type='SSMTBlueprintTreeType')
             tree.use_fake_user = True
+
+        # 将制作流程写入蓝图本身，导出时不再依赖用户额外添加 Cross IB 节点。
+        # 物体上的合并标记仍作为旧蓝图的兼容检测依据。
+        tree["LoyalTools:EFMIMergedSkeleton"] = bool(merged_skeleton)
 
         # 和打开蓝图窗口/一键导入相同的选中方式，保证"生成所选蓝图Mod"立即可用
         try:
@@ -652,6 +656,7 @@ class LoyalExtractFromDump(bpy.types.Operator):
             # 物体导入后自动接入蓝图节点 (失败只打印警告，不影响导入结果)
             blueprint_tree_name = wire_objects_into_blueprint(
                 context, imported_entries, drawib_aliasname_dict,
+                merged_skeleton=merged_skeleton_mode,
             )
 
         # 6.汇总结果
@@ -803,6 +808,7 @@ class LoyalImportWorkspace(bpy.types.Operator):
         blueprint_tree_name = wire_objects_into_blueprint(
             context, imported_entries, drawib_aliasname_dict,
             tree_name_override=collection_name,
+            merged_skeleton=merged_skeleton_mode,
         )
 
         msg = "已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\""

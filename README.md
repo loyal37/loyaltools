@@ -65,9 +65,9 @@
 1. 选择角色完整显示时抓取的 FrameAnalysis 文件夹，不需要填写 DrawIB。
 2. 点「提取」。LoyalTools 会按 EFMI-Tools v0.6.2 的规则识别主要角色、读取各组件骨骼矩阵并建立全局顶点组映射。角色可同时包含显式权重组件和隐式权重组件；隐式组件会按 EFMI 规则自动给每个顶点的首个骨骼补 1.0 权重。
 3. 输出目录和模型名仍为 `<IBHash>-<IndexCount>-<FirstIndex>`；工作空间根目录会额外生成 `EFMI_MergedSkeleton.json`。当前版本暂不提取 LOD。
-4. 在骨骼合并模式点「导入」时，各组件的本地顶点组会自动改为 profile 中的全局顶点组；普通模式导入不会应用这份映射。
-5. 在蓝图中加入 Cross IB 节点，把「跨 IB 方式」切换为 **骨骼合并**。映射仍填写「源 IndexCount >> 目标 IndexCount」。不需要 VS 200–204 选项。
-6. 生成 Mod。该模式会导出 16 位 `BLENDINDICES` 和 EFMI 1.4.1 Merged Skeleton 回调；不会生成一般跨 IB 使用的 HLSL。
+4. 在骨骼合并模式点「导入」时，各组件的本地顶点组会自动改为 profile 中的全局顶点组；每个物体都会建立同一套 `0..bones_count-1` 顶点组空间，空组用于保持 Blender 组索引与全局骨骼 ID 一致。普通模式导入不会应用这份映射。
+5. 不使用跨 IB 时无需额外节点，自动生成的蓝图和物体标记会让导出器直接进入骨骼合并模式。需要跨 IB 映射时再加入 Cross IB 节点，把「跨 IB 方式」切换为 **骨骼合并**；映射仍填写「源 IndexCount >> 目标 IndexCount」，不需要 VS 200–204 选项。
+6. 生成 Mod。该模式会导出 16 位 `BLENDINDICES`、EFMI 1.4.1 Merged Skeleton 回调和各组件 EntryPoint；不会生成一般跨 IB 使用的 HLSL。
 
 同一张蓝图不能混用「一般跨 IB」和「骨骼合并」。全局顶点组 ID 上限为 65535；单个游戏组件原始骨骼仍受游戏骨骼缓冲区的 256 项范围约束。
 
