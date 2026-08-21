@@ -44,17 +44,6 @@ def parse_draw_ib_input(raw_text: str) -> list[str]:
     return ib_hashes
 
 
-def parse_optional_draw_ib_input(raw_text: str, field_label: str) -> list[str]:
-    '''解析可留空的 DrawIB 列表；用于骨骼合并的游戏原网格覆盖。'''
-    raw_text = (raw_text or "").strip()
-    if raw_text == "":
-        return []
-    try:
-        return parse_draw_ib_input(raw_text)
-    except ValueError as exc:
-        raise ValueError(field_label + "格式错误：" + str(exc)) from exc
-
-
 def migrate_legacy_draw_ib_field(scene, props) -> None:
     '''
     向后兼容：DrawIB 列表为空且旧版单行 draw_ib 字段非空时，
@@ -414,15 +403,6 @@ class LoyalExtractProperties(bpy.types.PropertyGroup):
         default="",
     ) # type: ignore
 
-    merged_original_mesh_ibs: bpy.props.StringProperty(
-        name="游戏原网格 IB",
-        description=(
-            "可选；填写需要按 EFMI CPU posed 方式处理的 IB hash，多个用逗号或空格分隔。"
-            "这些组件不导出自定义网格/权重，游戏中始终绘制原网格，但仍可自动替换贴图"
-        ),
-        default="",
-    ) # type: ignore
-
     # 旧版单行DrawIB输入字段，仅为向后兼容保留 (面板上已不显示)：
     # 提取时若分行列表为空而此字段非空，会自动把内容迁移为列表行
     draw_ib: bpy.props.StringProperty(
@@ -561,13 +541,8 @@ class LoyalExtractFromDump(bpy.types.Operator):
             dump_folder = resolve_dump_folder(props)
             if merged_skeleton_mode:
                 ib_hashes, aliases = [], {}
-                original_mesh_ib_hashes = parse_optional_draw_ib_input(
-                    props.merged_original_mesh_ibs,
-                    "游戏原网格 IB",
-                )
             else:
                 ib_hashes, aliases = gather_ib_rows_input(scene, props)
-                original_mesh_ib_hashes = []
         except ValueError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -599,7 +574,6 @@ class LoyalExtractFromDump(bpy.types.Operator):
                 result = extractor.extract_merged_skeleton(
                     workspace_folder=workspace_folder,
                     copy_textures=True,
-                    original_mesh_ib_hashes=original_mesh_ib_hashes,
                 )
             else:
                 result = extractor.extract(
@@ -894,8 +868,6 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
             merged_box.label(text="自动识别当前帧的主要角色与全部组件", icon='ARMATURE_DATA')
             merged_box.label(text="输出仍为 IBHash-IndexCount-FirstIndex；暂不处理 LOD")
             merged_box.label(text="导入时自动把各组件本地顶点组映射为全局顶点组")
-            merged_box.prop(props, "merged_original_mesh_ibs")
-            merged_box.label(text="特殊眉毛/睫毛可填 IB；保留游戏原网格与自动贴图", icon='INFO')
 
         extract_row = layout.row()
         extract_row.scale_y = 1.5

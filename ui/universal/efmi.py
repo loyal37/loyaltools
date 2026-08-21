@@ -91,6 +91,7 @@ class ExportEFMI:
             explicit_merged_skeleton or automatic_merged_skeleton
         )
         self.merged_skeleton_profile = None
+        self.merged_connected_cpu_unique_strs = set()
         merged_gpu_unique_strs = None
         if self.merged_skeleton_mode:
             self.merged_skeleton_profile = load_profile(
@@ -117,14 +118,14 @@ class ExportEFMI:
                     "蓝图包含不属于当前骨骼合并 profile 的子网格: "
                     + ", ".join(unexpected_unique_strs)
                 )
-            original_mesh_unique_strs = sorted(
+            self.merged_connected_cpu_unique_strs = (
                 exported_unique_strs - merged_gpu_unique_strs
             )
-            if original_mesh_unique_strs:
+            if self.merged_connected_cpu_unique_strs:
                 print(
-                    "[EFMI骨骼合并] 蓝图中的 CPU posed/游戏原网格组件"
-                    "不解析自定义几何: "
-                    + ", ".join(original_mesh_unique_strs)
+                    "[EFMI骨骼合并] 蓝图中已连接的 CPU posed 组件"
+                    "将保留组件入口、贴图和游戏原网格绘制: "
+                    + ", ".join(sorted(self.merged_connected_cpu_unique_strs))
                 )
             detection_reason = []
             if explicit_merged_skeleton:
@@ -850,6 +851,21 @@ class ExportEFMI:
             component for component in profile["components"]
             if component["cpu_posed"]
         ]
+        connected_cpu_components = [
+            component for component in cpu_components
+            if component["unique_str"] in self.merged_connected_cpu_unique_strs
+        ]
+        disconnected_cpu_components = [
+            component for component in cpu_components
+            if component["unique_str"] not in self.merged_connected_cpu_unique_strs
+        ]
+        active_components = [
+            component for component in profile["components"]
+            if (
+                not component["cpu_posed"]
+                or component["unique_str"] in self.merged_connected_cpu_unique_strs
+            )
+        ]
         missing_gpu_components = [
             component for component in gpu_components
             if component["unique_str"] not in submesh_by_unique
@@ -861,11 +877,16 @@ class ExportEFMI:
                 + " 个 GPU 组件仍生成骨骼合并 EntryPoint，"
                 "但不绑定网格资源或发出绘制。"
             )
-        if cpu_components:
+        if connected_cpu_components:
             print(
-                "[MergedSkeleton] " + str(len(cpu_components))
-                + " 个 CPU posed/游戏原网格组件将保留 EntryPoint 与贴图，"
+                "[MergedSkeleton] " + str(len(connected_cpu_components))
+                + " 个已连接 CPU posed 组件将保留 EntryPoint 与贴图，"
                 "不绑定自定义网格，并绘制游戏原网格。"
+            )
+        if disconnected_cpu_components:
+            print(
+                "[MergedSkeleton] " + str(len(disconnected_cpu_components))
+                + " 个未连接 CPU posed 组件不生成 EntryPoint、贴图或资源。"
             )
         workspace_name = GlobalConfig.get_workspace_name().replace('"', "'")
 
@@ -922,7 +943,7 @@ class ExportEFMI:
         command_lists.append("endif")
         command_lists.new_line()
 
-        for component in profile["components"]:
+        for component in active_components:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
             command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
@@ -1053,7 +1074,7 @@ class ExportEFMI:
         ini_builder.append_section(command_lists)
 
         entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
-        for component in profile["components"]:
+        for component in active_components:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
             entrypoints.append(

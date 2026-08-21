@@ -63,12 +63,12 @@
 骨骼合并不会改变普通 DrawIB 制作流程。在「提取模型」面板把「制作流程」切换为 **骨骼合并**：
 
 1. 选择角色完整显示时抓取的 FrameAnalysis 文件夹，不需要填写 DrawIB。
-2. 点「提取」。LoyalTools 会按 EFMI-Tools v0.6.2 的规则识别主要角色、读取各组件骨骼矩阵并建立全局顶点组映射。角色可同时包含显式权重组件和隐式权重组件；隐式组件会按 EFMI 规则自动给每个顶点的首个骨骼补 1.0 权重。若眉毛、睫毛等部件在帧分析里被错误识别为 GPU posed，可在「游戏原网格 IB」填写其 8 位 IB hash（多个用逗号或空格分隔）后重新提取；例如当前 Liino 帧的特殊部件填写 `7ea509b0`。
+2. 点「提取」。LoyalTools 会按 EFMI-Tools v0.6.2 的规则识别主要角色、读取各组件骨骼矩阵并建立全局顶点组映射。角色可同时包含显式权重组件和隐式权重组件；隐式组件会按 EFMI 规则自动给每个顶点的首个骨骼补 1.0 权重。
 3. 输出目录和模型名仍为 `<IBHash>-<IndexCount>-<FirstIndex>`；工作空间根目录会额外生成 `EFMI_MergedSkeleton.json`。当前版本暂不提取 LOD。
 4. 在骨骼合并模式点「导入」时，各组件的本地顶点组会自动改为 profile 中的全局顶点组；每个物体都会建立同一套 `0..bones_count-1` 顶点组空间，空组用于保持 Blender 组索引与全局骨骼 ID 一致。普通模式导入不会应用这份映射。
 5. 不使用跨 IB 时无需额外节点，自动生成的蓝图和物体标记会让导出器直接进入骨骼合并模式。需要跨 IB 映射时再加入 Cross IB 节点，把「跨 IB 方式」切换为 **骨骼合并**；映射仍填写「源 IndexCount >> 目标 IndexCount」，不需要 VS 200–204 选项。
 6. 骨骼合并模式不需要手动标记 Diffuse/Light/Normal。提取时会按 EFMI-Tools 的组件贴图归属与默认过滤规则（跳过 JPG/BUF、小于 256 KB、非正方形纹理）识别连续材质槽，并在每个 IB 的目录分别准备 `<unique_str>-DiffuseMap/LightMap/NormalMap.dds`。即使多个 IB 使用内容相同的贴图，也不会跨 IB 去重，因此可独立编辑。普通制作流程仍沿用原来的手动贴图标记，不受影响。
-7. 生成 Mod。该模式会把上述独立贴图自动复制到 `Textures/` 并生成各组件自己的 `ps-t` 绑定，同时导出 16 位 `BLENDINDICES`、EFMI 1.4.1 Merged Skeleton 回调和各组件 EntryPoint；不会生成 EFMI-Tools 的全局贴图 hash override，也不会生成一般跨 IB 使用的 HLSL。profile 中的所有 GPU posed 组件都会保留 EntryPoint 和骨骼合并回调；即使蓝图里删除了某个 GPU IB，它仍会为其他 IB 提供共享骨骼，但不会绑定网格/贴图或发出绘制，因此该 IB 在 Mod 中保持隐藏。`cpu_posed = true` 或手动列入「游戏原网格 IB」的组件采用 EFMI 原网格路径：保留 EntryPoint，写入 `gpu_posed = 0`，自动绑定该 IB 的贴图并执行 `drawindexed = INDEX_COUNT, FIRST_INDEX, 0`；不生成自定义 IB/VB，也不占用合并骨骼顶点组空间。即使从 Blender 蓝图中删除该对象，游戏原网格仍会绘制。
+7. 生成 Mod。该模式会把上述独立贴图自动复制到 `Textures/` 并生成各组件自己的 `ps-t` 绑定，同时导出 16 位 `BLENDINDICES`、EFMI 1.4.1 Merged Skeleton 回调和各组件 EntryPoint；不会生成 EFMI-Tools 的全局贴图 hash override，也不会生成一般跨 IB 使用的 HLSL。profile 中的所有 GPU posed 组件都会保留 EntryPoint 和骨骼合并回调；即使蓝图里删除了某个 GPU IB，它仍会为其他 IB 提供共享骨骼，但不会绑定网格/贴图或发出绘制，因此该 IB 在 Mod 中保持隐藏。真正的 `cpu_posed = true` 组件由蓝图决定是否接管：未连接蓝图时不生成该组件的 EntryPoint、回调、贴图或 Buffer；连接蓝图时生成 `gpu_posed = 0` EntryPoint、自动贴图和 `drawindexed = INDEX_COUNT, FIRST_INDEX, 0` 游戏原网格绘制，但始终不生成自定义 IB/VB，也不使用其 Blender 权重参与合并蒙皮。
 
 同一张蓝图不能混用「一般跨 IB」和「骨骼合并」。全局顶点组 ID 上限为 65535；单个游戏组件原始骨骼仍受游戏骨骼缓冲区的 256 项范围约束。
 
@@ -81,7 +81,7 @@
 
 - **不要与 TheHerta4 同时启用**：两者共享大量内部标识符（操作符/面板 ID），同时启用会注册冲突。
 - 提取功能为终末地（EFMI）专用；其它游戏预设下会弹出警告。
-- CPU posed/「游戏原网格 IB」部件仅支持保留游戏原网格和贴图替换，不能导出自定义几何或权重。修改该列表后必须重新提取并重新导入；旧 blend 的全局顶点组编号与新 profile 不兼容。
+- CPU posed 部件仅支持游戏原网格和贴图替换，不能导出自定义几何或权重；是否生成对应覆盖由该对象是否连接进蓝图决定。
 - 更新器指向 https://github.com/loyal37/loyaltools，「检查版本更新」从该仓库的 Release 获取新版本。
 
 ## 致谢与来源

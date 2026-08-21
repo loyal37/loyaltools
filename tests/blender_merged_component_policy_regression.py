@@ -93,6 +93,18 @@ def _main() -> None:
         component for component in profile["components"]
         if component["cpu_posed"]
     ]
+    blueprint_unique_strs = {
+        draw_call_model.get_unique_str()
+        for draw_call_model in model.ordered_draw_obj_data_model_list
+    }
+    connected_cpu_components = [
+        component for component in cpu_components
+        if component["unique_str"] in blueprint_unique_strs
+    ]
+    disconnected_cpu_components = [
+        component for component in cpu_components
+        if component["unique_str"] not in blueprint_unique_strs
+    ]
     exported_unique_strs = {
         submesh.unique_str for submesh in exporter.submesh_model_list
     }
@@ -115,15 +127,18 @@ def _main() -> None:
         ini_text,
         flags=re.MULTILINE,
     ))
-    assert entrypoint_count == len(profile["components"]), (
+    expected_active_component_count = (
+        len(gpu_components) + len(connected_cpu_components)
+    )
+    assert entrypoint_count == expected_active_component_count, (
         entrypoint_count,
-        len(profile["components"]),
+        expected_active_component_count,
     )
-    assert callback_count == len(profile["components"]), (
+    assert callback_count == expected_active_component_count, (
         callback_count,
-        len(profile["components"]),
+        expected_active_component_count,
     )
-    if not cpu_components:
+    if not connected_cpu_components:
         assert "$\\EFMIv1\\gpu_posed = 0" not in ini_text
 
     for component in missing_gpu_components:
@@ -141,6 +156,26 @@ def _main() -> None:
         current_cpu_unique_str = cpu_component["unique_str"]
         cpu_id = cpu_component["component_id"]
         assert current_cpu_unique_str not in exported_unique_strs
+        assert not any(
+            name.startswith(current_cpu_unique_str + "-")
+            for name in os.listdir(os.path.join(output_dir, "Buffer"))
+        )
+        if cpu_component in disconnected_cpu_components:
+            assert (
+                "[TextureOverride_EntryPoint_Component" + str(cpu_id) + "]"
+                not in ini_text
+            )
+            assert (
+                "[CommandList_Draw_Component" + str(cpu_id) + "]"
+                not in ini_text
+            )
+            textures_folder = os.path.join(output_dir, "Textures")
+            if os.path.isdir(textures_folder):
+                assert not any(
+                    name.startswith(current_cpu_unique_str + "-")
+                    for name in os.listdir(textures_folder)
+                )
+            continue
         assert (
             "[TextureOverride_EntryPoint_Component" + str(cpu_id) + "]"
             in ini_text
@@ -165,12 +200,7 @@ def _main() -> None:
         assert "drawindexed = INDEX_COUNT, FIRST_INDEX, 0" in cpu_callback
         assert "ib = Resource_" not in cpu_callback
         assert "vb0 = Resource_" not in cpu_callback
-        assert not any(
-            name.startswith(current_cpu_unique_str + "-")
-            for name in os.listdir(os.path.join(output_dir, "Buffer"))
-        )
-
-    if cpu_unique_str:
+    if cpu_unique_str and cpu_unique_str in blueprint_unique_strs:
         # The allow-list is scoped to merged skeleton parsing.  The ordinary
         # pipeline must still see the same connected object.
         ordinary_submeshes = ExportHelper.parse_submesh_model_list_from_blueprint_model(
@@ -185,7 +215,8 @@ def _main() -> None:
     print("LOYAL_POLICY_GPU_COMPONENTS=" + str(len(gpu_components)))
     print("LOYAL_POLICY_EXPORTED_SUBMESHES=" + str(len(exported_unique_strs)))
     print("LOYAL_POLICY_MISSING_GPU=" + str(len(missing_gpu_components)))
-    print("LOYAL_POLICY_CPU_ORIGINAL=" + str(len(cpu_components)))
+    print("LOYAL_POLICY_CPU_CONNECTED=" + str(len(connected_cpu_components)))
+    print("LOYAL_POLICY_CPU_DISCONNECTED=" + str(len(disconnected_cpu_components)))
     print("LOYAL_POLICY_INI=" + ini_path)
 
 
