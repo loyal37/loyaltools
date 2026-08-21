@@ -117,13 +117,14 @@ class ExportEFMI:
                     "蓝图包含不属于当前骨骼合并 profile 的子网格: "
                     + ", ".join(unexpected_unique_strs)
                 )
-            skipped_cpu_unique_strs = sorted(
+            original_mesh_unique_strs = sorted(
                 exported_unique_strs - merged_gpu_unique_strs
             )
-            if skipped_cpu_unique_strs:
+            if original_mesh_unique_strs:
                 print(
-                    "[EFMI骨骼合并] 已跳过蓝图中的 CPU posed 组件: "
-                    + ", ".join(skipped_cpu_unique_strs)
+                    "[EFMI骨骼合并] 蓝图中的 CPU posed/游戏原网格组件"
+                    "不解析自定义几何: "
+                    + ", ".join(original_mesh_unique_strs)
                 )
             detection_reason = []
             if explicit_merged_skeleton:
@@ -619,6 +620,13 @@ class ExportEFMI:
         texture_markup_info_list = self._get_merged_texture_binding_list(
             submesh_model, drawib_model
         )
+        self._append_merged_texture_binding_lines(
+            section, texture_markup_info_list, indent=indent
+        )
+
+    def _append_merged_texture_binding_lines(
+        self, section, texture_markup_info_list, indent=""
+    ):
         if GlobalProterties.use_rabbitfx_slot():
             for texture_info in texture_markup_info_list:
                 if getattr(texture_info, "mark_type", "") != "Slot":
@@ -648,6 +656,50 @@ class ExportEFMI:
                 section.append(
                     indent + texture_info.mark_slot + " = " + texture_info.get_resource_name()
                 )
+
+    def _get_merged_profile_texture_binding_list(self, component):
+        '''解析没有自定义 SubMesh 的 CPU posed 组件自动贴图。'''
+        if GlobalProterties.forbid_auto_texture_ini():
+            return []
+        unique_str = component["unique_str"]
+        cached_bindings = self.merged_auto_texture_binding_dict.get(unique_str)
+        if cached_bindings is not None:
+            return list(cached_bindings)
+
+        component_folder = os.path.join(
+            GlobalConfig.path_workspace_folder(), unique_str
+        )
+        texture_folder = ""
+        try:
+            folder_names = sorted(os.listdir(component_folder))
+        except OSError:
+            folder_names = []
+        for folder_name in folder_names:
+            if not folder_name.startswith("TYPE_"):
+                continue
+            candidate = os.path.join(component_folder, folder_name)
+            if os.path.isfile(os.path.join(candidate, "TextureSlots.json")):
+                texture_folder = candidate
+                break
+
+        cached_bindings = (
+            resolve_merged_auto_textures(
+                texture_folder=texture_folder,
+                unique_str=unique_str,
+            )
+            if texture_folder
+            else []
+        )
+        self.merged_auto_texture_binding_dict[unique_str] = cached_bindings
+        if cached_bindings:
+            print(
+                "[MergedSkeleton] CPU 原网格自动贴图 " + unique_str + ": "
+                + ", ".join(
+                    binding.mark_name + "@" + binding.mark_slot
+                    for binding in cached_bindings
+                )
+            )
+        return list(cached_bindings)
 
     def _get_merged_texture_binding_list(self, submesh_model, drawib_model):
         manual_bindings = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
@@ -794,6 +846,10 @@ class ExportEFMI:
             component for component in profile["components"]
             if not component["cpu_posed"]
         ]
+        cpu_components = [
+            component for component in profile["components"]
+            if component["cpu_posed"]
+        ]
         missing_gpu_components = [
             component for component in gpu_components
             if component["unique_str"] not in submesh_by_unique
@@ -805,11 +861,11 @@ class ExportEFMI:
                 + " 个 GPU 组件仍生成骨骼合并 EntryPoint，"
                 "但不绑定网格资源或发出绘制。"
             )
-        cpu_component_count = len(profile["components"]) - len(gpu_components)
-        if cpu_component_count:
+        if cpu_components:
             print(
-                "[MergedSkeleton] 已跳过 " + str(cpu_component_count)
-                + " 个 CPU posed 组件，不生成 EntryPoint、缓冲或贴图资源。"
+                "[MergedSkeleton] " + str(len(cpu_components))
+                + " 个 CPU posed/游戏原网格组件将保留 EntryPoint 与贴图，"
+                "不绑定自定义网格，并绘制游戏原网格。"
             )
         workspace_name = GlobalConfig.get_workspace_name().replace('"', "'")
 
@@ -866,11 +922,24 @@ class ExportEFMI:
         command_lists.append("endif")
         command_lists.new_line()
 
-        for component in gpu_components:
+        for component in profile["components"]:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
             command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
             command_lists.append("run = CommandList\\EFMIv1\\OverrideTextures")
+            if component["cpu_posed"]:
+                cpu_texture_bindings = self._get_merged_profile_texture_binding_list(
+                    component
+                )
+                self._append_merged_texture_binding_lines(
+                    command_lists, cpu_texture_bindings
+                )
+                command_lists.append(
+                    "; CPU posed/游戏原网格：不绑定导出的 IB/VB，使用游戏原始绘制"
+                )
+                command_lists.append("drawindexed = INDEX_COUNT, FIRST_INDEX, 0")
+                command_lists.new_line()
+                continue
             current_key = "indexcount_" + str(component["index_count"])
             if submesh is not None:
                 self._append_merged_buffer_bindings(command_lists, submesh)
@@ -984,7 +1053,7 @@ class ExportEFMI:
         ini_builder.append_section(command_lists)
 
         entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
-        for component in gpu_components:
+        for component in profile["components"]:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
             entrypoints.append(
@@ -999,7 +1068,8 @@ class ExportEFMI:
                 "    $\\EFMIv1\\component_id = " + str(component_id)
             )
             entrypoints.append(
-                "    $\\EFMIv1\\gpu_posed = 1"
+                "    $\\EFMIv1\\gpu_posed = "
+                + ("0" if component["cpu_posed"] else "1")
             )
             entrypoints.append(
                 "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
@@ -1100,6 +1170,17 @@ class ExportEFMI:
                             "filename = Textures/" + texture_info.mark_filename
                         )
                         texture_resources.new_line()
+            for bindings in self.merged_auto_texture_binding_dict.values():
+                for texture_info in bindings:
+                    resource_name = texture_info.get_resource_name()
+                    if resource_name in appended_names:
+                        continue
+                    appended_names.add(resource_name)
+                    texture_resources.append("[" + resource_name + "]")
+                    texture_resources.append(
+                        "filename = Textures/" + texture_info.mark_filename
+                    )
+                    texture_resources.new_line()
             ini_builder.append_section(texture_resources)
 
         mod_info = M_IniSection(M_SectionType.ResourceModInfo)

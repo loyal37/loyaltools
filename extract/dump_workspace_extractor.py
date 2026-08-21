@@ -443,6 +443,7 @@ class DumpWorkspaceExtractor:
         workspace_folder: str,
         gametype_name: str = 'GPU-EFMI',
         copy_textures: bool = True,
+        original_mesh_ib_hashes: list[str] | set[str] | tuple[str, ...] | None = None,
     ) -> ExtractResult:
         '''
         自动识别当前帧中的主要显式权重对象，生成 EFMI 1.4.1 Merged
@@ -514,7 +515,53 @@ class DumpWorkspaceExtractor:
                 + " 个显式权重对象，已自动选择 " + str(selected_object.id) + "。"
             )
 
-        component_vg_metadata = self._build_merged_skeleton_vg_metadata(selected_object)
+        # EFMI 的 gpu_posed 标志在少数面部/特效组件上可能无法表达实际制作需求。
+        # 用户可按 IB 明确要求使用 CPU posed 同款“游戏原网格”路径：该组件仍提取
+        # 贴图和元数据，但不参与 Merged Skeleton VG 地址空间，也不导出自定义网格。
+        requested_original_ibs = {
+            str(ib_hash).strip().lower()
+            for ib_hash in (original_mesh_ib_hashes or ())
+            if str(ib_hash).strip()
+        }
+        invalid_original_ibs = sorted(
+            ib_hash for ib_hash in requested_original_ibs
+            if re.fullmatch(r"[0-9a-f]{8}", ib_hash) is None
+        )
+        if invalid_original_ibs:
+            raise ExtractError(
+                "游戏原网格 IB 格式错误: " + ", ".join(invalid_original_ibs)
+            )
+        matched_original_ibs = set()
+        original_mesh_component_ids = set()
+        for component_id, component in enumerate(selected_object.components):
+            component_ib_hashes = set()
+            for shader_call in component.raw_data.shader_calls:
+                resources = shader_call.model_resources
+                ib = resources.get_by_slot("ib") if resources is not None else None
+                if isinstance(ib, IndexBuffer):
+                    component_ib_hashes.add(str(ib.hash).lower())
+            matched = component_ib_hashes & requested_original_ibs
+            if not matched:
+                continue
+            matched_original_ibs.update(matched)
+            original_mesh_component_ids.add(component_id)
+        missing_original_ibs = sorted(requested_original_ibs - matched_original_ibs)
+        if missing_original_ibs:
+            raise ExtractError(
+                "选中的角色中没有找到游戏原网格 IB: "
+                + ", ".join(missing_original_ibs)
+            )
+        if matched_original_ibs:
+            warnings.append(
+                "已按 EFMI CPU posed 原网格方式处理 IB: "
+                + ", ".join(sorted(matched_original_ibs))
+                + "；不会导出其自定义网格/权重。"
+            )
+
+        component_vg_metadata = self._build_merged_skeleton_vg_metadata(
+            selected_object,
+            original_mesh_component_ids=original_mesh_component_ids,
+        )
         profile_components = []
         unique_strs = []
         seen_unique_strs = set()
@@ -574,7 +621,10 @@ class DumpWorkspaceExtractor:
                 "index_count": index_count,
                 "first_index": first_index,
                 "vertex_count": int(component.mesh.format.vertex_count),
-                "cpu_posed": bool(component.mesh.cpu_posed),
+                "cpu_posed": bool(
+                    component.mesh.cpu_posed
+                    or source_component_id in original_mesh_component_ids
+                ),
                 "vg_offset": int(vg_metadata["vg_offset"]),
                 "vg_count": int(vg_metadata["vg_count"]),
                 "vg_map": dict(vg_metadata["vg_map"]),
@@ -781,8 +831,13 @@ class DumpWorkspaceExtractor:
                 return False
         return True
 
-    def _build_merged_skeleton_vg_metadata(self, migoto_object) -> list[dict]:
+    def _build_merged_skeleton_vg_metadata(
+        self,
+        migoto_object,
+        original_mesh_component_ids: set[int] | None = None,
+    ) -> list[dict]:
         '''移植 EFMI-Tools v0.6.2 的矩阵去重策略，构造全局 VG 地址空间。'''
+        original_mesh_component_ids = set(original_mesh_component_ids or ())
         result = [
             {"vg_offset": 0, "vg_count": 0, "vg_map": {}}
             for _ in migoto_object.components
@@ -791,7 +846,10 @@ class DumpWorkspaceExtractor:
         bone_candidates: dict[tuple, list[dict]] = {}
 
         for component_id, component in enumerate(migoto_object.components):
-            if component.mesh.cpu_posed:
+            if (
+                component.mesh.cpu_posed
+                or component_id in original_mesh_component_ids
+            ):
                 continue
 
             vg_ids = component.mesh.get_data(Semantic.Blendindices)

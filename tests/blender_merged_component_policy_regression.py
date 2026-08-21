@@ -1,4 +1,4 @@
-"""Blender regression for merged-skeleton missing-GPU / CPU component policy.
+"""Blender regression for merged-skeleton missing-GPU / CPU original-mesh policy.
 
 Usage (after opening a .blend on Blender's command line)::
 
@@ -89,6 +89,10 @@ def _main() -> None:
         component for component in profile["components"]
         if not component["cpu_posed"]
     ]
+    cpu_components = [
+        component for component in profile["components"]
+        if component["cpu_posed"]
+    ]
     exported_unique_strs = {
         submesh.unique_str for submesh in exporter.submesh_model_list
     }
@@ -111,15 +115,16 @@ def _main() -> None:
         ini_text,
         flags=re.MULTILINE,
     ))
-    assert entrypoint_count == len(gpu_components), (
+    assert entrypoint_count == len(profile["components"]), (
         entrypoint_count,
-        len(gpu_components),
+        len(profile["components"]),
     )
-    assert callback_count == len(gpu_components), (
+    assert callback_count == len(profile["components"]), (
         callback_count,
-        len(gpu_components),
+        len(profile["components"]),
     )
-    assert "$\\EFMIv1\\gpu_posed = 0" not in ini_text
+    if not cpu_components:
+        assert "$\\EFMIv1\\gpu_posed = 0" not in ini_text
 
     for component in missing_gpu_components:
         component_id = component["component_id"]
@@ -132,26 +137,40 @@ def _main() -> None:
             in ini_text
         )
 
-    if cpu_unique_str:
-        cpu_component = next(
-            component for component in profile["components"]
-            if component["unique_str"] == cpu_unique_str
-        )
+    for cpu_component in cpu_components:
+        current_cpu_unique_str = cpu_component["unique_str"]
         cpu_id = cpu_component["component_id"]
-        assert cpu_unique_str not in exported_unique_strs
+        assert current_cpu_unique_str not in exported_unique_strs
         assert (
             "[TextureOverride_EntryPoint_Component" + str(cpu_id) + "]"
-            not in ini_text
+            in ini_text
         )
         assert (
             "[CommandList_Draw_Component" + str(cpu_id) + "]"
-            not in ini_text
+            in ini_text
         )
+        cpu_entrypoint = re.search(
+            r"\[TextureOverride_EntryPoint_Component" + str(cpu_id)
+            + r"\](.*?)(?=\n\[|\Z)",
+            ini_text,
+            flags=re.DOTALL,
+        ).group(0)
+        cpu_callback = re.search(
+            r"\[CommandList_Draw_Component" + str(cpu_id)
+            + r"\](.*?)(?=\n\[|\Z)",
+            ini_text,
+            flags=re.DOTALL,
+        ).group(0)
+        assert "$\\EFMIv1\\gpu_posed = 0" in cpu_entrypoint
+        assert "drawindexed = INDEX_COUNT, FIRST_INDEX, 0" in cpu_callback
+        assert "ib = Resource_" not in cpu_callback
+        assert "vb0 = Resource_" not in cpu_callback
         assert not any(
-            name.startswith(cpu_unique_str + "-")
+            name.startswith(current_cpu_unique_str + "-")
             for name in os.listdir(os.path.join(output_dir, "Buffer"))
         )
 
+    if cpu_unique_str:
         # The allow-list is scoped to merged skeleton parsing.  The ordinary
         # pipeline must still see the same connected object.
         ordinary_submeshes = ExportHelper.parse_submesh_model_list_from_blueprint_model(
@@ -166,7 +185,7 @@ def _main() -> None:
     print("LOYAL_POLICY_GPU_COMPONENTS=" + str(len(gpu_components)))
     print("LOYAL_POLICY_EXPORTED_SUBMESHES=" + str(len(exported_unique_strs)))
     print("LOYAL_POLICY_MISSING_GPU=" + str(len(missing_gpu_components)))
-    print("LOYAL_POLICY_CPU_SKIPPED=" + str(int(bool(cpu_unique_str))))
+    print("LOYAL_POLICY_CPU_ORIGINAL=" + str(len(cpu_components)))
     print("LOYAL_POLICY_INI=" + ini_path)
 
 
