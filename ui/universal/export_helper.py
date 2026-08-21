@@ -48,6 +48,16 @@ class ExportHelper:
             # 获取独立标识
             unique_str = draw_call_model.get_unique_str()
 
+            # 骨骼合并的 CPU posed 组件由游戏原流程处理，不能进入
+            # LoyalTools 的 GPU 网格/缓冲导出。集合只在骨骼合并调用处传入，
+            # 普通制作流程仍会解析蓝图中的全部网格。
+            if (
+                efmi_merged_skeleton
+                and efmi_merged_skeleton_unique_strs is not None
+                and unique_str not in efmi_merged_skeleton_unique_strs
+            ):
+                continue
+
             # 根据unique_str，加入到字典中，这样每个unique_str都对应一个DrawCallModel列表，用于初始化SubMeshModel
             draw_call_model_list = draw_call_model_dict.get(unique_str,[])
             draw_call_model_list.append(draw_call_model)

@@ -101,17 +101,29 @@ class ExportEFMI:
                 for component in self.merged_skeleton_profile["components"]
                 if not component["cpu_posed"]
             }
+            merged_profile_unique_strs = {
+                component["unique_str"]
+                for component in self.merged_skeleton_profile["components"]
+            }
             exported_unique_strs = {
                 draw_call_model.get_unique_str()
                 for draw_call_model in self.blueprint_model.ordered_draw_obj_data_model_list
             }
             unexpected_unique_strs = sorted(
-                exported_unique_strs - merged_gpu_unique_strs
+                exported_unique_strs - merged_profile_unique_strs
             )
             if unexpected_unique_strs:
                 raise ValueError(
-                    "蓝图包含不属于当前骨骼合并 profile 的 GPU 子网格: "
+                    "蓝图包含不属于当前骨骼合并 profile 的子网格: "
                     + ", ".join(unexpected_unique_strs)
+                )
+            skipped_cpu_unique_strs = sorted(
+                exported_unique_strs - merged_gpu_unique_strs
+            )
+            if skipped_cpu_unique_strs:
+                print(
+                    "[EFMI骨骼合并] 已跳过蓝图中的 CPU posed 组件: "
+                    + ", ".join(skipped_cpu_unique_strs)
                 )
             detection_reason = []
             if explicit_merged_skeleton:
@@ -778,16 +790,26 @@ class ExportEFMI:
         submesh_by_unique = {
             submesh.unique_str: submesh for submesh in self.submesh_model_list
         }
-        exported_components = [
+        gpu_components = [
             component for component in profile["components"]
-            if component["unique_str"] in submesh_by_unique
+            if not component["cpu_posed"]
         ]
-        omitted_component_count = len(profile["components"]) - len(exported_components)
-        if omitted_component_count:
+        missing_gpu_components = [
+            component for component in gpu_components
+            if component["unique_str"] not in submesh_by_unique
+        ]
+        if missing_gpu_components:
             print(
                 "[MergedSkeleton] 蓝图中未包含的 "
-                + str(omitted_component_count)
-                + " 个组件将保留原版绘制，不生成 EntryPoint 或绘制回调。"
+                + str(len(missing_gpu_components))
+                + " 个 GPU 组件仍生成骨骼合并 EntryPoint，"
+                "但不绑定网格资源或发出绘制。"
+            )
+        cpu_component_count = len(profile["components"]) - len(gpu_components)
+        if cpu_component_count:
+            print(
+                "[MergedSkeleton] 已跳过 " + str(cpu_component_count)
+                + " 个 CPU posed 组件，不生成 EntryPoint、缓冲或贴图资源。"
             )
         workspace_name = GlobalConfig.get_workspace_name().replace('"', "'")
 
@@ -844,32 +866,32 @@ class ExportEFMI:
         command_lists.append("endif")
         command_lists.new_line()
 
-        for component in exported_components:
+        for component in gpu_components:
             component_id = component["component_id"]
-            submesh = submesh_by_unique[component["unique_str"]]
+            submesh = submesh_by_unique.get(component["unique_str"])
             command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
             command_lists.append("run = CommandList\\EFMIv1\\OverrideTextures")
-            if component["cpu_posed"]:
-                command_lists.append("; 当前组件仅参与骨骼读取，没有可替换的 GPU 网格")
-                command_lists.new_line()
-                continue
-
             current_key = "indexcount_" + str(component["index_count"])
-            self._append_merged_buffer_bindings(command_lists, submesh)
-            self._append_merged_slot_texture_bindings(
-                command_lists,
-                submesh,
-                drawib_drawibmodel_dict.get(submesh.match_draw_ib),
-            )
-            current_key = self._get_submesh_ib_key(submesh)
-            if current_key in self.cross_ib_info_dict:
-                _, own_drawcalls = self._split_drawcalls_by_cross_ib(
-                    submesh.drawcall_model_list,
-                    source_ib_key=current_key,
+            if submesh is not None:
+                self._append_merged_buffer_bindings(command_lists, submesh)
+                self._append_merged_slot_texture_bindings(
+                    command_lists,
+                    submesh,
+                    drawib_drawibmodel_dict.get(submesh.match_draw_ib),
                 )
+                current_key = self._get_submesh_ib_key(submesh)
+                if current_key in self.cross_ib_info_dict:
+                    _, own_drawcalls = self._split_drawcalls_by_cross_ib(
+                        submesh.drawcall_model_list,
+                        source_ib_key=current_key,
+                    )
+                else:
+                    own_drawcalls = submesh.drawcall_model_list
+                self._append_merged_draw_lines(command_lists, own_drawcalls)
             else:
-                own_drawcalls = submesh.drawcall_model_list
-            self._append_merged_draw_lines(command_lists, own_drawcalls)
+                command_lists.append(
+                    "; 蓝图中已删除该 GPU 组件：仅提供合并骨骼，不绑定或绘制网格"
+                )
             self._append_merged_incoming_cross_ib_draws(
                 command_lists,
                 current_key,
@@ -962,9 +984,9 @@ class ExportEFMI:
         ini_builder.append_section(command_lists)
 
         entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
-        for component in exported_components:
+        for component in gpu_components:
             component_id = component["component_id"]
-            submesh = submesh_by_unique[component["unique_str"]]
+            submesh = submesh_by_unique.get(component["unique_str"])
             entrypoints.append(
                 "[TextureOverride_EntryPoint_Component" + str(component_id) + "]"
             )
@@ -977,16 +999,14 @@ class ExportEFMI:
                 "    $\\EFMIv1\\component_id = " + str(component_id)
             )
             entrypoints.append(
-                "    $\\EFMIv1\\gpu_posed = " + str(int(not component["cpu_posed"]))
+                "    $\\EFMIv1\\gpu_posed = 1"
             )
-            if component["cpu_posed"]:
-                entrypoints.append("    $\\EFMIv1\\skip_skeleton_override = 1")
             entrypoints.append(
                 "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
                 "ref CommandList_Draw_Component" + str(component_id)
             )
             entrypoints.append("    run = CommandList_Component_DrawInstances")
-            if self.blueprint_model.keyname_mkey_dict:
+            if submesh is not None and self.blueprint_model.keyname_mkey_dict:
                 active_index = draw_ib_active_index_dict.get(submesh.match_draw_ib, 0)
                 entrypoints.append("    $active" + str(active_index) + " = 1")
                 if GlobalProterties.generate_branch_mod_gui():
