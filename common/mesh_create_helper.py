@@ -235,7 +235,10 @@ class MeshCreateHelper:
         bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
 
         bpy.context.view_layer.update()
-        bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        # Blender 后台回归/批处理没有 Window 上下文，redraw_timer 的 poll 会失败。
+        # 交互式导入仍保持原来的立即重绘行为。
+        if not getattr(getattr(bpy, "app", None), "background", False):
+            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
 
         TimerUtils.End("Import 3Dmigoto Raw")
         return obj
@@ -315,9 +318,28 @@ class MeshCreateHelper:
         for semantic_index, bone_indices_list in blend_indices.items():
             arr = numpy.array(bone_indices_list)
             arr = numpy.where(arr == 65535, -1, arr)
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
             blend_indices[semantic_index] = arr
 
-        assert len(blend_indices) == len(blend_weights)
+            weights = blend_weights.get(semantic_index)
+            if weights is None:
+                # EFMI 隐式权重组件只有 BLENDINDICES，没有 BLENDWEIGHTS；
+                # 按 EFMI-Tools 规则把每个顶点的第一个骨骼权重设为 1.0。
+                weights = numpy.zeros(arr.shape, dtype=numpy.float32)
+                if len(weights):
+                    weights[:, 0] = 1.0
+            else:
+                weights = numpy.asarray(weights, dtype=numpy.float32)
+                if weights.ndim == 1:
+                    weights = weights.reshape(-1, 1)
+                if weights.shape != arr.shape:
+                    raise Fatal(
+                        "BLENDINDICES 与 BLENDWEIGHTS 形状不一致，对象: "
+                        + obj.name + "，SemanticIndex: " + str(semantic_index)
+                    )
+            blend_weights[semantic_index] = weights
+
         if blend_indices:
             effective_vg_map = None
             if vertex_group_map is not None:

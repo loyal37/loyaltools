@@ -471,9 +471,19 @@ class DumpWorkspaceExtractor:
             ]
             if not gpu_components:
                 continue
-            if not all(
-                component.mesh.get_weighting_type() == WeightingType.Explicit
+            weighting_types = [
+                component.mesh.get_weighting_type()
                 for component in gpu_components
+            ]
+            # EFMI-Tools 对象级 weighting_type 取组件中的最高等级：只要对象
+            # 含 Explicit 组件就属于显式权重对象。真实角色可以同时包含
+            # Explicit 与 Implicit 组件（隐式组件只有 BLENDINDICES，首项权重
+            # 按 1.0 处理），不能要求每个组件都有 BLENDWEIGHTS。
+            if WeightingType.Explicit not in weighting_types:
+                continue
+            if any(
+                weighting_type not in (WeightingType.Explicit, WeightingType.Implicit)
+                for weighting_type in weighting_types
             ):
                 continue
             explicit_candidates.append(candidate)
