@@ -378,7 +378,14 @@ class ObjBufferHelper:
         if d3d11_element.Format == "R32G32B32A32_SINT":
             return blendindices
         elif d3d11_element.Format == "R16G16B16A16_UINT":
-            return blendindices
+            min_index = int(numpy.min(blendindices))
+            max_index = int(numpy.max(blendindices))
+            if min_index < 0 or max_index > 65535:
+                SSMTErrorUtils.raise_fatal(
+                    "R16 BLENDINDICES 超出 0-65535 范围，最小值: "
+                    + str(min_index) + "，最大值: " + str(max_index)
+                )
+            return blendindices.astype(numpy.uint16)
         elif d3d11_element.Format == "R32G32B32A32_UINT":
             return blendindices
         elif d3d11_element.Format == "R32G32_UINT":

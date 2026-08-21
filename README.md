@@ -16,10 +16,11 @@
 | 游戏预设 | 从 SSMT4 配置读取 | 独立模式下可直接选择（默认 EFMI/终末地），也兼容已安装的 SSMT4 |
 | 工作空间 | SSMT4 管理 | 自定义目录即可（SSMT4 存在时也可同步） |
 | 蓝图导出 / 工具集 | ✔ | ✔（完整保留） |
+| EFMI 骨骼合并 | 需外部流程 | 内置独立提取/导入流程，Cross IB 节点可切换一般跨 IB / 骨骼合并 |
 
 ## 使用前提
 
-1. 游戏侧需要已部署 **EFMI 运行时框架**（即提供 `CommandList\EFMIv1\OverrideTextures` 的框架 ini，随 XXMI 的 EFMI Importer 或 SSMT4 部署）。生成的 Mod ini 依赖该命令列表。
+1. 游戏侧需要已部署 **EFMI 运行时框架**（即提供 `CommandList\EFMIv1\OverrideTextures` 的框架 ini，随 XXMI 的 EFMI Importer 或 SSMT4 部署）。普通 Mod 依赖该命令列表；骨骼合并 Mod 要求 **EFMI 1.4.1+**。
 2. 帧分析 Dump 需由 3dmigoto 生成（游戏内按 F8），d3dx.ini 中建议的分析选项：
 
    ```ini
@@ -41,8 +42,8 @@
 「提取模型 (DrawIB)」面板：
 
 1. 填入 **帧分析 Dump 目录**（FrameAnalysis-xxx 文件夹）
-2. 不知道 DrawIB？点 **列出 Dump 中的 DrawIB**，结果按索引数排序写入文本编辑器的 `LoyalTools_DrawIB列表`（含绘制次数/骨骼权重/贴图数，便于筛选角色模型）
-3. 填入 **DrawIB**（8 位十六进制，可逗号/空格分隔多个），点 **提取**
+2. 在 DrawIB 分行表格中添加一个或多个 **DrawIB**（8 位十六进制），别名可留空
+3. 点 **提取**，插件会同时复制候选贴图、导入网格并自动接入蓝图
 4. 提取结果写入工作空间的 `workplace/` 子文件夹（`workplace/<DrawIB>-<索引数>-<起始索引>/TYPE_GPU-EFMI/` 结构，与 SSMT4 兼容），默认自动导入到场景（模型名为 `DrawIB-索引数-起始索引`，集合以自定义文件夹命名并标红）
 
 ### 3. 标记贴图
@@ -56,6 +57,19 @@
    - **Hash 方式**：按贴图 hash 生成独立的 TextureOverride
 4. 点 **标记所选贴图**。贴图会复制为 `<DrawIB>-<索引数>-<起始索引>-<标记名>.dds`（SSMT4 风格命名），标记写入该子网格的 SubmeshJson，导出时自动生成贴图 ini 并拷贝贴图文件
 5. 可用 **预览** / **打开贴图文件夹** 辅助辨认贴图
+
+### 3.5 骨骼合并制作（独立流程）
+
+骨骼合并不会改变普通 DrawIB 制作流程。在「提取模型」面板把「制作流程」切换为 **骨骼合并**：
+
+1. 选择角色完整显示时抓取的 FrameAnalysis 文件夹，不需要填写 DrawIB。
+2. 点「提取」。LoyalTools 会按 EFMI-Tools v0.6.2 的规则识别主要角色、读取各组件骨骼矩阵并建立全局顶点组映射。
+3. 输出目录和模型名仍为 `<IBHash>-<IndexCount>-<FirstIndex>`；工作空间根目录会额外生成 `EFMI_MergedSkeleton.json`。当前版本暂不提取 LOD。
+4. 在骨骼合并模式点「导入」时，各组件的本地顶点组会自动改为 profile 中的全局顶点组；普通模式导入不会应用这份映射。
+5. 在蓝图中加入 Cross IB 节点，把「跨 IB 方式」切换为 **骨骼合并**。映射仍填写「源 IndexCount >> 目标 IndexCount」。不需要 VS 200–204 选项。
+6. 生成 Mod。该模式会导出 16 位 `BLENDINDICES` 和 EFMI 1.4.1 Merged Skeleton 回调；不会生成一般跨 IB 使用的 HLSL。
+
+同一张蓝图不能混用「一般跨 IB」和「骨骼合并」。全局顶点组 ID 上限为 65535；单个游戏组件原始骨骼仍受游戏骨骼缓冲区的 256 项范围约束。
 
 ### 4. 编辑与导出
 

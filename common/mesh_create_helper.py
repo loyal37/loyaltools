@@ -37,6 +37,7 @@ class MeshCreateHelper:
         local_bounding_box_max:list | None = None,
         vertex_compression_params:list | None = None,
         import_collection:bpy.types.Collection | None = None,
+        vertex_group_map:dict | None = None,
     ):
         TimerUtils.Start("Import 3Dmigoto Raw")
         print("导入模型: " + mesh_name)
@@ -188,7 +189,10 @@ class MeshCreateHelper:
                     component = extracted_object.components[partname_count]
 
         print("导入顶点组")
-        MeshCreateHelper.import_vertex_groups(mesh, obj, blend_indices, blend_weights, component)
+        MeshCreateHelper.import_vertex_groups(
+            mesh, obj, blend_indices, blend_weights, component,
+            vertex_group_map=vertex_group_map,
+        )
         print("导入顶点组完毕")
 
         MeshCreateHelper.import_shapekeys(mesh, obj, shapekeys)
@@ -304,7 +308,10 @@ class MeshCreateHelper:
                 blender_uvs.data.foreach_set('uv', uv_array)
 
     @staticmethod
-    def import_vertex_groups(mesh, obj, blend_indices, blend_weights, component):
+    def import_vertex_groups(
+        mesh, obj, blend_indices, blend_weights, component,
+        vertex_group_map:dict | None = None,
+    ):
         for semantic_index, bone_indices_list in blend_indices.items():
             arr = numpy.array(bone_indices_list)
             arr = numpy.where(arr == 65535, -1, arr)
@@ -312,14 +319,34 @@ class MeshCreateHelper:
 
         assert len(blend_indices) == len(blend_weights)
         if blend_indices:
-            if component is None:
-                num_vertex_groups = max(itertools.chain(*itertools.chain(*blend_indices.values()))) + 1
+            effective_vg_map = None
+            if vertex_group_map is not None:
+                effective_vg_map = {
+                    int(local_id): int(global_id)
+                    for local_id, global_id in vertex_group_map.items()
+                }
+            elif component is not None:
+                effective_vg_map = {
+                    int(local_id): int(global_id)
+                    for local_id, global_id in component.vg_map.items()
+                }
+
+            if effective_vg_map is None:
+                valid_indices = [
+                    int(index)
+                    for values in blend_indices.values()
+                    for row in values
+                    for index in row
+                    if int(index) >= 0
+                ]
+                num_vertex_groups = (max(valid_indices) + 1) if valid_indices else 0
             else:
-                num_vertex_groups = max(component.vg_map.values()) + 1
+                num_vertex_groups = (max(effective_vg_map.values()) + 1) if effective_vg_map else 0
 
             print("num_vertex_groups: " + str(num_vertex_groups))
 
-            if num_vertex_groups > 10000:
+            max_reasonable_groups = 65536 if vertex_group_map is not None else 10000
+            if num_vertex_groups > max_reasonable_groups:
                 raise Fatal("检测到在当前导入的数据类型" + obj.get('3DMigoto:GameTypeName', "") + "描述下，BLENDINDICES顶点组数量为: " + str(num_vertex_groups) + " 基本不可能是正常情况，请更换其他数据类型重新导入")
 
             for i in range(num_vertex_groups):
@@ -329,10 +356,18 @@ class MeshCreateHelper:
                     for i, w in zip(blend_indices[semantic_index][vertex.index], blend_weights[semantic_index][vertex.index]):
                         if w == 0.0:
                             continue
-                        if component is None:
+                        if int(i) < 0:
+                            continue
+                        if effective_vg_map is None:
                             obj.vertex_groups[i].add((vertex.index,), w, 'REPLACE')
                         else:
-                            obj.vertex_groups[component.vg_map[str(i)]].add((vertex.index,), w, 'REPLACE')
+                            mapped_group = effective_vg_map.get(int(i))
+                            if mapped_group is None:
+                                raise Fatal(
+                                    "顶点使用了骨骼合并配置中不存在的本地顶点组: "
+                                    + str(int(i)) + "，对象: " + obj.name
+                                )
+                            obj.vertex_groups[mapped_group].add((vertex.index,), w, 'REPLACE')
 
     @staticmethod
     def import_shapekeys(mesh, obj, shapekeys):

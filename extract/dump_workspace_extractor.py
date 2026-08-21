@@ -52,7 +52,14 @@ if __package__ in (None, ''):
     sys.exit(0)
 
 from ..efmi_extract.migoto_io.object_extractor.object_extractor import ObjectExtractor
-from ..efmi_extract.migoto_io.object_extractor.migoto_object.migoto_object_builder import MigotoObjectBuilder
+from ..efmi_extract.migoto_io.object_extractor.migoto_object.migoto_object_builder import (
+    MigotoObjectBuilder,
+    MigotoObjectFilter,
+)
+from ..efmi_extract.migoto_io.object_extractor.raw_object.raw_object_extractor import (
+    DrawCallFilter,
+    RawObjectFilter,
+)
 from ..efmi_extract.migoto_io.data_model.byte_buffer import (
     BufferLayout,
     BufferSemantic,
@@ -65,12 +72,27 @@ from ..efmi_extract.migoto_io.migoto_model.types import (
     ShaderType,
     Topology,
     DXGI_FORMAT,
+    ResourceSlot,
 )
 from ..efmi_extract.migoto_io.migoto_model.migoto_format import MigotoFormat
 from ..efmi_extract.migoto_io.migoto_model.frame_model.calls import ShaderCall
-from ..efmi_extract.migoto_io.migoto_model.frame_model.resources import IndexBuffer, VertexBuffer
+from ..efmi_extract.migoto_io.migoto_model.frame_model.resources import (
+    ConstantBuffer,
+    IndexBuffer,
+    Resource,
+    VertexBuffer,
+)
 from ..efmi_extract.migoto_io.migoto_model.frame_model.api_calls.draw_calls import DrawIndexedInstanced
+from ..efmi_extract.migoto_io.migoto_model.migoto_mesh import WeightingType
 from ..efmi_extract.migoto_io.object_extractor.migoto_object.textures_descriptor import TextureFilter
+from ..common.efmi_merged_skeleton import (
+    MAX_VERTEX_GROUP_ID,
+    PROFILE_FORMAT_VERSION,
+    PROFILE_MODE,
+    REQUIRED_EFMI_VERSION,
+    make_submesh_metadata,
+    write_profile,
+)
 
 
 # 3dmigoto 索引缓冲区 DXGI_FORMAT -> numpy 类型
@@ -411,6 +433,331 @@ class DumpWorkspaceExtractor:
             warnings=warnings,
             workspace_folder=workspace_folder,
         )
+
+    def extract_merged_skeleton(
+        self,
+        workspace_folder: str,
+        gametype_name: str = 'GPU-EFMI',
+        copy_textures: bool = True,
+    ) -> ExtractResult:
+        '''
+        自动识别当前帧中的主要显式权重对象，生成 EFMI 1.4.1 Merged
+        Skeleton 工作空间。目录/JSON/物体主键仍沿用 LoyalTools 的
+        ``IBHash-IndexCount-FirstIndex``，不会调用或修改普通 ``extract`` 流程。
+        '''
+        workspace_folder = os.path.abspath(str(workspace_folder))
+        os.makedirs(workspace_folder, exist_ok=True)
+        warnings: list[str] = []
+
+        object_extractor = ObjectExtractor(verbose_logging=self.verbose)
+        try:
+            candidates = object_extractor.extract_objects(
+                model=self._get_model(),
+                draw_call_filter=DrawCallFilter(),
+                raw_object_filter=RawObjectFilter(min_component_count=1),
+                migoto_object_filter=MigotoObjectFilter(
+                    skip_static_objects=True,
+                    ignore_errors=True,
+                ),
+            )
+        except Exception as exc:
+            raise ExtractError("骨骼合并角色识别失败: " + repr(exc))
+
+        explicit_candidates = []
+        for candidate in candidates:
+            gpu_components = [
+                component for component in candidate.components
+                if not component.mesh.cpu_posed
+            ]
+            if not gpu_components:
+                continue
+            if not all(
+                component.mesh.get_weighting_type() == WeightingType.Explicit
+                for component in gpu_components
+            ):
+                continue
+            explicit_candidates.append(candidate)
+
+        if not explicit_candidates:
+            raise ExtractError(
+                "帧分析中没有识别到可用于骨骼合并的显式权重角色。"
+                "请在角色完整显示且未被菜单遮挡时重新抓帧。"
+            )
+
+        # EFMI-Tools 用 Character 标签识别多部件角色。若同一帧存在武器、NPC 等
+        # 多个加权对象，优先 Character，其次按组件数和总顶点数选择主对象。
+        selected_object = max(
+            explicit_candidates,
+            key=lambda obj: (
+                1 if str(obj.id).startswith("Character") else 0,
+                len(obj.components),
+                sum(int(component.mesh.format.vertex_count) for component in obj.components),
+            ),
+        )
+        if len(explicit_candidates) > 1:
+            warnings.append(
+                "帧中识别到 " + str(len(explicit_candidates))
+                + " 个显式权重对象，已自动选择 " + str(selected_object.id) + "。"
+            )
+
+        component_vg_metadata = self._build_merged_skeleton_vg_metadata(selected_object)
+        profile_components = []
+        unique_strs = []
+        seen_unique_strs = set()
+        json_paths = []
+        extracted_ib_hashes = []
+
+        for source_component_id, component in enumerate(selected_object.components):
+            records = []
+            for shader_call in component.raw_data.shader_calls:
+                draw_call = shader_call.draw_call
+                resources = shader_call.model_resources
+                if not isinstance(draw_call, DrawIndexedInstanced) or resources is None:
+                    continue
+                ib = resources.get_by_slot("ib")
+                if not isinstance(ib, IndexBuffer):
+                    continue
+                records.append(_DrawRecord(shader_call, draw_call, ib))
+
+            if not records:
+                raise ExtractError(
+                    "骨骼合并组件 " + str(source_component_id) + " 没有可导出的 DrawIndexedInstanced。"
+                )
+
+            primary_key = (
+                str(records[0].ib.hash).lower(),
+                int(records[0].draw_call.index_count),
+                int(records[0].draw_call.first_index or 0),
+            )
+            matching_records = [
+                record for record in records
+                if (
+                    str(record.ib.hash).lower(),
+                    int(record.draw_call.index_count),
+                    int(record.draw_call.first_index or 0),
+                ) == primary_key
+            ]
+            if len(matching_records) != len(records):
+                warnings.append(
+                    "组件 " + str(source_component_id) + " 存在不同绘制范围，"
+                    "已按首个主绘制生成 LoyalTools 子网格。"
+                )
+
+            ib_hash, index_count, first_index = primary_key
+            unique_str = ib_hash + "-" + str(index_count) + "-" + str(first_index)
+            if unique_str in seen_unique_strs:
+                raise ExtractError(
+                    "骨骼合并识别到重复的 LoyalTools 子网格主键: " + unique_str
+                    + "。请重新抓取角色完整、绘制范围稳定的一帧。"
+                )
+            seen_unique_strs.add(unique_str)
+            vg_metadata = component_vg_metadata[source_component_id]
+            profile_component = {
+                "component_id": len(profile_components),
+                "source_component_id": source_component_id,
+                "unique_str": unique_str,
+                "ib_hash": ib_hash,
+                "index_count": index_count,
+                "first_index": first_index,
+                "vertex_count": int(component.mesh.format.vertex_count),
+                "cpu_posed": bool(component.mesh.cpu_posed),
+                "vg_offset": int(vg_metadata["vg_offset"]),
+                "vg_count": int(vg_metadata["vg_count"]),
+                "vg_map": dict(vg_metadata["vg_map"]),
+                "lods": [],
+            }
+
+            try:
+                build = self._build_submesh(matching_records, unique_str, warnings)
+                profile_component["vertex_count"] = int(build.vertex_count)
+                json_path = self._write_submesh(
+                    build=build,
+                    workspace_folder=workspace_folder,
+                    gametype_name=gametype_name,
+                    copy_textures=copy_textures,
+                    warnings=warnings,
+                    merged_component=profile_component,
+                )
+            except Exception as exc:
+                raise ExtractError(
+                    "骨骼合并组件 " + str(source_component_id) + " (" + unique_str
+                    + ") 提取失败: " + repr(exc)
+                )
+
+            profile_components.append(profile_component)
+            unique_strs.append(unique_str)
+            json_paths.append(json_path)
+            if ib_hash not in extracted_ib_hashes:
+                extracted_ib_hashes.append(ib_hash)
+
+        profile = {
+            "format_version": PROFILE_FORMAT_VERSION,
+            "mode": PROFILE_MODE,
+            "required_efmi_version": REQUIRED_EFMI_VERSION,
+            "object_name": str(selected_object.id),
+            "weighting_type": WeightingType.Explicit.value,
+            "object_guid": sum(component["index_count"] for component in profile_components),
+            "max_instance_count": 8,
+            "components": profile_components,
+        }
+        write_profile(workspace_folder, profile)
+
+        self._update_workspace_root_files(
+            workspace_folder=workspace_folder,
+            unique_strs=unique_strs,
+            gametype_name=gametype_name,
+            draw_ibs=extracted_ib_hashes,
+            aliases=None,
+        )
+        return ExtractResult(
+            unique_strs=unique_strs,
+            json_paths=json_paths,
+            warnings=warnings,
+            workspace_folder=workspace_folder,
+        )
+
+    @staticmethod
+    def _component_resources(component):
+        for shader_call in component.raw_data.shader_calls:
+            resources = shader_call.model_resources or shader_call.resources
+            if resources is not None:
+                yield resources
+
+    def _get_component_skeleton_data(self, component) -> numpy.ndarray:
+        instance_config_cb = None
+        skeleton_resource = None
+        for resources in self._component_resources(component):
+            if instance_config_cb is None:
+                for slot, constant_buffer in resources.constant_buffers.items():
+                    if slot.shader_type == ShaderType.Vertex and constant_buffer.num_constants == 4096:
+                        instance_config_cb = constant_buffer
+                        break
+            if skeleton_resource is None:
+                skeleton_resource = resources.get_by_slot(
+                    ResourceSlot(ShaderType.Vertex, SlotType.Texture, 0)
+                )
+            if instance_config_cb is not None and skeleton_resource is not None:
+                break
+
+        if not isinstance(instance_config_cb, ConstantBuffer):
+            raise ExtractError("组件缺少 4096 常量的实例配置 VS-CB。")
+        if not isinstance(skeleton_resource, Resource):
+            raise ExtractError("组件缺少 vs-t0 骨骼数据资源。")
+
+        raw_layout = MigotoFormat(vb_layout=BufferLayout([
+            BufferSemantic(
+                AbstractSemantic(Semantic.RawData, 0),
+                DXGIFormat.R32G32B32A32_FLOAT,
+                input_slot=0,
+            ),
+        ]))
+        if instance_config_cb.buffer is None:
+            instance_config_cb.build_numpy_buffer(raw_layout)
+        config_data = instance_config_cb.buffer.get_field(0)
+        config_offset = int(instance_config_cb.first_constant)
+        instance_config = config_data[config_offset:config_offset + 16]
+        if len(instance_config) < 6:
+            raise ExtractError("组件的实例配置常量数据不完整。")
+        skeleton_offset = int(instance_config[5][0:2].view(numpy.uint32)[0])
+        if skeleton_offset == 0:
+            raise ExtractError("组件实例配置没有主骨骼偏移。")
+
+        if skeleton_resource.buffer is None:
+            skeleton_resource.build_numpy_buffer(raw_layout)
+        raw_data = skeleton_resource.buffer.get_field(0)
+        data_offset = skeleton_offset + 3
+        skeleton_raw = raw_data[data_offset:data_offset + 256 * 3]
+        usable_size = (len(skeleton_raw) // 3) * 3
+        if usable_size == 0:
+            raise ExtractError("组件的 vs-t0 骨骼数据为空。")
+        return skeleton_raw[:usable_size].reshape(-1, 12)
+
+    def _is_valid_bone_source(self, component) -> bool:
+        # EFMI-Tools v0.6.2 内置黑名单：Liino rocket boots 的骨骼矩阵不能作为
+        # 重复骨骼的权威来源，但组件本身仍然参与合并。
+        for resources in self._component_resources(component):
+            if resources.get_by_hash("80aafa4b"):
+                return False
+        return True
+
+    def _build_merged_skeleton_vg_metadata(self, migoto_object) -> list[dict]:
+        '''移植 EFMI-Tools v0.6.2 的矩阵去重策略，构造全局 VG 地址空间。'''
+        result = [
+            {"vg_offset": 0, "vg_count": 0, "vg_map": {}}
+            for _ in migoto_object.components
+        ]
+        vg_offset = 0
+        bone_candidates: dict[tuple, list[dict]] = {}
+
+        for component_id, component in enumerate(migoto_object.components):
+            if component.mesh.cpu_posed:
+                continue
+
+            vg_ids = component.mesh.get_data(Semantic.Blendindices)
+            vg_weights = component.mesh.get_data(Semantic.Blendweights)
+            if vg_weights is None:
+                vg_weights = component.mesh.get_data(Semantic.Blendweight)
+            if vg_ids is None or vg_ids.size == 0:
+                raise ExtractError("组件 " + str(component_id) + " 缺少 BLENDINDICES。")
+            vg_ids = numpy.asarray(vg_ids, dtype=numpy.uint32)
+            if vg_weights is None:
+                vg_weights = numpy.zeros_like(vg_ids, dtype=numpy.float32)
+                vg_weights[..., 0] = 1.0
+            else:
+                vg_weights = numpy.asarray(vg_weights, dtype=numpy.float32)
+
+            vg_count = int(vg_ids.max()) + 1
+            if vg_offset + vg_count - 1 > MAX_VERTEX_GROUP_ID:
+                raise ExtractError(
+                    "骨骼合并全局顶点组超过 R16_UINT 上限 "
+                    + str(MAX_VERTEX_GROUP_ID) + "。"
+                )
+            weighted_vertex_counts = numpy.bincount(
+                vg_ids[vg_weights != 0], minlength=vg_count
+            )
+            skeleton_buffer = self._get_component_skeleton_data(component)
+            if len(skeleton_buffer) < vg_count:
+                raise ExtractError(
+                    "组件 " + str(component_id) + " 的骨骼只有 "
+                    + str(len(skeleton_buffer)) + " 个，但网格声明了 "
+                    + str(vg_count) + " 个顶点组。"
+                )
+
+            component_map = {
+                str(local_vg_id): vg_offset + local_vg_id
+                for local_vg_id in range(vg_count)
+            }
+            result[component_id] = {
+                "vg_offset": vg_offset,
+                "vg_count": vg_count,
+                "vg_map": component_map,
+            }
+            valid_source = self._is_valid_bone_source(component)
+            for local_vg_id in range(vg_count):
+                bone_data = tuple(skeleton_buffer[local_vg_id].tolist())
+                if all(value == 0 for value in bone_data):
+                    continue
+                bone_candidates.setdefault(bone_data, []).append({
+                    "component_id": component_id,
+                    "local_vg_id": local_vg_id,
+                    "global_vg_id": vg_offset + local_vg_id,
+                    "weighted_vertex_count": int(weighted_vertex_counts[local_vg_id]),
+                    "is_valid_source": valid_source,
+                })
+            vg_offset += vg_count
+
+        for candidates in bone_candidates.values():
+            valid_candidates = [item for item in candidates if item["is_valid_source"]]
+            source = max(
+                valid_candidates,
+                key=lambda item: item["weighted_vertex_count"],
+            ) if valid_candidates else candidates[0]
+            for candidate in candidates:
+                result[candidate["component_id"]]["vg_map"][
+                    str(candidate["local_vg_id"])
+                ] = int(source["global_vg_id"])
+
+        return result
 
     # ------------------------------------------------------------------
     # 索引缓冲区
@@ -933,6 +1280,7 @@ class DumpWorkspaceExtractor:
         gametype_name: str,
         copy_textures: bool,
         warnings: list[str],
+        merged_component: dict | None = None,
     ) -> str:
         unique_str = build.unique_str
         type_folder = os.path.join(workspace_folder, unique_str, "TYPE_" + gametype_name)
@@ -1001,6 +1349,8 @@ class DumpWorkspaceExtractor:
             ],
             "CategoryBufferList": category_buffer_list,
         }
+        if merged_component is not None:
+            submesh_json_dict["EFMIMergedSkeleton"] = make_submesh_metadata(merged_component)
 
         json_path = os.path.join(type_folder, unique_str + ".json")
         with open(json_path, 'w', encoding='utf-8') as f:

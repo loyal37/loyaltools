@@ -31,6 +31,7 @@ class SubMeshModel:
     drawcall_model_list:list[DrawCallModel] = field(default_factory=list)
     source_obj_unique_str_count:dict[str, int] = field(default_factory=dict, repr=False)
     has_multi_file_export_nodes:bool = False
+    efmi_merged_skeleton:bool = False
 
     # post_init中计算得到这些属性
     match_draw_ib:str = field(init=False, default="")
@@ -69,6 +70,10 @@ class SubMeshModel:
 
         submesh_metadata = SubmeshMetadataResolver.resolve(folder_name)
         self.d3d11_game_type = submesh_metadata.d3d11_game_type
+        if self.efmi_merged_skeleton:
+            self.d3d11_game_type = self._build_efmi_merged_skeleton_game_type(
+                self.d3d11_game_type
+            )
 
         TimerUtils.start_stage("数据哈希预计算")
         object_hashes, source_obj_list = self._precompute_object_hashes()
@@ -296,6 +301,48 @@ class SubMeshModel:
         )
 
         self._deduplicate_draw_calls()
+
+    @staticmethod
+    def _build_efmi_merged_skeleton_game_type(game_type:D3D11GameType) -> D3D11GameType:
+        '''Clone the selected LoyalTools layout and widen BLENDINDICES0 to R16x4.'''
+        element_list = []
+        blendindices_found = False
+        for element in game_type.D3D11ElementList:
+            element_json = {
+                "SemanticName": element.SemanticName,
+                "SemanticIndex": int(element.SemanticIndex),
+                "Format": element.Format,
+                "ByteWidth": int(element.ByteWidth),
+                "ExtractSlot": element.ExtractSlot,
+                "ExtractTechnique": element.ExtractTechnique,
+                "Category": element.Category,
+            }
+            if element.SemanticName == "BLENDINDICES" and int(element.SemanticIndex) == 0:
+                blendindices_found = True
+                if element.Format not in (
+                    "R8G8B8A8_UINT",
+                    "R16G16B16A16_UINT",
+                ):
+                    from ..utils.ssmt_error_utils import SSMTErrorUtils
+                    SSMTErrorUtils.raise_fatal(
+                        "EFMI 骨骼合并目前只支持 R8G8B8A8_UINT/R16G16B16A16_UINT "
+                        "的 BLENDINDICES0，当前为 " + element.Format
+                    )
+                element_json["Format"] = "R16G16B16A16_UINT"
+                element_json["ByteWidth"] = 8
+            element_list.append(element_json)
+
+        if not blendindices_found:
+            from ..utils.ssmt_error_utils import SSMTErrorUtils
+            SSMTErrorUtils.raise_fatal(
+                "EFMI 骨骼合并子网格缺少 BLENDINDICES0，无法导出 R16 权重。"
+            )
+
+        return D3D11GameType.from_submesh_json_dict({
+            "GPU-PreSkinning": game_type.GPU_PreSkinning,
+            "WorkGameType": game_type.GameTypeName,
+            "CategoryDrawCategoryMap": dict(game_type.CategoryDrawCategoryDict),
+        }, override_d3d11_element_list=element_list)
 
     def _ensure_target_shape_key_union(self, target_obj: bpy.types.Object, source_objs: list[bpy.types.Object]):
         objects = [

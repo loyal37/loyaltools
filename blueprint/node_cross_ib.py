@@ -86,8 +86,12 @@ class CrossIBItem(PropertyGroup):
 
 class CrossIBMethodEnum:
     END_FIELD = 'END_FIELD'
-    END_FIELD_LABEL = '终末地跨 IB'
+    END_FIELD_LABEL = '一般跨 IB'
     END_FIELD_LOGIC_NAME = 'EFMI'
+
+    MERGED_SKELETON = 'MERGED_SKELETON'
+    MERGED_SKELETON_LABEL = '骨骼合并'
+    MERGED_SKELETON_LOGIC_NAME = 'EFMI'
 
     VB_COPY = 'VB_COPY'
     VB_COPY_LABEL = 'VB 复制'
@@ -96,7 +100,8 @@ class CrossIBMethodEnum:
     @classmethod
     def get_items(cls):
         return [
-            (cls.END_FIELD, cls.END_FIELD_LABEL, "终末地跨 IB 方式 (仅 EFMI)"),
+            (cls.END_FIELD, cls.END_FIELD_LABEL, "原有 HLSL/VS 通道跨 IB 方式 (仅 EFMI)"),
+            (cls.MERGED_SKELETON, cls.MERGED_SKELETON_LABEL, "EFMI 1.4.1 全局骨骼合并方式 (仅 EFMI)"),
             (cls.VB_COPY, cls.VB_COPY_LABEL, "VB 复制方式 (仅 ZZMI)"),
         ]
 
@@ -283,22 +288,28 @@ class SSMTNode_CrossIB(SSMTNodeBase):
             row.label(text="当前运行模式不支持跨 IB", icon='ERROR')
 
         if logic_name == "EFMI":
-            row = layout.row()
-            row.prop(self, "match_mode", text="识别模式")
+            if self.cross_ib_method == CrossIBMethodEnum.MERGED_SKELETON:
+                box_vb = layout.box()
+                box_vb.label(text="使用 EFMI 1.4.1 Merged Skeleton", icon='ARMATURE_DATA')
+                box_vb.label(text="源网格在目标组件回调中绘制，不使用 VS 200-204/HLSL")
+                box_vb.label(text="需要用骨骼合并模式提取并导入当前工作空间")
+            else:
+                row = layout.row()
+                row.prop(self, "match_mode", text="识别模式")
 
-            box_vb = layout.box()
-            box_vb.label(text="VS 槽位选项 (用于条件判断)", icon='CHECKBOX_HLT')
+                box_vb = layout.box()
+                box_vb.label(text="VS 槽位选项 (用于条件判断)", icon='CHECKBOX_HLT')
 
-            row = box_vb.row()
-            row.label(text="源块:")
-            row.prop(self, "vb_slot_200", text="200")
-            row.prop(self, "vb_slot_201", text="201")
-            row.prop(self, "vb_slot_204", text="204")
+                row = box_vb.row()
+                row.label(text="源块:")
+                row.prop(self, "vb_slot_200", text="200")
+                row.prop(self, "vb_slot_201", text="201")
+                row.prop(self, "vb_slot_204", text="204")
 
-            row = box_vb.row()
-            row.label(text="目标块:")
-            row.prop(self, "vb_slot_202", text="202")
-            row.prop(self, "vb_slot_203", text="203")
+                row = box_vb.row()
+                row.label(text="目标块:")
+                row.prop(self, "vb_slot_202", text="202")
+                row.prop(self, "vb_slot_203", text="203")
 
         box = layout.box()
 

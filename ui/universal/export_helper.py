@@ -25,7 +25,11 @@ class ExportHelper:
         }
 
     @staticmethod
-    def parse_submesh_model_list_from_blueprint_model(blueprint_model:BluePrintModel) -> list[SubMeshModel]:
+    def parse_submesh_model_list_from_blueprint_model(
+        blueprint_model:BluePrintModel,
+        efmi_merged_skeleton:bool = False,
+        efmi_merged_skeleton_unique_strs:set[str] | None = None,
+    ) -> list[SubMeshModel]:
         '''
         从蓝图中解析出一个Submesh Model列表
         如果是Submesh可以直接导出的游戏，例如EFMI，则调用处拿到后直接导出
@@ -51,10 +55,15 @@ class ExportHelper:
 
         # 根据draw_call_model_dict，初始化SubMeshModel列表
         for unique_str, draw_call_model_list in draw_call_model_dict.items():
+            widen_blendindices = efmi_merged_skeleton and (
+                efmi_merged_skeleton_unique_strs is None
+                or unique_str in efmi_merged_skeleton_unique_strs
+            )
             submesh_model = SubMeshModel(
                 drawcall_model_list=draw_call_model_list,
                 source_obj_unique_str_count=source_obj_unique_str_count,
                 has_multi_file_export_nodes=has_multi_file_export_nodes,
+                efmi_merged_skeleton=widen_blendindices,
             )
             submesh_model_list.append(submesh_model)
         

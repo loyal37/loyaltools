@@ -13,6 +13,7 @@ from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...utils.timer_utils import TimerUtils
+from ...common.efmi_merged_skeleton import load_profile
 
 import os
 import re
@@ -27,14 +28,6 @@ class ExportEFMI:
     drawib_model_list:list[DrawIBModel] = field(default_factory=list,init=False)
 
     def __post_init__(self):
-        self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(self.blueprint_model)
-        # EFMI 直接复用已经解析好的 SubMeshModel，避免同一轮导出把几何解析做两遍。
-        self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_submesh_model_list(
-            submesh_model_list=self.submesh_model_list,
-            combine_ib=False,
-        )
-        print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
-
         self.cross_ib_info_dict = self.blueprint_model.cross_ib_info_dict
         self.cross_ib_method_dict = self.blueprint_model.cross_ib_method_dict
         self.has_cross_ib = self.blueprint_model.has_cross_ib
@@ -45,6 +38,37 @@ class ExportEFMI:
         self.cross_ib_target_info = self.blueprint_model.cross_ib_target_info
         self.cross_ib_match_mode = self.blueprint_model.cross_ib_match_mode
         self.cross_ib_object_names = self.blueprint_model.cross_ib_object_names
+
+        cross_ib_methods = set(self.cross_ib_method_dict.values())
+        self.merged_skeleton_mode = 'MERGED_SKELETON' in cross_ib_methods
+        if self.merged_skeleton_mode and cross_ib_methods != {'MERGED_SKELETON'}:
+            raise ValueError(
+                "同一次 EFMI 导出不能混用“一般跨 IB”和“骨骼合并”。"
+                "请把蓝图中的 Cross IB 节点统一切换为同一种方式。"
+            )
+        self.merged_skeleton_profile = None
+        merged_gpu_unique_strs = None
+        if self.merged_skeleton_mode:
+            self.merged_skeleton_profile = load_profile(
+                GlobalConfig.path_workspace_folder(), required=True
+            )
+            merged_gpu_unique_strs = {
+                component["unique_str"]
+                for component in self.merged_skeleton_profile["components"]
+                if not component["cpu_posed"]
+            }
+
+        self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(
+            self.blueprint_model,
+            efmi_merged_skeleton=self.merged_skeleton_mode,
+            efmi_merged_skeleton_unique_strs=merged_gpu_unique_strs,
+        )
+        # EFMI 直接复用已经解析好的 SubMeshModel，避免同一轮导出把几何解析做两遍。
+        self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_submesh_model_list(
+            submesh_model_list=self.submesh_model_list,
+            combine_ib=False,
+        )
+        print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
         print(f"[CrossIB EFMI] 初始化: has_cross_ib={self.has_cross_ib}")
         print(f"[CrossIB EFMI] cross_ib_info_dict={self.cross_ib_info_dict}")
@@ -492,7 +516,475 @@ class ExportEFMI:
                     return drawib_model
             return None
 
+    @staticmethod
+    def _merged_resource_prefix(submesh_model):
+        return "Resource_" + submesh_model.unique_str.replace("-", "_")
+
+    def _append_merged_buffer_bindings(self, section, submesh_model, indent=""):
+        prefix = self._merged_resource_prefix(submesh_model)
+        section.append(indent + "ib = " + prefix + "_Index")
+        for category in submesh_model.category_buffer_dict.keys():
+            slot = submesh_model.d3d11_game_type.CategoryExtractSlotDict.get(
+                category, "unknown_slot"
+            )
+            section.append(indent + slot + " = " + prefix + "_" + category)
+        if "Position" in submesh_model.category_buffer_dict:
+            section.append(indent + "vb3 = " + prefix + "_Position")
+
+    def _append_merged_slot_texture_bindings(
+        self, section, submesh_model, drawib_model, indent=""
+    ):
+        if GlobalProterties.forbid_auto_texture_ini() or drawib_model is None:
+            return
+        texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(
+            submesh_model
+        )
+        if GlobalProterties.use_rabbitfx_slot():
+            for texture_info in texture_markup_info_list:
+                if getattr(texture_info, "mark_type", "") != "Slot":
+                    continue
+                resource_name = texture_info.get_resource_name()
+                if texture_info.mark_name == "DiffuseMap":
+                    section.append(indent + "Resource\\RabbitFx\\Diffuse = ref " + resource_name)
+                elif texture_info.mark_name == "LightMap":
+                    section.append(indent + "Resource\\RabbitFx\\LightMap = ref " + resource_name)
+                elif texture_info.mark_name == "NormalMap":
+                    section.append(indent + "Resource\\RabbitFx\\NormalMap = ref " + resource_name)
+            section.append(indent + "run = CommandList\\RabbitFx\\SetTextures")
+            for texture_info in texture_markup_info_list:
+                if getattr(texture_info, "mark_type", "") != "Slot":
+                    continue
+                if texture_info.mark_name in ("DiffuseMap", "LightMap", "NormalMap"):
+                    continue
+                slot = texture_info.mark_slot
+                if slot and not slot.lower().startswith("ps-t"):
+                    number = re.search(r"\d+", slot)
+                    slot = "ps-t" + (number.group() if number else slot)
+                section.append(indent + slot + " = " + texture_info.get_resource_name())
+        else:
+            for texture_info in texture_markup_info_list:
+                if getattr(texture_info, "mark_type", "") != "Slot":
+                    continue
+                section.append(
+                    indent + texture_info.mark_slot + " = " + texture_info.get_resource_name()
+                )
+
+    def _append_merged_draw_lines(self, section, drawcalls):
+        for line in M_IniHelper.get_drawindexed_str_list(drawcalls):
+            section.append(line)
+
+    def _append_merged_incoming_cross_ib_draws(
+        self,
+        section,
+        target_key,
+        submesh_by_unique,
+        drawib_drawibmodel_dict,
+    ):
+        for source_key in self.cross_ib_target_info.get(target_key, []):
+            source_submesh = self._find_source_submesh_by_ib_key(source_key)
+            if source_submesh is None:
+                continue
+            incoming_drawcalls, _ = self._split_drawcalls_by_cross_ib(
+                source_submesh.drawcall_model_list,
+                source_ib_key=source_key,
+                target_ib_key=target_key,
+            )
+            if not incoming_drawcalls:
+                continue
+            section.append(
+                "; 骨骼合并跨 IB: "
+                + source_submesh.unique_str
+                + " -> "
+                + target_key
+            )
+            self._append_merged_buffer_bindings(section, source_submesh)
+            self._append_merged_slot_texture_bindings(
+                section,
+                source_submesh,
+                drawib_drawibmodel_dict.get(source_submesh.match_draw_ib),
+            )
+            self._append_merged_draw_lines(section, incoming_drawcalls)
+
+    def _generate_merged_skeleton_ini_file(self):
+        profile = self.merged_skeleton_profile
+        if profile is None:
+            raise ValueError("缺少 EFMI 骨骼合并工作空间配置。")
+        if self.cross_ib_match_mode != 'INDEX_COUNT':
+            raise ValueError("EFMI 骨骼合并 Cross IB 必须使用 IndexCount 识别模式。")
+
+        profile_unique_strs = {
+            component["unique_str"] for component in profile["components"]
+        }
+        unexpected_submeshes = [
+            submesh.unique_str
+            for submesh in self.submesh_model_list
+            if submesh.unique_str not in profile_unique_strs
+        ]
+        if unexpected_submeshes:
+            raise ValueError(
+                "蓝图包含不属于当前骨骼合并 profile 的子网格: "
+                + ", ".join(unexpected_submeshes)
+            )
+
+        cpu_component_keys = {
+            "indexcount_" + str(component["index_count"])
+            for component in profile["components"]
+            if component["cpu_posed"]
+        }
+        cpu_cross_ib_keys = set()
+        for source_key, target_keys in self.cross_ib_info_dict.items():
+            if source_key in cpu_component_keys:
+                cpu_cross_ib_keys.add(source_key)
+            cpu_cross_ib_keys.update(
+                target_key for target_key in target_keys
+                if target_key in cpu_component_keys
+            )
+        if cpu_cross_ib_keys:
+            raise ValueError(
+                "CPU posed 组件不支持骨骼合并跨 IB，自定义映射涉及: "
+                + ", ".join(sorted(cpu_cross_ib_keys))
+            )
+
+        ini_builder = M_IniBuilder()
+        drawib_drawibmodel_dict = {
+            drawib_model.draw_ib: drawib_model
+            for drawib_model in self.drawib_model_list
+        }
+        draw_ib_active_index_dict = {
+            drawib_model.draw_ib: index
+            for index, drawib_model in enumerate(self.drawib_model_list)
+        }
+        submesh_by_unique = {
+            submesh.unique_str: submesh for submesh in self.submesh_model_list
+        }
+        workspace_name = GlobalConfig.get_workspace_name().replace('"', "'")
+
+        M_IniHelper.generate_hash_style_texture_ini(
+            ini_builder=ini_builder,
+            drawib_drawibmodel_dict=drawib_drawibmodel_dict,
+        )
+        self._integrate_object_swap_ini_hook(ini_builder)
+
+        constants = M_IniSection(M_SectionType.Constants)
+        constants.append("[Constants]")
+        constants.append("global $required_efmi_version = 1.41")
+        constants.append("global $object_guid = " + str(profile["object_guid"]))
+        constants.append(
+            "global $mesh_vertex_count = "
+            + str(sum(submesh.vertex_count for submesh in self.submesh_model_list))
+        )
+        constants.append("global $component_count = " + str(profile["component_count"]))
+        constants.append("global $max_instance_count = " + str(profile["max_instance_count"]))
+        constants.append("global $bones_count = " + str(profile["bones_count"]))
+        constants.append("global $mod_id = -1000")
+        constants.append("global $mod_enabled = 0")
+        constants.append("global $object_detected = 0")
+        constants.append("global $lod_level = 0")
+        constants.append("global $merged_skeleton_initialized = 0")
+        ini_builder.append_section(constants)
+
+        present = M_IniSection(M_SectionType.Present)
+        present.append("[Present]")
+        present.append("if $object_detected")
+        present.append("    if $mod_enabled")
+        present.append("        post $object_detected = 0")
+        present.append("    else")
+        present.append("        if $mod_id == -1000")
+        present.append("            run = CommandListRegisterMod")
+        present.append("        endif")
+        present.append("    endif")
+        present.append("endif")
+        ini_builder.append_section(present)
+
+        command_lists = M_IniSection(M_SectionType.CommandList)
+        command_lists.append("[CommandListRegisterMod]")
+        command_lists.append("$\\EFMIv1\\required_version = $required_efmi_version")
+        command_lists.append("$\\EFMIv1\\object_guid = $object_guid")
+        command_lists.append("Resource\\EFMIv1\\ModName = ref ResourceModName")
+        command_lists.append("Resource\\EFMIv1\\ModAuthor = ref ResourceModAuthor")
+        command_lists.append("Resource\\EFMIv1\\ModDesc = ref ResourceModDesc")
+        command_lists.append("Resource\\EFMIv1\\ModLink = ref ResourceModLink")
+        command_lists.append("Resource\\EFMIv1\\ModLogo = ref ResourceModLogo")
+        command_lists.append("run = CommandList\\EFMIv1\\RegisterMod")
+        command_lists.append("$mod_id = $\\EFMIv1\\mod_id")
+        command_lists.append("if $mod_id >= 0")
+        command_lists.append("    $mod_enabled = 1")
+        command_lists.append("endif")
+        command_lists.new_line()
+
+        for component in profile["components"]:
+            component_id = component["component_id"]
+            submesh = submesh_by_unique.get(component["unique_str"])
+            command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
+            command_lists.append("run = CommandList\\EFMIv1\\OverrideTextures")
+            if component["cpu_posed"]:
+                command_lists.append("; 当前组件仅参与骨骼读取，没有可替换的 GPU 网格")
+                command_lists.new_line()
+                continue
+
+            current_key = "indexcount_" + str(component["index_count"])
+            if submesh is not None:
+                self._append_merged_buffer_bindings(command_lists, submesh)
+                self._append_merged_slot_texture_bindings(
+                    command_lists,
+                    submesh,
+                    drawib_drawibmodel_dict.get(submesh.match_draw_ib),
+                )
+                current_key = self._get_submesh_ib_key(submesh)
+                if current_key in self.cross_ib_info_dict:
+                    _, own_drawcalls = self._split_drawcalls_by_cross_ib(
+                        submesh.drawcall_model_list,
+                        source_ib_key=current_key,
+                    )
+                else:
+                    own_drawcalls = submesh.drawcall_model_list
+                self._append_merged_draw_lines(command_lists, own_drawcalls)
+            else:
+                command_lists.append("; 当前组件没有蓝图自定义网格，保留用于骨骼与跨 IB 目标回调")
+            self._append_merged_incoming_cross_ib_draws(
+                command_lists,
+                current_key,
+                submesh_by_unique,
+                drawib_drawibmodel_dict,
+            )
+            command_lists.new_line()
+
+        command_lists.append("[CommandList_Component_DrawInstances]")
+        command_lists.append("handling = skip")
+        command_lists.append("$\\EFMIv1\\component_count = $component_count")
+        command_lists.append("$\\EFMIv1\\bones_count = $bones_count")
+        command_lists.append("$\\EFMIv1\\instance_count = $max_instance_count")
+        command_lists.append("run = CommandList\\EFMIv1\\Object_ReadConfig")
+        command_lists.append("$\\EFMIv1\\lod_level = $lod_level")
+        command_lists.append("$\\EFMIv1\\custom_mesh_scale = 1.00")
+        command_lists.append("run = CommandList\\EFMIv1\\Component_ReadConfig")
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_ObjectSpatialIdentity = ref Pool_ObjectSpatialIdentity"
+        )
+        command_lists.append(
+            "run = CommandList\\EFMIv1\\SpatialIdentity_IdentifyComponentInstances"
+        )
+        command_lists.append(
+            "CommandList\\EFMIv1\\Callback_MergedSkeleton_ConnectComponent = "
+            "ref CommandList_MergedSkeleton_ConnectComponent"
+        )
+        command_lists.append("run = CommandList\\EFMIv1\\Component_DrawInstances")
+        command_lists.new_line()
+
+        command_lists.append("[CommandList_MergedSkeleton_ConnectComponent]")
+        command_lists.append("if !$merged_skeleton_initialized")
+        command_lists.append("    $merged_skeleton_initialized = 1")
+        command_lists.append("    run = CommandListInitializeMergedSkeleton")
+        command_lists.append("endif")
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_MergedSkeleton_Component_VertexGroupOffsets = "
+            "ref Pool_MergedSkeleton_Component_VertexGroupOffsets"
+        )
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_MergedSkeleton_Component_VertexGroupCounts = "
+            "ref Pool_MergedSkeleton_Component_VertexGroupCounts"
+        )
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_MergedSkeleton_Component_LodRemaps = "
+            "ref Pool_MergedSkeleton_Component_LodRemaps"
+        )
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_MergedSkeleton_Instance_UpdateFrame = "
+            "ref Pool_MergedSkeleton_Instance_UpdateFrame"
+        )
+        command_lists.append(
+            "Pool\\EFMIv1\\Input_MergedSkeleton_Instance_LodLevel = "
+            "ref Pool_MergedSkeleton_Instance_LodLevel"
+        )
+        command_lists.append(
+            "Resource\\EFMIv1\\Output_MergedSkeleton = ref ResourceMergedSkeletonDataRW"
+        )
+        command_lists.append("run = CommandList\\EFMIv1\\MergedSkeleton_AttachComponent")
+        command_lists.append(
+            "vb2->ElementFormat(BLENDINDICES, 0) = R16G16B16A16_UINT"
+        )
+        command_lists.new_line()
+
+        command_lists.append("[CommandListInitializeMergedSkeleton]")
+        command_lists.append(
+            "Resource\\EFMIv1\\OutputMergedSkeleton_Template = "
+            "ref ResourceMergedSkeletonDataRW"
+        )
+        command_lists.append("run = CommandList\\EFMIv1\\InitializeMergedSkeleton")
+        command_lists.append("local $lod_level_count = $\\EFMIv1\\cfg_ms_max_lod_level_count")
+        command_lists.append("local $component_id")
+        for component in profile["components"]:
+            if component["cpu_posed"]:
+                continue
+            component_id = component["component_id"]
+            command_lists.append("$component_id = " + str(component_id))
+            command_lists.append(
+                "$Pool_MergedSkeleton_Component_VertexGroupOffsets[$component_id] = "
+                + str(component["vg_offset"])
+            )
+            command_lists.append(
+                "$Pool_MergedSkeleton_Component_VertexGroupCounts[$component_id] = "
+                + str(component["vg_count"])
+            )
+            command_lists.append(
+                "Pool_MergedSkeleton_Component_LodRemaps"
+                "[$component_id*$lod_level_count+0] = null"
+            )
+        ini_builder.append_section(command_lists)
+
+        entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
+        for component in profile["components"]:
+            component_id = component["component_id"]
+            submesh = submesh_by_unique.get(component["unique_str"])
+            entrypoints.append(
+                "[TextureOverride_EntryPoint_Component" + str(component_id) + "]"
+            )
+            entrypoints.append("hash = " + component["ib_hash"])
+            entrypoints.append("match_first_index = " + str(component["first_index"]))
+            entrypoints.append("match_index_count = " + str(component["index_count"]))
+            entrypoints.append("$object_detected = 1")
+            entrypoints.append("if $mod_enabled && DRAW_TYPE == 4")
+            entrypoints.append(
+                "    $\\EFMIv1\\component_id = " + str(component_id)
+            )
+            entrypoints.append(
+                "    $\\EFMIv1\\gpu_posed = " + str(int(not component["cpu_posed"]))
+            )
+            if submesh is None or component["cpu_posed"]:
+                entrypoints.append("    $\\EFMIv1\\skip_skeleton_override = 1")
+            entrypoints.append(
+                "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
+                "ref CommandList_Draw_Component" + str(component_id)
+            )
+            entrypoints.append("    run = CommandList_Component_DrawInstances")
+            if submesh is not None and self.blueprint_model.keyname_mkey_dict:
+                active_index = draw_ib_active_index_dict.get(submesh.match_draw_ib, 0)
+                entrypoints.append("    $active" + str(active_index) + " = 1")
+                if GlobalProterties.generate_branch_mod_gui():
+                    entrypoints.append("    $ActiveCharacter = 1")
+            entrypoints.append("endif")
+            entrypoints.new_line()
+        ini_builder.append_section(entrypoints)
+
+        resources = M_IniSection(M_SectionType.ResourceBuffer)
+        resources.append("[Pool_ObjectSpatialIdentity]")
+        resources.append(
+            "pool_size = $max_instance_count * $\\EFMIv1\\cfg_spatial_instance_load_ratio"
+        )
+        resources.append("pool_index_type = spatial")
+        resources.append("pool_spatial_radius = $\\EFMIv1\\cfg_spatial_base_radius")
+        resources.append(
+            "pool_expiration_timeout_frames = $\\EFMIv1\\cfg_spatial_expiration_frames"
+        )
+        resources.append(
+            "pool_expiration_reset_elements = $\\EFMIv1\\cfg_spatial_expiration_reset"
+        )
+        resources.append(
+            "pool_expiration_refresh_on_read = $\\EFMIv1\\cfg_spatial_expiration_read_refresh"
+        )
+        resources.append(
+            "pool_variable_default_value = $\\EFMIv1\\cfg_spatial_detault_value"
+        )
+        resources.new_line()
+        resources.append("[Pool_MergedSkeleton_Component_VertexGroupOffsets]")
+        resources.append("pool_size = $component_count")
+        resources.append("[Pool_MergedSkeleton_Component_VertexGroupCounts]")
+        resources.append("pool_size = $component_count")
+        resources.append("[Pool_MergedSkeleton_Component_LodRemaps]")
+        resources.append(
+            "pool_size = $component_count * $\\EFMIv1\\cfg_ms_max_lod_level_count"
+        )
+        resources.append("[Pool_MergedSkeleton_Instance_UpdateFrame]")
+        resources.append("pool_size = $component_count * $max_instance_count")
+        resources.append("[Pool_MergedSkeleton_Instance_LodLevel]")
+        resources.append("pool_size = $component_count * $max_instance_count")
+        resources.append("[ResourceMergedSkeletonDataRW]")
+        resources.append("type = RWBuffer")
+        resources.append("format = R32G32B32A32_FLOAT")
+        resources.append(
+            "array = ($\\EFMIv1\\cfg_ms_implicit_bones_count + "
+            "$\\EFMIv1\\cfg_ms_skeletons_count * $bones_count * $max_instance_count) "
+            "* $\\EFMIv1\\cfg_ms_bone_entry_size"
+        )
+        resources.new_line()
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+        for submesh in self.submesh_model_list:
+            prefix = self._merged_resource_prefix(submesh)
+            resources.append("[" + prefix + "_Index]")
+            resources.append("type = Buffer")
+            resources.append("format = DXGI_FORMAT_R32_UINT")
+            resources.append(
+                "filename = " + buffer_folder_name + "\\"
+                + submesh.unique_str + "-Index.buf"
+            )
+            resources.new_line()
+            for category in submesh.category_buffer_dict.keys():
+                resources.append("[" + prefix + "_" + category + "]")
+                resources.append("type = Buffer")
+                resources.append(
+                    "stride = "
+                    + str(submesh.d3d11_game_type.CategoryStrideDict.get(category, 0))
+                )
+                resources.append(
+                    "filename = " + buffer_folder_name + "\\"
+                    + submesh.unique_str + "-" + category + ".buf"
+                )
+                resources.new_line()
+        ini_builder.append_section(resources)
+
+        if not GlobalProterties.forbid_auto_texture_ini():
+            texture_resources = M_IniSection(M_SectionType.ResourceTexture)
+            appended_names = set()
+            for drawib_model in self.drawib_model_list:
+                for submesh in drawib_model.submesh_model_list:
+                    for texture_info in drawib_model.get_submesh_texture_markup_info_list(
+                        submesh
+                    ):
+                        if getattr(texture_info, "mark_type", "") != "Slot":
+                            continue
+                        resource_name = texture_info.get_resource_name()
+                        if resource_name in appended_names:
+                            continue
+                        appended_names.add(resource_name)
+                        texture_resources.append("[" + resource_name + "]")
+                        texture_resources.append(
+                            "filename = Textures/" + texture_info.mark_filename
+                        )
+                        texture_resources.new_line()
+            ini_builder.append_section(texture_resources)
+
+        mod_info = M_IniSection(M_SectionType.ResourceModInfo)
+        mod_info.append("[ResourceModName]")
+        mod_info.append('type = Buffer')
+        mod_info.append('data = "' + workspace_name + '"')
+        mod_info.append("[ResourceModAuthor]")
+        mod_info.append("[ResourceModDesc]")
+        mod_info.append("[ResourceModLink]")
+        mod_info.append("[ResourceModLogo]")
+        ini_builder.append_section(mod_info)
+
+        for drawib_model in self.drawib_model_list:
+            M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
+        GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
+        M_IniHelper.add_branch_key_sections(
+            ini_builder=ini_builder,
+            key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict,
+        )
+        M_IniHelperGUI.add_branch_mod_gui_section(
+            ini_builder=ini_builder,
+            key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict,
+        )
+
+        ini_filepath = os.path.join(
+            GlobalConfig.path_generate_mod_folder(),
+            GlobalConfig.get_workspace_name() + ".ini",
+        )
+        ini_builder.save_to_file(ini_filepath)
+
     def generate_ini_file(self):
+        if self.merged_skeleton_mode:
+            return self._generate_merged_skeleton_ini_file()
+
         ini_builder = M_IniBuilder()
         drawib_drawibmodel_dict = {
             drawib_model.draw_ib: drawib_model

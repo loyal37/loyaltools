@@ -382,6 +382,16 @@ class LoyalExtractIBItem(bpy.types.PropertyGroup):
 
 
 class LoyalExtractProperties(bpy.types.PropertyGroup):
+    workflow_mode: bpy.props.EnumProperty(
+        name="制作流程",
+        description="普通制作保持原流程；骨骼合并会自动从整帧识别角色并建立全局顶点组",
+        items=[
+            ('STANDARD', "普通制作", "按 DrawIB 列表提取，使用 LoyalTools 原有制作流程"),
+            ('MERGED_SKELETON', "骨骼合并", "自动识别帧中的角色组件，使用 EFMI 1.4.1 骨骼合并流程"),
+        ],
+        default='STANDARD',
+    ) # type: ignore
+
     frame_dump_folder: bpy.props.StringProperty(
         name="帧分析Dump目录",
         description="3dmigoto帧分析生成的FrameAnalysis-xxx文件夹路径 (需包含log.txt，且dump选项开启buf+txt)",
@@ -520,11 +530,15 @@ class LoyalExtractFromDump(bpy.types.Operator):
     def execute(self, context):
         scene = context.scene
         props = scene.loyal_extract_props
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
 
-        # 1.校验输入 (DrawIB从分行列表读取，兼容旧版单行字段)
+        # 1.校验输入。普通模式仍读取 DrawIB 表；骨骼合并模式由整帧自动识别角色。
         try:
             dump_folder = resolve_dump_folder(props)
-            ib_hashes, aliases = gather_ib_rows_input(scene, props)
+            if merged_skeleton_mode:
+                ib_hashes, aliases = [], {}
+            else:
+                ib_hashes, aliases = gather_ib_rows_input(scene, props)
         except ValueError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -538,6 +552,9 @@ class LoyalExtractFromDump(bpy.types.Operator):
 
         # 3.提取是终末地(EFMI)专用功能，其它预设下警告但仍允许执行
         if GlobalConfig.logic_name != "" and GlobalConfig.logic_name != LogicName.EFMI:
+            if merged_skeleton_mode:
+                self.report({'ERROR'}, "骨骼合并仅支持终末地(EFMI)，当前游戏预设为 " + GlobalConfig.logic_name + "。")
+                return {'CANCELLED'}
             self.report({'WARNING'}, "当前游戏预设为 " + GlobalConfig.logic_name + "，DrawIB提取是终末地(EFMI)专用功能，结果可能不正确。")
 
         # 4.延迟导入提取模块并执行提取
@@ -549,12 +566,18 @@ class LoyalExtractFromDump(bpy.types.Operator):
 
         try:
             extractor = get_cached_extractor(dump_folder)
-            result = extractor.extract(
-                ib_hashes=ib_hashes,
-                workspace_folder=workspace_folder,
-                copy_textures=True,
-                aliases=aliases or None,
-            )
+            if merged_skeleton_mode:
+                result = extractor.extract_merged_skeleton(
+                    workspace_folder=workspace_folder,
+                    copy_textures=True,
+                )
+            else:
+                result = extractor.extract(
+                    ib_hashes=ib_hashes,
+                    workspace_folder=workspace_folder,
+                    copy_textures=True,
+                    aliases=aliases or None,
+                )
         except ExtractError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -605,6 +628,7 @@ class LoyalExtractFromDump(bpy.types.Operator):
                 imported_obj = SSMTImportHelper.create_mesh_from_json(
                     json_file_path=json_path,
                     import_collection=collection,
+                    merged_skeleton=merged_skeleton_mode,
                 )
                 if imported_obj is not None:
                     # 物体名称保持纯 unique_str (drawib-indexcount-firstindex)，
@@ -641,7 +665,8 @@ class LoyalExtractFromDump(bpy.types.Operator):
                         if filename.lower().endswith((".dds", ".jpg", ".png")):
                             texture_count += 1
 
-        report_lines = ["提取完成: " + str(len(result.unique_strs)) + " 个子网格, 贴图 " + str(texture_count) + " 张"]
+        workflow_label = "骨骼合并" if merged_skeleton_mode else "普通"
+        report_lines = [workflow_label + "提取完成: " + str(len(result.unique_strs)) + " 个子网格, 贴图 " + str(texture_count) + " 张"]
         report_lines.append("已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\"")
         if import_error_count > 0:
             report_lines.append("有 " + str(import_error_count) + " 个子网格导入失败，详见控制台")
@@ -674,6 +699,8 @@ class LoyalImportWorkspace(bpy.types.Operator):
     def execute(self, context):
         import json as _json
 
+        props = context.scene.loyal_extract_props
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
         GlobalConfig.read_from_main_json_ssmt4()
         workspace_folder = GlobalConfig.path_workspace_folder()
         if workspace_folder == "":
@@ -696,9 +723,25 @@ class LoyalImportWorkspace(bpy.types.Operator):
             self.report({'WARNING'}, "Import.json 为空，工作空间中没有已提取的子网格，请先执行提取。")
             return {'CANCELLED'}
 
-        # 根据 Import.json 拼出各子网格的 SubmeshJson 路径
+        # 普通模式按 Import.json；骨骼合并模式严格按 profile 的组件顺序导入，
+        # 避免同一工作空间中旧的普通提取数据混入全局 VG 地址空间。
+        ordered_unique_strs = list(import_map.keys())
+        if merged_skeleton_mode:
+            try:
+                from ..common.efmi_merged_skeleton import load_profile
+                merged_profile = load_profile(workspace_folder, required=True)
+                ordered_unique_strs = [
+                    component["unique_str"]
+                    for component in merged_profile["components"]
+                ]
+            except Exception as e:
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
+
+        # 根据工作空间契约拼出各子网格的 SubmeshJson 路径
         json_paths = []
-        for unique_str, gametype_name in import_map.items():
+        for unique_str in ordered_unique_strs:
+            gametype_name = import_map.get(unique_str, 'GPU-EFMI')
             json_path = os.path.join(
                 workspace_folder, unique_str,
                 "TYPE_" + gametype_name,
@@ -739,6 +782,7 @@ class LoyalImportWorkspace(bpy.types.Operator):
                 imported_obj = SSMTImportHelper.create_mesh_from_json(
                     json_file_path=json_path,
                     import_collection=collection,
+                    merged_skeleton=merged_skeleton_mode,
                 )
                 if imported_obj is not None:
                     if imported_obj.name != unique_str:
@@ -791,26 +835,33 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         scene = context.scene
         props = scene.loyal_extract_props
 
+        layout.prop(props, "workflow_mode", expand=True)
         layout.prop(props, "frame_dump_folder")
 
-        # DrawIB分行列表 (SSMT4风格表格: DrawIB | 别名)
-        header_split = layout.split(factor=0.55, align=True)
-        header_split.label(text="DrawIB", icon='MESH_DATA')
-        header_split.label(text="别名 (可留空)")
+        if props.workflow_mode == 'STANDARD':
+            # DrawIB分行列表 (SSMT4风格表格: DrawIB | 别名)
+            header_split = layout.split(factor=0.55, align=True)
+            header_split.label(text="DrawIB", icon='MESH_DATA')
+            header_split.label(text="别名 (可留空)")
 
-        list_row = layout.row()
-        list_row.template_list(
-            "LOYAL_UL_ExtractIBList", "",
-            scene, "loyal_extract_ib_items",
-            scene, "loyal_extract_ib_index",
-            rows=3,
-        )
-        button_column = list_row.column(align=True)
-        button_column.operator(LoyalExtractIBAdd.bl_idname, text="", icon='ADD')
-        button_column.operator(LoyalExtractIBRemove.bl_idname, text="", icon='REMOVE')
-        button_column.separator()
-        button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_UP').direction = 'UP'
-        button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_DOWN').direction = 'DOWN'
+            list_row = layout.row()
+            list_row.template_list(
+                "LOYAL_UL_ExtractIBList", "",
+                scene, "loyal_extract_ib_items",
+                scene, "loyal_extract_ib_index",
+                rows=3,
+            )
+            button_column = list_row.column(align=True)
+            button_column.operator(LoyalExtractIBAdd.bl_idname, text="", icon='ADD')
+            button_column.operator(LoyalExtractIBRemove.bl_idname, text="", icon='REMOVE')
+            button_column.separator()
+            button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_UP').direction = 'UP'
+            button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_DOWN').direction = 'DOWN'
+        else:
+            merged_box = layout.box()
+            merged_box.label(text="自动识别当前帧的主要角色与全部组件", icon='ARMATURE_DATA')
+            merged_box.label(text="输出仍为 IBHash-IndexCount-FirstIndex；暂不处理 LOD")
+            merged_box.label(text="导入时自动把各组件本地顶点组映射为全局顶点组")
 
         extract_row = layout.row()
         extract_row.scale_y = 1.5

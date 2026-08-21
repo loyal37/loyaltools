@@ -5,12 +5,21 @@ import os
 from .d3d11_element import D3D11Element
 from .mesh_create_helper import MeshCreateHelper
 from .submesh_json import SubmeshJson, SubmeshCategoryBuffer
+from .efmi_merged_skeleton import (
+	get_component_by_unique_str,
+	load_profile,
+	parse_submesh_metadata,
+)
 from ..utils.format_utils import Fatal, FormatUtils
 
 
 class SSMTImportHelper:
 	@staticmethod
-	def create_mesh_from_json(json_file_path:str, import_collection:bpy.types.Collection | None = None):
+	def create_mesh_from_json(
+		json_file_path:str,
+		import_collection:bpy.types.Collection | None = None,
+		merged_skeleton:bool = False,
+	):
 		submesh_json = SubmeshJson(json_file_path)
 
 		elements, vb_data, vb_vertex_count = SSMTImportHelper.parse_category_buffers(submesh_json)
@@ -19,8 +28,23 @@ class SSMTImportHelper:
 		mesh_name = os.path.splitext(submesh_json.FileName)[0]
 		logic_name = submesh_json.GamePreset
 		gametypename = submesh_json.WorkGameType
+		merged_component = None
+		if merged_skeleton:
+			embedded = parse_submesh_metadata(submesh_json.JsonDict)
+			if embedded is None:
+				raise Fatal(
+					"当前子网格没有 EFMIMergedSkeleton 元数据，请用骨骼合并模式重新提取: "
+					+ mesh_name
+				)
+			workspace_folder = os.path.dirname(os.path.dirname(os.path.dirname(json_file_path)))
+			profile = load_profile(workspace_folder, required=True)
+			merged_component = get_component_by_unique_str(profile).get(mesh_name)
+			if merged_component is None:
+				raise Fatal("骨骼合并配置中找不到子网格: " + mesh_name)
+			if int(merged_component["component_id"]) != int(embedded["component_id"]):
+				raise Fatal("子网格与骨骼合并配置的 ComponentId 不一致: " + mesh_name)
 
-		return MeshCreateHelper.create_mesh_object(
+		obj = MeshCreateHelper.create_mesh_object(
 			mesh_name=mesh_name,
 			source_path=submesh_json.JsonFilePath,
 			logic_name=logic_name,
@@ -35,7 +59,19 @@ class SSMTImportHelper:
 			local_bounding_box_max=submesh_json.LocalBoundingBoxMax,
 			vertex_compression_params=submesh_json.VertexCompressionParams,
 			import_collection=import_collection,
+			vertex_group_map=(
+				merged_component.get("vg_map")
+				if merged_component is not None and not merged_component.get("cpu_posed", False)
+				else None
+			),
 		)
+		if obj is not None and merged_component is not None:
+			obj["LoyalTools:EFMIMergedSkeleton"] = True
+			obj["LoyalTools:EFMIComponentId"] = int(merged_component["component_id"])
+			obj["LoyalTools:EFMIVGOffset"] = int(merged_component["vg_offset"])
+			obj["LoyalTools:EFMIVGCount"] = int(merged_component["vg_count"])
+			obj["LoyalTools:EFMIProfile"] = str(embedded["profile"])
+		return obj
 
 	@staticmethod
 	def parse_index_buffer(submesh_json:SubmeshJson):
