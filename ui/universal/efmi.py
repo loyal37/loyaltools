@@ -659,7 +659,7 @@ class ExportEFMI:
                 )
 
     def _get_merged_profile_texture_binding_list(self, component):
-        '''解析没有自定义 SubMesh 的 CPU posed 组件自动贴图。'''
+        '''解析没有自定义 SubMesh 的 profile 组件自动贴图。'''
         if GlobalProterties.forbid_auto_texture_ini():
             return []
         unique_str = component["unique_str"]
@@ -694,7 +694,7 @@ class ExportEFMI:
         self.merged_auto_texture_binding_dict[unique_str] = cached_bindings
         if cached_bindings:
             print(
-                "[MergedSkeleton] CPU 原网格自动贴图 " + unique_str + ": "
+                "[MergedSkeleton] Profile 组件自动贴图 " + unique_str + ": "
                 + ", ".join(
                     binding.mark_name + "@" + binding.mark_slot
                     for binding in cached_bindings
@@ -763,9 +763,40 @@ class ExportEFMI:
         self,
         section,
         target_key,
-        submesh_by_unique,
         drawib_drawibmodel_dict,
     ):
+        target_submesh = self._find_source_submesh_by_ib_key(target_key)
+        target_texture_bindings = []
+        if target_submesh is not None:
+            target_drawib = drawib_drawibmodel_dict.get(
+                target_submesh.match_draw_ib
+            )
+            if (
+                not GlobalProterties.forbid_auto_texture_ini()
+                and target_drawib is not None
+            ):
+                target_texture_bindings = self._get_merged_texture_binding_list(
+                    target_submesh, target_drawib
+                )
+        elif self.merged_skeleton_profile is not None:
+            target_index_count = (
+                target_key.replace("indexcount_", "")
+                if target_key.startswith("indexcount_")
+                else ""
+            )
+            target_component = next(
+                (
+                    component
+                    for component in self.merged_skeleton_profile["components"]
+                    if str(component["index_count"]) == target_index_count
+                ),
+                None,
+            )
+            if target_component is not None:
+                target_texture_bindings = (
+                    self._get_merged_profile_texture_binding_list(target_component)
+                )
+
         for source_key in self.cross_ib_target_info.get(target_key, []):
             source_submesh = self._find_source_submesh_by_ib_key(source_key)
             if source_submesh is None:
@@ -784,10 +815,10 @@ class ExportEFMI:
                 + target_key
             )
             self._append_merged_buffer_bindings(section, source_submesh)
-            self._append_merged_slot_texture_bindings(
-                section,
-                source_submesh,
-                drawib_drawibmodel_dict.get(source_submesh.match_draw_ib),
+            # 骨骼合并跨 IB 只替换几何：跨入目标组件的源网格必须使用
+            # 目标 IB 的材质贴图，不能重新绑定源 IB 自己的贴图。
+            self._append_merged_texture_binding_lines(
+                section, target_texture_bindings
             )
             self._append_merged_draw_lines(section, incoming_drawcalls)
 
@@ -985,7 +1016,6 @@ class ExportEFMI:
             self._append_merged_incoming_cross_ib_draws(
                 command_lists,
                 current_key,
-                submesh_by_unique,
                 drawib_drawibmodel_dict,
             )
             command_lists.new_line()
