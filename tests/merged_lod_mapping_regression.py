@@ -3,6 +3,7 @@
 
 import importlib
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -30,11 +31,22 @@ def main():
     assert result.component_count == len(profile["components"])
     assert result.max_lod_count >= 1
     assert all(component.get("lods") for component in profile["components"])
+    assert result.preview_component_count > 0
+    assert os.path.isfile(
+        os.path.join(result.preview_workspace_folder, "Import.json")
+    )
+    for component in profile["components"]:
+        for lod in component["lods"]:
+            assert lod["unique_str"]
+            assert isinstance(lod["first_index"], int)
+            assert isinstance(lod["is_fallback"], bool)
     print("MERGED_LOD_MAPPING_REGRESSION=PASS")
     print("LOD_OBJECT=" + result.lod_object_name)
     print("MATCHED=" + str(result.matched_component_count))
     print("LOWER_POLY=" + str(result.lower_poly_component_count))
     print("MAX_LOD_COUNT=" + str(result.max_lod_count))
+    print("LOD_PREVIEW_COMPONENTS=" + str(result.preview_component_count))
+    print("LOD_PREVIEW_WORKSPACE=" + result.preview_workspace_folder)
 
 
 if __name__ == "__main__":

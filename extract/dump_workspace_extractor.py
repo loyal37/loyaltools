@@ -504,6 +504,131 @@ class DumpWorkspaceExtractor:
             ),
         )
 
+    @staticmethod
+    def get_component_primary_draw(component) -> tuple[tuple[str, int, int], list[_DrawRecord], int]:
+        """Return the LoyalTools key and matching draw records for one EFMI component."""
+        records = []
+        raw_data = getattr(component, "raw_data", None)
+        for shader_call in getattr(raw_data, "shader_calls", []):
+            draw_call = shader_call.draw_call
+            resources = shader_call.model_resources
+            if not isinstance(draw_call, DrawIndexedInstanced) or resources is None:
+                continue
+            ib = resources.get_by_slot("ib")
+            if not isinstance(ib, IndexBuffer):
+                continue
+            records.append(_DrawRecord(shader_call, draw_call, ib))
+
+        if not records:
+            raise ExtractError("组件没有可导出的 DrawIndexedInstanced。")
+
+        primary_key = (
+            str(records[0].ib.hash).lower(),
+            int(records[0].draw_call.index_count),
+            int(records[0].draw_call.first_index or 0),
+        )
+        matching_records = [
+            record for record in records
+            if (
+                str(record.ib.hash).lower(),
+                int(record.draw_call.index_count),
+                int(record.draw_call.first_index or 0),
+            ) == primary_key
+        ]
+        return primary_key, matching_records, len(records)
+
+    @staticmethod
+    def get_lod_preview_workspace_folder(workspace_folder: str, object_name: str) -> str:
+        token = re.sub(r'[^0-9A-Za-z._ -]+', '_', str(object_name or "LOD")).strip(" .")
+        if not token or token in (".", ".."):
+            token = "LOD"
+        return os.path.join(os.path.abspath(str(workspace_folder)), "LODPreview", token)
+
+    def extract_merged_skeleton_preview(
+        self,
+        workspace_folder: str,
+        selected_object=None,
+        object_name: str = "",
+        gametype_name: str = 'GPU-EFMI',
+    ) -> ExtractResult:
+        """Write the real LoD meshes to an isolated, preview-only workspace."""
+        workspace_folder = os.path.abspath(str(workspace_folder))
+        os.makedirs(workspace_folder, exist_ok=True)
+        warnings: list[str] = []
+
+        if selected_object is None:
+            candidates = self.get_merged_skeleton_candidates(
+                ignore_incomplete_draw_calls=True,
+            )
+            selected_object = self.select_merged_skeleton_object(
+                candidates,
+                object_name=object_name,
+            )
+        if object_name and str(selected_object.id) != str(object_name):
+            raise ExtractError("LOD 帧中找不到对象 " + str(object_name) + "。")
+
+        unique_strs = []
+        json_paths = []
+        draw_ibs = []
+        seen_unique_strs = set()
+        for component_id, component in enumerate(selected_object.components):
+            try:
+                primary_key, matching_records, total_record_count = self.get_component_primary_draw(
+                    component
+                )
+            except ExtractError as exc:
+                raise ExtractError(
+                    "LOD 预览组件 " + str(component_id) + " 提取失败: " + str(exc)
+                )
+
+            ib_hash, index_count, first_index = primary_key
+            unique_str = ib_hash + "-" + str(index_count) + "-" + str(first_index)
+            if unique_str in seen_unique_strs:
+                raise ExtractError("LOD 预览识别到重复子网格主键: " + unique_str)
+            seen_unique_strs.add(unique_str)
+            if total_record_count != len(matching_records):
+                warnings.append(
+                    "LOD Component " + str(component_id) + " 存在不同绘制范围，"
+                    "已按首个主绘制生成预览网格。"
+                )
+
+            build = self._build_submesh(matching_records, unique_str, warnings)
+            json_path = self._write_submesh(
+                build=build,
+                workspace_folder=workspace_folder,
+                gametype_name=gametype_name,
+                copy_textures=False,
+                warnings=warnings,
+                merged_component=None,
+            )
+            unique_strs.append(unique_str)
+            json_paths.append(json_path)
+            if ib_hash not in draw_ibs:
+                draw_ibs.append(ib_hash)
+
+        self._update_workspace_root_files(
+            workspace_folder=workspace_folder,
+            unique_strs=unique_strs,
+            gametype_name=gametype_name,
+            draw_ibs=draw_ibs,
+            aliases=None,
+        )
+        # The LoD preview manifest is an exact snapshot.  Old component folders
+        # may remain on disk, but they cannot leak into a later preview import.
+        with open(os.path.join(workspace_folder, "Import.json"), 'w', encoding='utf-8') as file:
+            json.dump(
+                {unique_str: gametype_name for unique_str in unique_strs},
+                file,
+                ensure_ascii=False,
+                indent=4,
+            )
+        return ExtractResult(
+            unique_strs=unique_strs,
+            json_paths=json_paths,
+            warnings=warnings,
+            workspace_folder=workspace_folder,
+        )
+
     def extract_merged_skeleton(
         self,
         workspace_folder: str,
@@ -537,36 +662,16 @@ class DumpWorkspaceExtractor:
         extracted_ib_hashes = []
 
         for source_component_id, component in enumerate(selected_object.components):
-            records = []
-            for shader_call in component.raw_data.shader_calls:
-                draw_call = shader_call.draw_call
-                resources = shader_call.model_resources
-                if not isinstance(draw_call, DrawIndexedInstanced) or resources is None:
-                    continue
-                ib = resources.get_by_slot("ib")
-                if not isinstance(ib, IndexBuffer):
-                    continue
-                records.append(_DrawRecord(shader_call, draw_call, ib))
-
-            if not records:
+            try:
+                primary_key, matching_records, total_record_count = self.get_component_primary_draw(
+                    component
+                )
+            except ExtractError as exc:
                 raise ExtractError(
-                    "骨骼合并组件 " + str(source_component_id) + " 没有可导出的 DrawIndexedInstanced。"
+                    "骨骼合并组件 " + str(source_component_id) + " 提取失败: " + str(exc)
                 )
 
-            primary_key = (
-                str(records[0].ib.hash).lower(),
-                int(records[0].draw_call.index_count),
-                int(records[0].draw_call.first_index or 0),
-            )
-            matching_records = [
-                record for record in records
-                if (
-                    str(record.ib.hash).lower(),
-                    int(record.draw_call.index_count),
-                    int(record.draw_call.first_index or 0),
-                ) == primary_key
-            ]
-            if len(matching_records) != len(records):
+            if len(matching_records) != total_record_count:
                 warnings.append(
                     "组件 " + str(source_component_id) + " 存在不同绘制范围，"
                     "已按首个主绘制生成 LoyalTools 子网格。"

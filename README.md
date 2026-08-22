@@ -86,6 +86,7 @@
 - v1.4.10 起，骨骼合并 Cross IB 的跨入段只绑定源 IB/VB，不生成任何贴图行，直接沿用目标组件在同一 CommandList 前面已绑定的 Diffuse/Light/Normal；普通 Cross IB 不受影响。
 - v1.5.0 起，骨骼合并可从独立远景 FrameAnalysis 添加 LOD 映射；Blender 仍只编辑完整模型，导出器自动生成 LOD 入口、必要的 VB 布局变体与骨骼重映射。普通制作和一般 Cross IB 不读取 LOD profile。
 - v1.5.1 起，LOD 一对一分配会在求解前排除低于组件阈值的候选，允许多余 LOD/缺失主组件保持未匹配，避免弱匹配抢占正确组件。映射后若主组件没有独立 LOD，面板会提示不要在其他网格使用该组件负责的全局顶点组权重。
+- v1.6.0 起，骨骼合并面板把“导入主控”和“导入 LOD”分开：主控可重复导入到新蓝图，真实 LOD 网格导入独立黄色预览集合且不接入导出蓝图；LOD 预览导入区默认折叠，并可弹窗查看 `LOD unique_str → 主控 unique_str` 映射表。
 - CPU posed 部件仅支持游戏原网格和贴图替换，不能导出自定义几何或权重；是否生成对应覆盖由该对象是否连接进蓝图决定。
 - 更新器指向 https://github.com/loyal37/loyaltools，「检查版本更新」从该仓库的 Release 获取新版本。
 

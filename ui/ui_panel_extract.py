@@ -168,6 +168,25 @@ def create_new_workspace_import_collection(context):
     return collection
 
 
+def create_new_lod_import_collection(context, lod_object_name: str):
+    """Create a repeatable yellow collection for LoD preview meshes."""
+    workspace_name = GlobalConfig.get_workspace_name()
+    if not workspace_name:
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if workspace_folder:
+            workspace_name = os.path.basename(workspace_folder.rstrip("\\/"))
+    if not workspace_name:
+        raise ValueError("未解析到工作空间名称，无法创建 LOD 导入集合。")
+    collection = bpy.data.collections.new(
+        workspace_name + " LOD " + str(lod_object_name)
+    )
+    collection.color_tag = CollectionColor.Yellow
+    collection["LoyalTools:EFMILODPreview"] = True
+    collection["LoyalTools:EFMILODObject"] = str(lod_object_name)
+    context.scene.collection.children.link(collection)
+    return collection
+
+
 # 帧模型解析较慢 (大型Dump约10-20秒)，同一个Dump目录缓存一个提取器实例，
 # log.txt 的修改时间变化时自动失效 (只保留最近一个，避免占用过多内存)
 _EXTRACTOR_CACHE: dict = {}
@@ -420,6 +439,12 @@ class LoyalExtractProperties(bpy.types.PropertyGroup):
         description="角色处于远距离 LOD 时抓取的 FrameAnalysis 文件夹；可依次导入多个 LOD",
         subtype='DIR_PATH',
         default="",
+    ) # type: ignore
+
+    show_lod_import: bpy.props.BoolProperty(
+        name="LOD 预览导入",
+        description="展开或收起 LOD 预览导入区",
+        default=False,
     ) # type: ignore
 
     # 旧版单行DrawIB输入字段，仅为向后兼容保留 (面板上已不显示)：
@@ -767,6 +792,11 @@ class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
             + str(result.lower_poly_component_count) + " 个使用独立 LOD IB",
             "当前工作空间共 " + str(result.max_lod_count) + " 级 LOD",
         ]
+        if result.preview_component_count:
+            report_lines.append(
+                "已准备 " + str(result.preview_component_count)
+                + " 个 LOD 预览网格，可点击“导入 LOD”查看"
+            )
         if result.warnings:
             report_lines.extend("警告: " + warning for warning in result.warnings)
         props.last_report = "\n".join(report_lines)
@@ -787,8 +817,8 @@ class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
 
 class LoyalImportWorkspace(bpy.types.Operator):
     bl_idname = "loyal.import_workspace"
-    bl_label = "导入"
-    bl_description = "把当前工作空间中已提取的所有子网格导入到场景，可多次重复执行（不会重新提取）"
+    bl_label = "导入主控"
+    bl_description = "把当前工作空间中的主控模型重复导入到新集合和新蓝图（不会重新提取）"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -908,6 +938,166 @@ class LoyalImportWorkspace(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LoyalImportMergedSkeletonLOD(bpy.types.Operator):
+    bl_idname = "loyal.import_merged_skeleton_lod"
+    bl_label = "导入 LOD"
+    bl_description = "导入最近映射的真实 LOD 网格用于检查；放入独立黄色集合，不接入正式导出蓝图"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        import json as _json
+
+        props = context.scene.loyal_extract_props
+        if props.workflow_mode != 'MERGED_SKELETON':
+            self.report({'ERROR'}, "导入 LOD 只属于骨骼合并制作流程。")
+            return {'CANCELLED'}
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if not workspace_folder:
+            self.report({'ERROR'}, "未解析到工作空间，请先设置自定义工作空间。")
+            return {'CANCELLED'}
+
+        try:
+            from ..common.efmi_merged_skeleton import load_profile
+            profile = load_profile(workspace_folder, required=True)
+            object_name = str(profile.get("last_lod_object_name", "")).strip()
+            requested_dump = (props.lod_frame_dump_folder or "").strip()
+            if requested_dump:
+                requested_dump = os.path.normcase(os.path.abspath(bpy.path.abspath(requested_dump)))
+                for candidate_name, source_folder in profile.get("lod_sources", {}).items():
+                    if os.path.normcase(os.path.abspath(source_folder)) == requested_dump:
+                        object_name = candidate_name
+            if not object_name:
+                object_names = list(profile.get("lod_object_names", []))
+                if not object_names:
+                    raise ValueError("当前工作空间还没有 LOD 映射，请先添加 LOD 映射。")
+                object_name = object_names[-1]
+
+            preview_value = profile.get("lod_preview_workspaces", {}).get(object_name, "")
+            if preview_value:
+                preview_workspace = (
+                    preview_value if os.path.isabs(preview_value)
+                    else os.path.join(workspace_folder, preview_value)
+                )
+            else:
+                preview_workspace = ""
+            manifest_path = os.path.join(preview_workspace, "Import.json")
+            if not preview_workspace or not os.path.isfile(manifest_path):
+                from ..extract.merged_skeleton_lod_mapper import ensure_lod_preview_workspace
+                preview_workspace, _ = ensure_lod_preview_workspace(
+                    workspace_folder,
+                    lod_object_name=object_name,
+                )
+                manifest_path = os.path.join(preview_workspace, "Import.json")
+
+            with open(manifest_path, 'r', encoding='utf-8') as file:
+                import_map = _json.load(file)
+            if not isinstance(import_map, dict) or not import_map:
+                raise ValueError("LOD 预览工作空间为空，请重新执行 LOD 映射。")
+        except Exception as exc:
+            self.report({'ERROR'}, "准备 LOD 导入失败: " + str(exc))
+            return {'CANCELLED'}
+
+        try:
+            collection = create_new_lod_import_collection(context, object_name)
+        except ValueError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+
+        imported_objects = []
+        import_error_count = 0
+        for unique_str, gametype_name in import_map.items():
+            json_path = os.path.join(
+                preview_workspace,
+                unique_str,
+                "TYPE_" + str(gametype_name),
+                unique_str + ".json",
+            )
+            if not os.path.isfile(json_path):
+                import_error_count += 1
+                print("[LoyalTools LOD导入] 找不到子网格JSON: " + json_path)
+                continue
+            try:
+                imported_obj = SSMTImportHelper.create_mesh_from_json(
+                    json_file_path=json_path,
+                    import_collection=collection,
+                    merged_skeleton=False,
+                )
+                if imported_obj is not None:
+                    imported_obj.name = unique_str
+                    imported_obj.data.name = imported_obj.name
+                    imported_obj["LoyalTools:EFMILODPreview"] = True
+                    imported_obj["LoyalTools:EFMILODObject"] = object_name
+                    imported_objects.append(imported_obj)
+            except Exception as exc:
+                import_error_count += 1
+                print("[LoyalTools LOD导入] 导入失败 " + json_path + ": " + repr(exc))
+
+        if not imported_objects:
+            self.report({'ERROR'}, "没有成功导入任何 LOD 网格，详见控制台。")
+            return {'CANCELLED'}
+        if GlobalProterties.enable_non_mirror_workflow():
+            NonMirrorWorkflowHelper.process_imported_objects(imported_objects)
+        CollectionUtils.select_collection_objects(collection)
+
+        msg = (
+            "已导入 LOD " + object_name + " 的 " + str(len(imported_objects))
+            + " 个预览网格到黄色集合 \"" + collection.name + "\"；未接入导出蓝图"
+        )
+        if import_error_count:
+            msg += "，" + str(import_error_count) + " 个失败"
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class LoyalShowMergedSkeletonLODMap(bpy.types.Operator):
+    bl_idname = "loyal.show_merged_skeleton_lod_map"
+    bl_label = "LOD 映射表"
+    bl_description = "查看 LOD 子网格到主控子网格的 unique_str 映射"
+    bl_options = {'REGISTER'}
+
+    def invoke(self, context, event):
+        if context.scene.loyal_extract_props.workflow_mode != 'MERGED_SKELETON':
+            self.report({'ERROR'}, "LOD 映射表只属于骨骼合并制作流程。")
+            return {'CANCELLED'}
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        try:
+            from ..common.efmi_merged_skeleton import (
+                build_lod_mapping_groups,
+                load_profile,
+            )
+            profile = load_profile(workspace_folder, required=True)
+            self._mapping_groups = build_lod_mapping_groups(profile)
+        except Exception as exc:
+            self.report({'ERROR'}, "读取 LOD 映射表失败: " + str(exc))
+            return {'CANCELLED'}
+        if not any(group["rows"] for group in self._mapping_groups):
+            self.report({'WARNING'}, "当前工作空间还没有 LOD 映射。")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_popup(self, width=760)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="LOD ibhash-indexcount-firstindex  →  主控 ibhash-indexcount-firstindex")
+        for group in getattr(self, "_mapping_groups", []):
+            box = layout.box()
+            box.label(text=group["lod_object_name"], icon='MOD_DECIM')
+            for mapping in group["rows"]:
+                text = (
+                    mapping["lod_unique_str"] + "  →  " + mapping["main_unique_str"]
+                )
+                if mapping["is_fallback"]:
+                    text += "  （无独立 LOD，使用主控回退）"
+                    box.label(text=text, icon='ERROR')
+                else:
+                    box.label(text=text, icon='TRIA_RIGHT')
+
+    def execute(self, context):
+        return {'FINISHED'}
+
+
 # ----------------------------------------------------------------------
 # 面板
 # ----------------------------------------------------------------------
@@ -964,6 +1154,14 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
 
         if props.workflow_mode == 'MERGED_SKELETON':
+            main_import_row = layout.row()
+            main_import_row.scale_y = 1.2
+            main_import_row.operator(
+                LoyalImportWorkspace.bl_idname,
+                text="导入主控",
+                icon='MESH_DATA',
+            )
+
             lod_box = layout.box()
             lod_box.label(text="LOD 映射（独立步骤）", icon='MOD_DECIM')
             lod_box.prop(props, "lod_frame_dump_folder")
@@ -972,11 +1170,34 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
                 text="添加 / 更新 LOD 映射",
                 icon='FILE_REFRESH',
             )
+            lod_box.operator(
+                LoyalShowMergedSkeletonLODMap.bl_idname,
+                text="查看 LOD 映射表",
+                icon='PRESET',
+            )
             lod_box.label(text="可更换远景帧重复添加；同一 LOD 对象会自动更新")
-
-        import_row = layout.row()
-        import_row.scale_y = 1.2
-        import_row.operator(LoyalImportWorkspace.bl_idname, text="导入", icon='MESH_DATA')
+            lod_import_box = layout.box()
+            lod_import_header = lod_import_box.row(align=True)
+            lod_import_header.prop(
+                props,
+                "show_lod_import",
+                text="LOD 预览导入",
+                icon='TRIA_DOWN' if props.show_lod_import else 'TRIA_RIGHT',
+                emboss=False,
+            )
+            if props.show_lod_import:
+                lod_import_box.label(text="仅供检查，不会接入正式导出蓝图")
+                lod_import_row = lod_import_box.row()
+                lod_import_row.scale_y = 1.2
+                lod_import_row.operator(
+                    LoyalImportMergedSkeletonLOD.bl_idname,
+                    text="导入 LOD",
+                    icon='MOD_DECIM',
+                )
+        else:
+            import_row = layout.row()
+            import_row.scale_y = 1.2
+            import_row.operator(LoyalImportWorkspace.bl_idname, text="导入", icon='MESH_DATA')
 
         if props.last_report:
             report_box = layout.box()
@@ -994,6 +1215,8 @@ classes = (
     LoyalExtractFromDump,
     LoyalMapMergedSkeletonLOD,
     LoyalImportWorkspace,
+    LoyalImportMergedSkeletonLOD,
+    LoyalShowMergedSkeletonLODMap,
     LOYAL_PT_ExtractPanel,
 )
 

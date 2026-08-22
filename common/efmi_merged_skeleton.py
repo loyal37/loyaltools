@@ -111,8 +111,17 @@ def normalize_lod(lod, field_name: str = "lod") -> dict:
     result["vb0_hash"] = str(result.get("vb0_hash", "")).lower().strip()
     if not result["ib_hash"]:
         raise MergedSkeletonProfileError(field_name + " 缺少 ib_hash。")
-    for key in ("vertex_offset", "vertex_count", "index_offset", "index_count"):
+    for key in (
+        "vertex_offset", "vertex_count", "index_offset", "index_count", "first_index"
+    ):
         result[key] = _as_non_negative_int(result.get(key, 0), field_name + "." + key)
+    result["unique_str"] = str(result.get("unique_str", "")).strip()
+    if not result["unique_str"]:
+        result["unique_str"] = (
+            result["ib_hash"] + "-" + str(result["index_count"])
+            + "-" + str(result["first_index"])
+        )
+    result["is_fallback"] = bool(result.get("is_fallback", False))
     result["vg_map"] = normalize_vg_map(
         result.get("vg_map", {}), field_name + ".vg_map"
     )
@@ -297,6 +306,40 @@ def get_component_by_unique_str(profile: dict) -> dict[str, dict]:
         component["unique_str"]: component
         for component in normalized["components"]
     }
+
+
+def build_lod_mapping_groups(profile: dict) -> list[dict]:
+    """Build UI-friendly LoD unique_str -> full-detail unique_str groups."""
+    normalized = validate_profile(profile)
+    object_order = []
+    for object_name in normalized.get("lod_sources", {}):
+        if object_name in normalized.get("lod_object_names", []):
+            object_order.append(object_name)
+    for object_name in normalized.get("lod_object_names", []):
+        if object_name not in object_order:
+            object_order.append(object_name)
+
+    groups = []
+    for object_name in object_order:
+        rows = []
+        for component in normalized["components"]:
+            lod = next(
+                (
+                    item for item in component.get("lods", [])
+                    if item.get("lod_object_name") == object_name
+                ),
+                None,
+            )
+            if lod is None:
+                continue
+            rows.append({
+                "component_id": int(component["component_id"]),
+                "lod_unique_str": lod["unique_str"],
+                "main_unique_str": component["unique_str"],
+                "is_fallback": bool(lod.get("is_fallback", False)),
+            })
+        groups.append({"lod_object_name": object_name, "rows": rows})
+    return groups
 
 
 def make_submesh_metadata(component: dict) -> dict:

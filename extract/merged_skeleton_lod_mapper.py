@@ -10,6 +10,8 @@ mesh per component; alternate LoD vertex layouts are generated during export.
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 
 from ..common.efmi_merged_skeleton import load_profile, write_profile
@@ -33,6 +35,8 @@ class LODMapResult:
     component_count: int
     max_lod_count: int
     warnings: list[str] = field(default_factory=list)
+    preview_workspace_folder: str = ""
+    preview_component_count: int = 0
 
 
 def _serialize_lod_vb_formats(full_component, lod_component) -> dict:
@@ -153,7 +157,8 @@ def map_merged_skeleton_lod(
         component_id = int(profile_component["component_id"])
         full_component = full_components[component_id]
         lod_component, vg_map = matched_components.get(full_component, (None, None))
-        if lod_component is None:
+        is_fallback = lod_component is None
+        if is_fallback:
             # EFMI-Tools writes the full component as a fallback so every
             # component keeps the same number/order of LoD levels.
             lod_component = full_component
@@ -175,6 +180,17 @@ def map_merged_skeleton_lod(
                 warning += "已记录为主模型回退项。"
             warnings.append(warning)
 
+        if is_fallback:
+            lod_first_index = int(profile_component.get("first_index", 0))
+            lod_unique_str = profile_component["unique_str"]
+        else:
+            lod_primary_key, _, _ = lod_extractor.get_component_primary_draw(lod_component)
+            lod_first_index = int(lod_primary_key[2])
+            lod_unique_str = (
+                str(lod_primary_key[0]).lower() + "-" + str(lod_primary_key[1])
+                + "-" + str(lod_primary_key[2])
+            )
+
         lod_metadata = {
             "lod_object_name": str(lod_object.id),
             "ib_hash": str(lod_component.metadata.ib_hash).lower(),
@@ -183,6 +199,9 @@ def map_merged_skeleton_lod(
             "vertex_count": int(lod_component.metadata.vertex_count),
             "index_offset": int(lod_component.metadata.index_offset),
             "index_count": int(lod_component.metadata.index_count),
+            "first_index": lod_first_index,
+            "unique_str": lod_unique_str,
+            "is_fallback": is_fallback,
             "vg_map": {
                 str(int(full_vg)): int(lod_vg)
                 for full_vg, lod_vg in (vg_map or {}).items()
@@ -211,6 +230,35 @@ def map_merged_skeleton_lod(
     lod_sources = dict(profile.get("lod_sources", {}))
     lod_sources[str(lod_object.id)] = str(lod_dump_folder)
     profile["lod_sources"] = lod_sources
+    profile["last_lod_object_name"] = str(lod_object.id)
+
+    preview_workspace_folder = ""
+    preview_component_count = 0
+    try:
+        preview_workspace_folder = DumpWorkspaceExtractor.get_lod_preview_workspace_folder(
+            workspace_folder,
+            str(lod_object.id),
+        )
+        preview_result = lod_extractor.extract_merged_skeleton_preview(
+            workspace_folder=preview_workspace_folder,
+            selected_object=lod_object,
+            object_name=str(lod_object.id),
+        )
+        preview_component_count = len(preview_result.unique_strs)
+        preview_workspaces = dict(profile.get("lod_preview_workspaces", {}))
+        preview_workspaces[str(lod_object.id)] = os.path.relpath(
+            preview_workspace_folder,
+            os.path.abspath(str(workspace_folder)),
+        )
+        profile["lod_preview_workspaces"] = preview_workspaces
+        warnings.extend(
+            "LOD 预览: " + warning for warning in preview_result.warnings
+        )
+    except Exception as exc:
+        warnings.append(
+            "LOD 映射已保存，但预览网格准备失败；点击“导入 LOD”时会重试: "
+            + repr(exc)
+        )
     write_profile(workspace_folder, profile)
     normalized = load_profile(workspace_folder, required=True)
     return LODMapResult(
@@ -220,4 +268,58 @@ def map_merged_skeleton_lod(
         component_count=len(profile["components"]),
         max_lod_count=int(normalized.get("max_lod_count", 0)),
         warnings=warnings,
+        preview_workspace_folder=preview_workspace_folder,
+        preview_component_count=preview_component_count,
     )
+
+
+def ensure_lod_preview_workspace(
+    workspace_folder: str,
+    lod_object_name: str = "",
+) -> tuple[str, object]:
+    """Create or refresh the isolated preview workspace for a mapped LoD object."""
+    profile = load_profile(workspace_folder, required=True)
+    object_name = str(
+        lod_object_name or profile.get("last_lod_object_name", "")
+    ).strip()
+    if not object_name:
+        object_names = list(profile.get("lod_object_names", []))
+        if not object_names:
+            raise ExtractError("当前工作空间还没有 LOD 映射。")
+        object_name = object_names[-1]
+
+    lod_dump_folder = profile.get("lod_sources", {}).get(object_name, "")
+    if not lod_dump_folder or not os.path.isdir(lod_dump_folder):
+        raise ExtractError(
+            "找不到 LOD " + object_name + " 的帧分析来源，请重新执行 LOD 映射。"
+        )
+
+    extractor = DumpWorkspaceExtractor(lod_dump_folder)
+    candidates = extractor.get_merged_skeleton_candidates(
+        ignore_incomplete_draw_calls=True,
+    )
+    lod_object = extractor.select_merged_skeleton_object(
+        candidates,
+        object_name=object_name,
+    )
+    if str(lod_object.id) != object_name:
+        raise ExtractError("LOD 帧中找不到对象 " + object_name + "。")
+
+    preview_workspace = DumpWorkspaceExtractor.get_lod_preview_workspace_folder(
+        workspace_folder,
+        object_name,
+    )
+    result = extractor.extract_merged_skeleton_preview(
+        workspace_folder=preview_workspace,
+        selected_object=lod_object,
+        object_name=object_name,
+    )
+    preview_workspaces = dict(profile.get("lod_preview_workspaces", {}))
+    preview_workspaces[object_name] = os.path.relpath(
+        preview_workspace,
+        os.path.abspath(str(workspace_folder)),
+    )
+    profile["lod_preview_workspaces"] = preview_workspaces
+    profile["last_lod_object_name"] = object_name
+    write_profile(workspace_folder, profile)
+    return preview_workspace, result
