@@ -82,7 +82,7 @@
 - **不要与 TheHerta4 同时启用**：两者共享大量内部标识符（操作符/面板 ID），同时启用会注册冲突。
 - 提取功能为终末地（EFMI）专用；其它游戏预设下会弹出警告。
 - v1.4.8 修复了骨骼合并提取中 `FirstIndex > 0` 共享缓冲组件的 VB 起点错位。旧版已提取的错误 `.buf/.ib` 不会自动修复，请用原 FrameAnalysis 重新执行「提取」并重新导入。
-- v1.4.9 起，骨骼合并 Cross IB 只借用源 IB 的网格数据，跨入目标组件后的绘制始终使用目标 IB 的 Diffuse/Light/Normal，不再重新绑定源 IB 贴图；普通 Cross IB 不受影响。
+- v1.4.10 起，骨骼合并 Cross IB 的跨入段只绑定源 IB/VB，不生成任何贴图行，直接沿用目标组件在同一 CommandList 前面已绑定的 Diffuse/Light/Normal；普通 Cross IB 不受影响。
 - CPU posed 部件仅支持游戏原网格和贴图替换，不能导出自定义几何或权重；是否生成对应覆盖由该对象是否连接进蓝图决定。
 - 更新器指向 https://github.com/loyal37/loyaltools，「检查版本更新」从该仓库的 Release 获取新版本。
 

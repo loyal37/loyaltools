@@ -130,13 +130,14 @@ def _main() -> None:
     incoming_draw = incoming_section[:draw_match.end()]
 
     source_buffer_prefix = "Resource_" + source_unique.replace("-", "_")
-    source_texture_prefix = "Resource-" + source_unique + "-"
     target_texture_prefix = "Resource-" + target_unique + "-"
     assert source_buffer_prefix in incoming_draw, incoming_draw
-    assert source_texture_prefix not in incoming_draw, incoming_draw
-    assert target_texture_prefix in incoming_draw, incoming_draw
+    assert target_texture_prefix in target_section[:marker_index], target_section
+    assert "ps-t" not in incoming_draw, incoming_draw
+    assert "Resource\\RabbitFx" not in incoming_draw, incoming_draw
+    assert "Resource-" not in incoming_draw, incoming_draw
 
-    print("MERGED_CROSS_IB_TARGET_TEXTURES=PASS")
+    print("MERGED_CROSS_IB_INHERITED_TARGET_TEXTURES=PASS")
     print("MERGED_CROSS_IB_SOURCE=" + source_unique)
     print("MERGED_CROSS_IB_TARGET=" + target_unique)
     print("MERGED_CROSS_IB_INI=" + ini_files[0])

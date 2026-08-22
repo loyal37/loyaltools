@@ -763,40 +763,7 @@ class ExportEFMI:
         self,
         section,
         target_key,
-        drawib_drawibmodel_dict,
     ):
-        target_submesh = self._find_source_submesh_by_ib_key(target_key)
-        target_texture_bindings = []
-        if target_submesh is not None:
-            target_drawib = drawib_drawibmodel_dict.get(
-                target_submesh.match_draw_ib
-            )
-            if (
-                not GlobalProterties.forbid_auto_texture_ini()
-                and target_drawib is not None
-            ):
-                target_texture_bindings = self._get_merged_texture_binding_list(
-                    target_submesh, target_drawib
-                )
-        elif self.merged_skeleton_profile is not None:
-            target_index_count = (
-                target_key.replace("indexcount_", "")
-                if target_key.startswith("indexcount_")
-                else ""
-            )
-            target_component = next(
-                (
-                    component
-                    for component in self.merged_skeleton_profile["components"]
-                    if str(component["index_count"]) == target_index_count
-                ),
-                None,
-            )
-            if target_component is not None:
-                target_texture_bindings = (
-                    self._get_merged_profile_texture_binding_list(target_component)
-                )
-
         for source_key in self.cross_ib_target_info.get(target_key, []):
             source_submesh = self._find_source_submesh_by_ib_key(source_key)
             if source_submesh is None:
@@ -815,11 +782,9 @@ class ExportEFMI:
                 + target_key
             )
             self._append_merged_buffer_bindings(section, source_submesh)
-            # 骨骼合并跨 IB 只替换几何：跨入目标组件的源网格必须使用
-            # 目标 IB 的材质贴图，不能重新绑定源 IB 自己的贴图。
-            self._append_merged_texture_binding_lines(
-                section, target_texture_bindings
-            )
+            # 骨骼合并跨 IB 只替换几何。目标组件在本 CommandList
+            # 前面已经完成贴图绑定；这里不写任何贴图行即可自然沿用，
+            # 也避免重复生成目标贴图或错误恢复源 IB 贴图。
             self._append_merged_draw_lines(section, incoming_drawcalls)
 
     def _generate_merged_skeleton_ini_file(self):
@@ -1016,7 +981,6 @@ class ExportEFMI:
             self._append_merged_incoming_cross_ib_draws(
                 command_lists,
                 current_key,
-                drawib_drawibmodel_dict,
             )
             command_lists.new_line()
 
