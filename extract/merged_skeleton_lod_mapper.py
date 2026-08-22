@@ -158,9 +158,22 @@ def map_merged_skeleton_lod(
             # component keeps the same number/order of LoD levels.
             lod_component = full_component
             vg_map = None
-            warnings.append(
-                "组件 " + str(component_id) + " 未匹配到 LOD 网格，已沿用完整模型入口。"
+            vg_offset = int(profile_component.get("vg_offset", 0))
+            vg_count = int(profile_component.get("vg_count", 0))
+            warning = (
+                "主模型 Component " + str(component_id) + "（"
+                + profile_component["unique_str"]
+                + "）没有独立对应的 LOD。"
             )
+            if not profile_component.get("cpu_posed", False) and vg_count > 0:
+                warning += (
+                    "不要在其他网格上使用该组件负责的全局顶点组 "
+                    + str(vg_offset) + "-" + str(vg_offset + vg_count - 1)
+                    + " 的权重。"
+                )
+            else:
+                warning += "已记录为主模型回退项。"
+            warnings.append(warning)
 
         lod_metadata = {
             "lod_object_name": str(lod_object.id),

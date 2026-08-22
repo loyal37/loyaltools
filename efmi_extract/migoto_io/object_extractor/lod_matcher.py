@@ -442,16 +442,23 @@ class LODMatcher:
 
     def get_best_matching_components(self, similarity_graph: SimilarityGraph) -> dict[MigotoComponent, MigotoComponent]:
         result = {}
-        matched_graph = similarity_graph.find_optimal_matching(min_similarity=0.0)
+        # Remove invalid edges before solving the one-to-one assignment.  If
+        # the threshold is applied only after Hungarian matching, two weak
+        # pairs can steal one strong, semantically correct pair merely because
+        # their combined score is larger.  Dummy columns let surplus LoD
+        # components remain unmatched instead.
+        matched_graph = similarity_graph.find_optimal_matching(
+            min_similarity=self.component_similarity_threshold
+        )
         for lod_component, similarities in matched_graph.data.items():
             if not similarities:
                 continue
             full_component, similarity = next(iter(similarities.items()))
 
-            if similarity < self.object_similarity_threshold:
+            if similarity < self.component_similarity_threshold:
                 if self.skip_components_below_similarity_threshold:
-                    print(f"Skipped match by geometry below {self.object_similarity_threshold:.2f}% threshold (mesh similarity: {similarity:.2f}%): {full_component.__repr__()} == {lod_component.__repr__()} ")
-                    lod_component.metadata.mesh_name = f"Skipped Component ib={lod_component.metadata.ib_hash} (mesh similarity {similarity:.2f}% is below configured {self.object_similarity_threshold:.2f}% threshold)"
+                    print(f"Skipped match by geometry below {self.component_similarity_threshold:.2f}% threshold (mesh similarity: {similarity:.2f}%): {full_component.__repr__()} == {lod_component.__repr__()} ")
+                    lod_component.metadata.mesh_name = f"Skipped Component ib={lod_component.metadata.ib_hash} (mesh similarity {similarity:.2f}% is below configured {self.component_similarity_threshold:.2f}% threshold)"
                     continue
                 raise ComponentLowSimilarityError(f"Best matching LoD for {full_component.metadata.mesh_name} has {similarity:.2f}% similarity!")
             

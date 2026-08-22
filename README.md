@@ -85,6 +85,7 @@
 - v1.4.8 修复了骨骼合并提取中 `FirstIndex > 0` 共享缓冲组件的 VB 起点错位。旧版已提取的错误 `.buf/.ib` 不会自动修复，请用原 FrameAnalysis 重新执行「提取」并重新导入。
 - v1.4.10 起，骨骼合并 Cross IB 的跨入段只绑定源 IB/VB，不生成任何贴图行，直接沿用目标组件在同一 CommandList 前面已绑定的 Diffuse/Light/Normal；普通 Cross IB 不受影响。
 - v1.5.0 起，骨骼合并可从独立远景 FrameAnalysis 添加 LOD 映射；Blender 仍只编辑完整模型，导出器自动生成 LOD 入口、必要的 VB 布局变体与骨骼重映射。普通制作和一般 Cross IB 不读取 LOD profile。
+- v1.5.1 起，LOD 一对一分配会在求解前排除低于组件阈值的候选，允许多余 LOD/缺失主组件保持未匹配，避免弱匹配抢占正确组件。映射后若主组件没有独立 LOD，面板会提示不要在其他网格使用该组件负责的全局顶点组权重。
 - CPU posed 部件仅支持游戏原网格和贴图替换，不能导出自定义几何或权重；是否生成对应覆盖由该对象是否连接进蓝图决定。
 - 更新器指向 https://github.com/loyal37/loyaltools，「检查版本更新」从该仓库的 Release 获取新版本。
 

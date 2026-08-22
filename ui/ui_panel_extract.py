@@ -768,9 +768,16 @@ class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
             "当前工作空间共 " + str(result.max_lod_count) + " 级 LOD",
         ]
         if result.warnings:
-            report_lines.append("其余组件沿用完整模型入口，详见控制台。")
+            report_lines.extend("警告: " + warning for warning in result.warnings)
         props.last_report = "\n".join(report_lines)
-        self.report({'INFO'}, report_lines[0])
+        if result.warnings:
+            self.report(
+                {'WARNING'},
+                "LOD 映射完成，但有 " + str(len(result.warnings))
+                + " 个主模型组件没有独立 LOD。" + result.warnings[0],
+            )
+        else:
+            self.report({'INFO'}, report_lines[0])
         return {'FINISHED'}
 
 
