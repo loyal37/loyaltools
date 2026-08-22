@@ -104,6 +104,18 @@ def resolve_dump_folder(props) -> str:
     return dump_folder
 
 
+def resolve_lod_dump_folder(props) -> str:
+    dump_folder = (props.lod_frame_dump_folder or "").strip()
+    if dump_folder == "":
+        raise ValueError("请先选择 LOD 帧分析目录。")
+    dump_folder = bpy.path.abspath(dump_folder)
+    if not os.path.isdir(dump_folder):
+        raise ValueError("LOD 帧分析目录不存在: " + dump_folder)
+    if not os.path.isfile(os.path.join(dump_folder, "log.txt")):
+        raise ValueError("LOD 帧分析目录缺少 log.txt: " + dump_folder)
+    return dump_folder
+
+
 def get_or_create_workspace_import_collection(context):
     '''
     获取 (或创建) 以工作空间命名的红色导入集合。
@@ -403,6 +415,13 @@ class LoyalExtractProperties(bpy.types.PropertyGroup):
         default="",
     ) # type: ignore
 
+    lod_frame_dump_folder: bpy.props.StringProperty(
+        name="LOD 帧分析目录",
+        description="角色处于远距离 LOD 时抓取的 FrameAnalysis 文件夹；可依次导入多个 LOD",
+        subtype='DIR_PATH',
+        default="",
+    ) # type: ignore
+
     # 旧版单行DrawIB输入字段，仅为向后兼容保留 (面板上已不显示)：
     # 提取时若分行列表为空而此字段非空，会自动把内容迁移为列表行
     draw_ib: bpy.props.StringProperty(
@@ -691,6 +710,70 @@ class LoyalExtractFromDump(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
+    bl_idname = "loyal.map_merged_skeleton_lod"
+    bl_label = "添加 / 更新 LOD 映射"
+    bl_description = "按 EFMI-Tools 规则匹配完整模型与远距离帧，把 LOD 哈希、顶点组和 VB 布局写入骨骼合并工作空间"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        props = context.scene.loyal_extract_props
+        if props.workflow_mode != 'MERGED_SKELETON':
+            self.report({'ERROR'}, "LOD 映射只属于骨骼合并制作流程。")
+            return {'CANCELLED'}
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if not workspace_folder:
+            self.report({'ERROR'}, "未解析到工作空间，请先设置自定义工作空间。")
+            return {'CANCELLED'}
+
+        try:
+            from ..common.efmi_merged_skeleton import load_profile
+            profile = load_profile(workspace_folder, required=True)
+            full_dump_folder = (props.frame_dump_folder or "").strip()
+            if full_dump_folder:
+                full_dump_folder = bpy.path.abspath(full_dump_folder)
+            else:
+                full_dump_folder = profile.get("source_frame_dump", "")
+            if not full_dump_folder or not os.path.isdir(full_dump_folder):
+                raise ValueError(
+                    "找不到完整模型帧。请在“帧分析Dump目录”选择最初用于骨骼合并提取的近景帧。"
+                )
+            lod_dump_folder = resolve_lod_dump_folder(props)
+
+            from ..extract.merged_skeleton_lod_mapper import map_merged_skeleton_lod
+            result = map_merged_skeleton_lod(
+                workspace_folder=workspace_folder,
+                full_dump_folder=full_dump_folder,
+                lod_dump_folder=lod_dump_folder,
+                allow_overwrite=True,
+            )
+        except (ValueError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, "LOD 映射失败: " + repr(exc))
+            return {'CANCELLED'}
+
+        for warning in result.warnings:
+            print("[LoyalTools LOD警告] " + warning)
+        report_lines = [
+            "LOD 映射完成: " + result.lod_object_name,
+            "匹配 " + str(result.matched_component_count) + "/"
+            + str(result.component_count) + " 个组件，"
+            + str(result.lower_poly_component_count) + " 个使用独立 LOD IB",
+            "当前工作空间共 " + str(result.max_lod_count) + " 级 LOD",
+        ]
+        if result.warnings:
+            report_lines.append("其余组件沿用完整模型入口，详见控制台。")
+        props.last_report = "\n".join(report_lines)
+        self.report({'INFO'}, report_lines[0])
+        return {'FINISHED'}
+
+
 # ----------------------------------------------------------------------
 # 独立导入操作符（不重新提取，仅把工作空间现有文件导入到场景）
 # ----------------------------------------------------------------------
@@ -866,12 +949,23 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         else:
             merged_box = layout.box()
             merged_box.label(text="自动识别当前帧的主要角色与全部组件", icon='ARMATURE_DATA')
-            merged_box.label(text="输出仍为 IBHash-IndexCount-FirstIndex；暂不处理 LOD")
+            merged_box.label(text="先用近景帧提取完整模型，再用远景帧添加 LOD")
             merged_box.label(text="导入时自动把各组件本地顶点组映射为全局顶点组")
 
         extract_row = layout.row()
         extract_row.scale_y = 1.5
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
+
+        if props.workflow_mode == 'MERGED_SKELETON':
+            lod_box = layout.box()
+            lod_box.label(text="LOD 映射（独立步骤）", icon='MOD_DECIM')
+            lod_box.prop(props, "lod_frame_dump_folder")
+            lod_box.operator(
+                LoyalMapMergedSkeletonLOD.bl_idname,
+                text="添加 / 更新 LOD 映射",
+                icon='FILE_REFRESH',
+            )
+            lod_box.label(text="可更换远景帧重复添加；同一 LOD 对象会自动更新")
 
         import_row = layout.row()
         import_row.scale_y = 1.2
@@ -891,6 +985,7 @@ classes = (
     LoyalExtractIBRemove,
     LoyalExtractIBMove,
     LoyalExtractFromDump,
+    LoyalMapMergedSkeletonLOD,
     LoyalImportWorkspace,
     LOYAL_PT_ExtractPanel,
 )

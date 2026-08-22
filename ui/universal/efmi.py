@@ -18,11 +18,13 @@ from ...common.efmi_merged_texture import (
     copy_merged_auto_textures,
     resolve_merged_auto_textures,
 )
+from ...utils.format_utils import FormatUtils
 
 import os
 import re
 import shutil
 import bpy
+import numpy
 
 @dataclass
 class ExportEFMI:
@@ -150,6 +152,10 @@ class ExportEFMI:
             combine_ib=False,
         )
         self.merged_auto_texture_binding_dict = {}
+        self.merged_lod_variant_buffers = {}
+        self.merged_lod_blend_remaps = {}
+        if self.merged_skeleton_mode:
+            self._build_merged_lod_export_buffers()
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
         print(f"[CrossIB EFMI] 初始化: has_cross_ib={self.has_cross_ib}")
@@ -172,6 +178,16 @@ class ExportEFMI:
                 category_buf_filepath = os.path.join(buf_output_folder, category_buf_filename)
                 with open(category_buf_filepath, 'wb') as f:
                     category_buf.tofile(f)
+
+        if self.merged_skeleton_mode:
+            for variant in self.merged_lod_variant_buffers.values():
+                filepath = os.path.join(buf_output_folder, variant["filename"])
+                with open(filepath, 'wb') as file:
+                    variant["data"].tofile(file)
+            for remap in self.merged_lod_blend_remaps.values():
+                filepath = os.path.join(buf_output_folder, remap["filename"])
+                with open(filepath, 'wb') as file:
+                    remap["data"].tofile(file)
 
     def _get_submesh_ib_key(self, submesh_model):
         if self.cross_ib_match_mode == 'INDEX_COUNT':
@@ -602,16 +618,277 @@ class ExportEFMI:
     def _merged_resource_prefix(submesh_model):
         return "Resource_" + submesh_model.unique_str.replace("-", "_")
 
-    def _append_merged_buffer_bindings(self, section, submesh_model, indent=""):
+    def _get_merged_profile_component(self, unique_str):
+        if not self.merged_skeleton_profile:
+            return None
+        for component in self.merged_skeleton_profile["components"]:
+            if component["unique_str"] == unique_str:
+                return component
+        return None
+
+    @staticmethod
+    def _decode_dxgi_values(values, fmt):
+        values = numpy.asarray(values)
+        if FormatUtils.unorm16_pattern.match(fmt):
+            return values.astype(numpy.float32) / 65535.0
+        if FormatUtils.unorm8_pattern.match(fmt):
+            return values.astype(numpy.float32) / 255.0
+        if FormatUtils.snorm16_pattern.match(fmt):
+            return numpy.maximum(
+                values.astype(numpy.float32) / 32767.0, -1.0
+            )
+        if FormatUtils.snorm8_pattern.match(fmt):
+            return numpy.maximum(
+                values.astype(numpy.float32) / 127.0, -1.0
+            )
+        return values
+
+    @staticmethod
+    def _encode_dxgi_values(values, fmt):
+        values = numpy.asarray(values)
+        if FormatUtils.unorm16_pattern.match(fmt):
+            return numpy.rint(numpy.clip(values, 0.0, 1.0) * 65535.0).astype(
+                numpy.uint16
+            )
+        if FormatUtils.unorm8_pattern.match(fmt):
+            return numpy.rint(numpy.clip(values, 0.0, 1.0) * 255.0).astype(
+                numpy.uint8
+            )
+        if FormatUtils.snorm16_pattern.match(fmt):
+            return numpy.rint(numpy.clip(values, -1.0, 1.0) * 32767.0).astype(
+                numpy.int16
+            )
+        if FormatUtils.snorm8_pattern.match(fmt):
+            return numpy.rint(numpy.clip(values, -1.0, 1.0) * 127.0).astype(
+                numpy.int8
+            )
+        return values.astype(FormatUtils.get_nptype_from_format(fmt))
+
+    @staticmethod
+    def _resize_semantic_components(values, target_count, semantic_name):
+        values = numpy.asarray(values)
+        if values.ndim == 1:
+            values = values.reshape(-1, 1)
+        source_count = values.shape[1]
+        if source_count == target_count:
+            return values
+        if source_count > target_count:
+            return values[:, :target_count]
+        result = numpy.zeros((len(values), target_count), dtype=values.dtype)
+        result[:, :source_count] = values
+        if semantic_name == "POSITION" and source_count == 3 and target_count >= 4:
+            result[:, 3] = 1
+        return result
+
+    @staticmethod
+    def _source_category_element_offset(game_type, source_element):
+        offset = 0
+        for element in game_type.D3D11ElementList:
+            if element.Category != source_element.Category:
+                continue
+            if element.ElementName == source_element.ElementName:
+                return offset
+            offset += int(element.ByteWidth)
+        raise ValueError("找不到源顶点语义 " + source_element.ElementName + " 的偏移。")
+
+    def _build_lod_slot_buffer(self, submesh_model, slot, slot_format):
+        game_type = submesh_model.d3d11_game_type
+        slot_lower = slot.lower()
+        slot_elements = [
+            element for element in game_type.D3D11ElementList
+            if str(element.ExtractSlot).lower() == slot_lower
+        ]
+        if not slot_elements:
+            raise ValueError(
+                submesh_model.unique_str + " 缺少 LOD 所需的源槽位 " + slot + "。"
+            )
+        categories = {element.Category for element in slot_elements}
+        if len(categories) != 1:
+            raise ValueError(
+                submesh_model.unique_str + " 的 " + slot + " 对应多个 LoyalTools 类别。"
+            )
+        category = next(iter(categories))
+        source_stride = int(game_type.CategoryStrideDict[category])
+        source_buffer = numpy.asarray(
+            submesh_model.category_buffer_dict[category], dtype=numpy.uint8
+        )
+        if source_stride <= 0 or source_buffer.size % source_stride:
+            raise ValueError(
+                submesh_model.unique_str + " 的 " + category + " 缓冲步长无效。"
+            )
+        source_rows = source_buffer.reshape(-1, source_stride)
+
+        semantics = slot_format["semantics"]
+        declared_strides = {
+            int(semantic.get("stride", 0))
+            for semantic in semantics
+            if int(semantic.get("stride", 0)) > 0
+        }
+        if len(declared_strides) > 1:
+            raise ValueError(slot + " 的 LOD 语义声明了不一致的步长。")
+        target_stride = next(iter(declared_strides), 0)
+        packed_semantics = []
+        packed_width = 0
+        for semantic in semantics:
+            semantic_name = str(semantic["name"]).upper()
+            semantic_index = int(semantic.get("index", 0))
+            element_name = semantic_name + (str(semantic_index) if semantic_index else "")
+            source_element = game_type.ElementNameD3D11ElementDict.get(element_name)
+            if source_element is None:
+                raise ValueError(
+                    submesh_model.unique_str + " 缺少 LOD 语义 " + element_name + "。"
+                )
+            if source_element.Category != category:
+                raise ValueError(element_name + " 不属于 " + slot + " 对应的类别。")
+
+            source_dtype = numpy.dtype(
+                FormatUtils.get_nptype_from_format(source_element.Format)
+            )
+            source_count = int(source_element.ByteWidth) // source_dtype.itemsize
+            source_offset = self._source_category_element_offset(
+                game_type, source_element
+            )
+            source_bytes = numpy.ascontiguousarray(
+                source_rows[
+                    :, source_offset:source_offset + int(source_element.ByteWidth)
+                ]
+            )
+            source_values = source_bytes.view(source_dtype).reshape(
+                len(source_rows), source_count
+            )
+            logical_values = self._decode_dxgi_values(
+                source_values, source_element.Format
+            )
+
+            target_format = str(semantic["format"]).upper()
+            target_dtype = numpy.dtype(FormatUtils.get_nptype_from_format(target_format))
+            target_width = int(FormatUtils.format_size(target_format))
+            if target_width <= 0 or target_width % target_dtype.itemsize:
+                raise ValueError("LOD 目标格式无效: " + target_format)
+            target_count = target_width // target_dtype.itemsize
+            logical_values = self._resize_semantic_components(
+                logical_values, target_count, semantic_name
+            )
+            encoded = numpy.ascontiguousarray(
+                self._encode_dxgi_values(logical_values, target_format)
+            )
+            packed_semantics.append(
+                encoded.view(numpy.uint8).reshape(len(source_rows), target_width)
+            )
+            packed_width += target_width
+
+        if target_stride == 0:
+            target_stride = packed_width
+        if packed_width > target_stride:
+            raise ValueError(
+                slot + " 的 LOD 语义宽度 " + str(packed_width)
+                + " 超过目标步长 " + str(target_stride) + "。"
+            )
+        target_rows = numpy.zeros(
+            (len(source_rows), target_stride), dtype=numpy.uint8
+        )
+        offset = 0
+        for semantic_bytes in packed_semantics:
+            width = semantic_bytes.shape[1]
+            target_rows[:, offset:offset + width] = semantic_bytes
+            offset += width
+        return category, target_stride, numpy.ascontiguousarray(target_rows).reshape(-1)
+
+    def _build_merged_lod_export_buffers(self):
+        """Build only the alternate vertex layouts and skeleton remaps LoD needs."""
+        if not self.merged_skeleton_profile:
+            return
+        submesh_by_unique = {
+            submesh.unique_str: submesh for submesh in self.submesh_model_list
+        }
+        for component in self.merged_skeleton_profile["components"]:
+            if component["cpu_posed"]:
+                continue
+            component_id = int(component["component_id"])
+            unique_str = component["unique_str"]
+            submesh = submesh_by_unique.get(unique_str)
+            for lod_index, lod in enumerate(component.get("lods", []), start=1):
+                for slot, slot_format in lod.get("vb_formats", {}).items():
+                    if submesh is None:
+                        continue
+                    category, stride, data = self._build_lod_slot_buffer(
+                        submesh, slot, slot_format
+                    )
+                    prefix = self._merged_resource_prefix(submesh)
+                    key = (unique_str, lod_index, slot.upper())
+                    self.merged_lod_variant_buffers[key] = {
+                        "resource_name": (
+                            prefix + "_" + category + "_LOD" + str(lod_index)
+                        ),
+                        "filename": (
+                            unique_str + "-" + category + "-LOD"
+                            + str(lod_index) + ".buf"
+                        ),
+                        "slot": slot.lower(),
+                        "category": category,
+                        "stride": stride,
+                        "data": data,
+                    }
+
+                if lod.get("vg_map") or "VB2" in lod.get("vb_formats", {}):
+                    vg_count = int(component["vg_count"])
+                    vg_map = lod.get("vg_map", {})
+                    remap_data = numpy.asarray(
+                        [int(vg_map.get(str(vg_id), vg_id)) for vg_id in range(vg_count)],
+                        dtype=numpy.uint16,
+                    )
+                    remap_key = (component_id, lod_index)
+                    resource_prefix = "Resource_" + unique_str.replace("-", "_")
+                    self.merged_lod_blend_remaps[remap_key] = {
+                        "resource_name": (
+                            resource_prefix + "_Blend_LOD" + str(lod_index)
+                            + "_BlendRemap"
+                        ),
+                        "filename": (
+                            unique_str + "-Blend-LOD" + str(lod_index)
+                            + "-BlendRemap.buf"
+                        ),
+                        "data": remap_data,
+                    }
+
+    def _append_merged_level_buffer_bindings(
+        self, section, submesh_model, lod_level, indent=""
+    ):
         prefix = self._merged_resource_prefix(submesh_model)
-        section.append(indent + "ib = " + prefix + "_Index")
         for category in submesh_model.category_buffer_dict.keys():
             slot = submesh_model.d3d11_game_type.CategoryExtractSlotDict.get(
                 category, "unknown_slot"
             )
-            section.append(indent + slot + " = " + prefix + "_" + category)
-        if "Position" in submesh_model.category_buffer_dict:
-            section.append(indent + "vb3 = " + prefix + "_Position")
+            variant = self.merged_lod_variant_buffers.get(
+                (submesh_model.unique_str, lod_level, str(slot).upper())
+            )
+            resource_name = (
+                variant["resource_name"] if variant else prefix + "_" + category
+            )
+            section.append(indent + slot + " = " + resource_name)
+            if slot.lower() == "vb0":
+                section.append(indent + "vb3 = " + resource_name)
+
+    def _append_merged_buffer_bindings(self, section, submesh_model, indent=""):
+        prefix = self._merged_resource_prefix(submesh_model)
+        section.append(indent + "ib = " + prefix + "_Index")
+        component = self._get_merged_profile_component(submesh_model.unique_str)
+        lods = component.get("lods", []) if component else []
+        if not lods:
+            self._append_merged_level_buffer_bindings(
+                section, submesh_model, 0, indent=indent
+            )
+            return
+        section.append(indent + "if $lod_level == 0")
+        self._append_merged_level_buffer_bindings(
+            section, submesh_model, 0, indent=indent + "    "
+        )
+        for lod_level in range(1, len(lods) + 1):
+            section.append(indent + "elif $lod_level == " + str(lod_level))
+            self._append_merged_level_buffer_bindings(
+                section, submesh_model, lod_level, indent=indent + "    "
+            )
+        section.append(indent + "endif")
 
     def _append_merged_slot_texture_bindings(
         self, section, submesh_model, drawib_model, indent=""
@@ -1065,6 +1342,18 @@ class ExportEFMI:
                 "Pool_MergedSkeleton_Component_LodRemaps"
                 "[$component_id*$lod_level_count+0] = null"
             )
+            for lod_level in range(1, int(profile.get("max_lod_count", 0)) + 1):
+                remap = self.merged_lod_blend_remaps.get(
+                    (component_id, lod_level)
+                )
+                remap_value = (
+                    "ref " + remap["resource_name"] if remap else "null"
+                )
+                command_lists.append(
+                    "Pool_MergedSkeleton_Component_LodRemaps"
+                    "[$component_id*$lod_level_count+" + str(lod_level) + "] = "
+                    + remap_value
+                )
         ini_builder.append_section(command_lists)
 
         entrypoints = M_IniSection(M_SectionType.TextureOverrideIB)
@@ -1086,6 +1375,11 @@ class ExportEFMI:
                 "    $\\EFMIv1\\gpu_posed = "
                 + ("0" if component["cpu_posed"] else "1")
             )
+            if any(
+                lod["ib_hash"] != component["ib_hash"]
+                for lod in component.get("lods", [])
+            ):
+                entrypoints.append("    $lod_level = 0")
             entrypoints.append(
                 "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
                 "ref CommandList_Draw_Component" + str(component_id)
@@ -1098,6 +1392,49 @@ class ExportEFMI:
                     entrypoints.append("    $ActiveCharacter = 1")
             entrypoints.append("endif")
             entrypoints.new_line()
+
+        for lod_level in range(1, int(profile.get("max_lod_count", 0)) + 1):
+            for component in active_components:
+                lods = component.get("lods", [])
+                if len(lods) < lod_level:
+                    continue
+                lod = lods[lod_level - 1]
+                if lod["ib_hash"] == component["ib_hash"]:
+                    continue
+                component_id = component["component_id"]
+                submesh = submesh_by_unique.get(component["unique_str"])
+                entrypoints.append(
+                    "[TextureOverride_EntryPoint_Component"
+                    + str(component_id) + "_LOD" + str(lod_level) + "]"
+                )
+                entrypoints.append("hash = " + lod["ib_hash"])
+                entrypoints.append(
+                    "match_index_count = " + str(lod["index_count"])
+                )
+                entrypoints.append("$object_detected = 1")
+                entrypoints.append("if $mod_enabled && DRAW_TYPE == 4")
+                entrypoints.append(
+                    "    $\\EFMIv1\\component_id = " + str(component_id)
+                )
+                entrypoints.append(
+                    "    $\\EFMIv1\\gpu_posed = "
+                    + ("0" if component["cpu_posed"] else "1")
+                )
+                entrypoints.append("    $lod_level = " + str(lod_level))
+                entrypoints.append(
+                    "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
+                    "ref CommandList_Draw_Component" + str(component_id)
+                )
+                entrypoints.append("    run = CommandList_Component_DrawInstances")
+                if submesh is not None and self.blueprint_model.keyname_mkey_dict:
+                    active_index = draw_ib_active_index_dict.get(
+                        submesh.match_draw_ib, 0
+                    )
+                    entrypoints.append("    $active" + str(active_index) + " = 1")
+                    if GlobalProterties.generate_branch_mod_gui():
+                        entrypoints.append("    $ActiveCharacter = 1")
+                entrypoints.append("endif")
+                entrypoints.new_line()
         ini_builder.append_section(entrypoints)
 
         resources = M_IniSection(M_SectionType.ResourceBuffer)
@@ -1164,6 +1501,22 @@ class ExportEFMI:
                     + submesh.unique_str + "-" + category + ".buf"
                 )
                 resources.new_line()
+        for variant in self.merged_lod_variant_buffers.values():
+            resources.append("[" + variant["resource_name"] + "]")
+            resources.append("type = Buffer")
+            resources.append("stride = " + str(variant["stride"]))
+            resources.append(
+                "filename = " + buffer_folder_name + "\\" + variant["filename"]
+            )
+            resources.new_line()
+        for remap in self.merged_lod_blend_remaps.values():
+            resources.append("[" + remap["resource_name"] + "]")
+            resources.append("type = Buffer")
+            resources.append("format = R16_UINT")
+            resources.append(
+                "filename = " + buffer_folder_name + "\\" + remap["filename"]
+            )
+            resources.new_line()
         ini_builder.append_section(resources)
 
         if not GlobalProterties.forbid_auto_texture_ini():

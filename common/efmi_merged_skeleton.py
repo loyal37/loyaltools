@@ -38,6 +38,8 @@ def _as_non_negative_int(value, field_name: str) -> int:
 
 
 def normalize_vg_map(vg_map, field_name: str = "vg_map") -> dict[str, int]:
+    if vg_map is None:
+        return {}
     if not isinstance(vg_map, dict):
         raise MergedSkeletonProfileError(field_name + " 必须是对象映射。")
 
@@ -52,6 +54,72 @@ def normalize_vg_map(vg_map, field_name: str = "vg_map") -> dict[str, int]:
             )
         normalized[str(local_int)] = global_int
     return dict(sorted(normalized.items(), key=lambda item: int(item[0])))
+
+
+def _normalize_lod_vb_formats(vb_formats, field_name: str) -> dict[str, dict]:
+    if vb_formats is None:
+        return {}
+    if not isinstance(vb_formats, dict):
+        raise MergedSkeletonProfileError(field_name + " 必须是对象。")
+
+    normalized = {}
+    for raw_slot, raw_buffer in vb_formats.items():
+        slot = str(raw_slot).upper()
+        if not slot.startswith("VB") or not slot[2:].isdigit():
+            raise MergedSkeletonProfileError(field_name + " 的槽位无效: " + slot)
+        if not isinstance(raw_buffer, dict):
+            raise MergedSkeletonProfileError(field_name + "." + slot + " 必须是对象。")
+        raw_semantics = raw_buffer.get("semantics", [])
+        if not isinstance(raw_semantics, list) or not raw_semantics:
+            raise MergedSkeletonProfileError(
+                field_name + "." + slot + ".semantics 不能为空。"
+            )
+
+        semantics = []
+        for semantic_id, raw_semantic in enumerate(raw_semantics):
+            semantic_field = (
+                field_name + "." + slot + ".semantics[" + str(semantic_id) + "]"
+            )
+            if not isinstance(raw_semantic, dict):
+                raise MergedSkeletonProfileError(semantic_field + " 必须是对象。")
+            name = str(raw_semantic.get("name", "")).upper().strip()
+            fmt = str(raw_semantic.get("format", "")).upper().strip()
+            if not name or not fmt:
+                raise MergedSkeletonProfileError(semantic_field + " 缺少 name/format。")
+            semantics.append({
+                "name": name,
+                "index": _as_non_negative_int(
+                    raw_semantic.get("index", 0), semantic_field + ".index"
+                ),
+                "format": fmt,
+                "stride": _as_non_negative_int(
+                    raw_semantic.get("stride", 0), semantic_field + ".stride"
+                ),
+            })
+        normalized[slot] = {"semantics": semantics}
+    return dict(sorted(normalized.items(), key=lambda item: int(item[0][2:])))
+
+
+def normalize_lod(lod, field_name: str = "lod") -> dict:
+    if not isinstance(lod, dict):
+        raise MergedSkeletonProfileError(field_name + " 必须是对象。")
+    result = dict(lod)
+    result["lod_object_name"] = str(result.get("lod_object_name", "")).strip()
+    if not result["lod_object_name"]:
+        raise MergedSkeletonProfileError(field_name + " 缺少 lod_object_name。")
+    result["ib_hash"] = str(result.get("ib_hash", "")).lower().strip()
+    result["vb0_hash"] = str(result.get("vb0_hash", "")).lower().strip()
+    if not result["ib_hash"]:
+        raise MergedSkeletonProfileError(field_name + " 缺少 ib_hash。")
+    for key in ("vertex_offset", "vertex_count", "index_offset", "index_count"):
+        result[key] = _as_non_negative_int(result.get(key, 0), field_name + "." + key)
+    result["vg_map"] = normalize_vg_map(
+        result.get("vg_map", {}), field_name + ".vg_map"
+    )
+    result["vb_formats"] = _normalize_lod_vb_formats(
+        result.get("vb_formats", {}), field_name + ".vb_formats"
+    )
+    return result
 
 
 def validate_profile(profile: dict) -> dict:
@@ -123,7 +191,22 @@ def validate_profile(profile: dict) -> dict:
         component["vg_map"] = normalize_vg_map(
             component.get("vg_map", {}), unique_str + ".vg_map"
         )
-        component["lods"] = list(component.get("lods", []))
+        raw_lods = component.get("lods", [])
+        if not isinstance(raw_lods, list):
+            raise MergedSkeletonProfileError(unique_str + ".lods 必须是数组。")
+        component["lods"] = [
+            normalize_lod(lod, unique_str + ".lods[" + str(lod_id) + "]")
+            for lod_id, lod in enumerate(raw_lods)
+        ]
+        component["lods"].sort(
+            key=lambda lod: (lod["vertex_count"], lod["index_count"]),
+            reverse=True,
+        )
+        lod_object_names = [lod["lod_object_name"] for lod in component["lods"]]
+        if len(lod_object_names) != len(set(lod_object_names)):
+            raise MergedSkeletonProfileError(
+                unique_str + ".lods 中 lod_object_name 重复。"
+            )
 
         if not component["cpu_posed"] and component["vg_count"] > 0:
             missing = [
@@ -170,6 +253,16 @@ def validate_profile(profile: dict) -> dict:
         ),
         "object_guid",
     )
+    result["source_frame_dump"] = str(result.get("source_frame_dump", "")).strip()
+    result["max_lod_count"] = max(
+        (len(component["lods"]) for component in normalized_components),
+        default=0,
+    )
+    result["lod_object_names"] = sorted({
+        lod["lod_object_name"]
+        for component in normalized_components
+        for lod in component["lods"]
+    })
     return result
 
 

@@ -1,5 +1,6 @@
 import time
 import re
+import numpy
 
 from dataclasses import dataclass, field
 from collections import defaultdict
@@ -36,6 +37,98 @@ class SimilarityGraph:
             total_similarity += similarity
         weighted_similarity = total_similarity / len(self.data)
         return weighted_similarity
+
+    def find_optimal_matching(self, min_similarity: float = 0.0) -> "SimilarityGraph":
+        """Match LoD/full components one-to-one by maximum total similarity."""
+        rows = list(self.data)
+        columns = []
+        seen_columns = set()
+        for similarities in self.data.values():
+            for candidate in similarities:
+                if candidate not in seen_columns:
+                    seen_columns.add(candidate)
+                    columns.append(candidate)
+        if not rows or not columns:
+            return SimilarityGraph({})
+
+        column_indices = {component: index for index, component in enumerate(columns)}
+        real_column_count = len(columns)
+        # One dummy column per row lets legitimately unmatched components remain
+        # unmatched while keeping the Hungarian problem complete.
+        weights = numpy.full(
+            (len(rows), real_column_count + len(rows)),
+            float(min_similarity),
+            dtype=numpy.float64,
+        )
+        weights[:, :real_column_count] = -numpy.inf
+        for row_index, component in enumerate(rows):
+            for candidate, similarity in self.data[component].items():
+                if similarity >= min_similarity:
+                    weights[row_index, column_indices[candidate]] = similarity
+
+        finite = numpy.isfinite(weights)
+        max_weight = float(weights[finite].max())
+        costs = numpy.full_like(weights, numpy.inf)
+        costs[finite] = max_weight - weights[finite]
+        row_count, column_count = costs.shape
+        potentials_row = numpy.zeros(row_count + 1)
+        potentials_column = numpy.zeros(column_count + 1)
+        column_to_row = numpy.zeros(column_count + 1, dtype=numpy.int32)
+        predecessor = numpy.zeros(column_count + 1, dtype=numpy.int32)
+
+        for row in range(1, row_count + 1):
+            column_to_row[0] = row
+            min_cost = numpy.full(column_count + 1, numpy.inf)
+            used = numpy.zeros(column_count + 1, dtype=bool)
+            current_column = 0
+            while True:
+                used[current_column] = True
+                current_row = column_to_row[current_column]
+                delta = numpy.inf
+                next_column = 0
+                for column in range(1, column_count + 1):
+                    if used[column]:
+                        continue
+                    cost = costs[current_row - 1, column - 1]
+                    reduced = (
+                        cost
+                        - potentials_row[current_row]
+                        - potentials_column[column]
+                    )
+                    if reduced < min_cost[column]:
+                        min_cost[column] = reduced
+                        predecessor[column] = current_column
+                    if min_cost[column] < delta:
+                        delta = min_cost[column]
+                        next_column = column
+                if not numpy.isfinite(delta):
+                    raise ValueError("LOD 组件不存在完整的可行匹配。")
+                for column in range(column_count + 1):
+                    if used[column]:
+                        potentials_row[column_to_row[column]] += delta
+                        potentials_column[column] -= delta
+                    else:
+                        min_cost[column] -= delta
+                current_column = next_column
+                if column_to_row[current_column] == 0:
+                    break
+            while True:
+                previous_column = predecessor[current_column]
+                column_to_row[current_column] = column_to_row[previous_column]
+                current_column = previous_column
+                if current_column == 0:
+                    break
+
+        result = {}
+        for column in range(1, column_count + 1):
+            row = int(column_to_row[column])
+            if row == 0 or column > real_column_count:
+                continue
+            weight = float(weights[row - 1, column - 1])
+            if not numpy.isfinite(weight):
+                continue
+            result[rows[row - 1]] = {columns[column - 1]: weight}
+        return SimilarityGraph(result)
 
     def verify_endmin_similarity_graph(self):
         endmin_lod1_to_full_map = {
@@ -349,7 +442,10 @@ class LODMatcher:
 
     def get_best_matching_components(self, similarity_graph: SimilarityGraph) -> dict[MigotoComponent, MigotoComponent]:
         result = {}
-        for lod_component, similarities in similarity_graph.data.items():
+        matched_graph = similarity_graph.find_optimal_matching(min_similarity=0.0)
+        for lod_component, similarities in matched_graph.data.items():
+            if not similarities:
+                continue
             full_component, similarity = next(iter(similarities.items()))
 
             if similarity < self.object_similarity_threshold:

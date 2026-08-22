@@ -438,21 +438,11 @@ class DumpWorkspaceExtractor:
             workspace_folder=workspace_folder,
         )
 
-    def extract_merged_skeleton(
+    def get_merged_skeleton_candidates(
         self,
-        workspace_folder: str,
-        gametype_name: str = 'GPU-EFMI',
-        copy_textures: bool = True,
-    ) -> ExtractResult:
-        '''
-        自动识别当前帧中的主要显式权重对象，生成 EFMI 1.4.1 Merged
-        Skeleton 工作空间。目录/JSON/物体主键仍沿用 LoyalTools 的
-        ``IBHash-IndexCount-FirstIndex``，不会调用或修改普通 ``extract`` 流程。
-        '''
-        workspace_folder = os.path.abspath(str(workspace_folder))
-        os.makedirs(workspace_folder, exist_ok=True)
-        warnings: list[str] = []
-
+        ignore_incomplete_draw_calls: bool = False,
+    ) -> list:
+        """Extract EFMI weighted-object candidates from this frame dump."""
         object_extractor = ObjectExtractor(verbose_logging=self.verbose)
         try:
             candidates = object_extractor.extract_objects(
@@ -463,6 +453,7 @@ class DumpWorkspaceExtractor:
                     skip_static_objects=True,
                     ignore_errors=True,
                 ),
+                ignore_incomplete_draw_calls=ignore_incomplete_draw_calls,
             )
         except Exception as exc:
             raise ExtractError("骨骼合并角色识别失败: " + repr(exc))
@@ -491,23 +482,47 @@ class DumpWorkspaceExtractor:
             ):
                 continue
             explicit_candidates.append(candidate)
+        return explicit_candidates
 
-        if not explicit_candidates:
+    @staticmethod
+    def select_merged_skeleton_object(candidates: list, object_name: str = ""):
+        if not candidates:
             raise ExtractError(
                 "帧分析中没有识别到可用于骨骼合并的显式权重角色。"
                 "请在角色完整显示且未被菜单遮挡时重新抓帧。"
             )
-
-        # EFMI-Tools 用 Character 标签识别多部件角色。若同一帧存在武器、NPC 等
-        # 多个加权对象，优先 Character，其次按组件数和总顶点数选择主对象。
-        selected_object = max(
-            explicit_candidates,
+        if object_name:
+            for candidate in candidates:
+                if str(candidate.id) == str(object_name):
+                    return candidate
+        return max(
+            candidates,
             key=lambda obj: (
                 1 if str(obj.id).startswith("Character") else 0,
                 len(obj.components),
                 sum(int(component.mesh.format.vertex_count) for component in obj.components),
             ),
         )
+
+    def extract_merged_skeleton(
+        self,
+        workspace_folder: str,
+        gametype_name: str = 'GPU-EFMI',
+        copy_textures: bool = True,
+    ) -> ExtractResult:
+        '''
+        自动识别当前帧中的主要显式权重对象，生成 EFMI 1.4.1 Merged
+        Skeleton 工作空间。目录/JSON/物体主键仍沿用 LoyalTools 的
+        ``IBHash-IndexCount-FirstIndex``，不会调用或修改普通 ``extract`` 流程。
+        '''
+        workspace_folder = os.path.abspath(str(workspace_folder))
+        os.makedirs(workspace_folder, exist_ok=True)
+        warnings: list[str] = []
+
+        explicit_candidates = self.get_merged_skeleton_candidates()
+        # EFMI-Tools 用 Character 标签识别多部件角色。若同一帧存在武器、NPC 等
+        # 多个加权对象，优先 Character，其次按组件数和总顶点数选择主对象。
+        selected_object = self.select_merged_skeleton_object(explicit_candidates)
         if len(explicit_candidates) > 1:
             warnings.append(
                 "帧中识别到 " + str(len(explicit_candidates))
@@ -624,6 +639,7 @@ class DumpWorkspaceExtractor:
             "weighting_type": WeightingType.Explicit.value,
             "object_guid": sum(component["index_count"] for component in profile_components),
             "max_instance_count": 8,
+            "source_frame_dump": self.dump_folder,
             "components": profile_components,
         }
         write_profile(workspace_folder, profile)

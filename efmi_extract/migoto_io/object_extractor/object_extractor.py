@@ -64,7 +64,8 @@ class ObjectExtractor:
         model: DumpModel,
         draw_call_filter: DrawCallFilter,
         raw_object_filter: RawObjectFilter,
-        migoto_object_filter: MigotoObjectFilter
+        migoto_object_filter: MigotoObjectFilter,
+        ignore_incomplete_draw_calls: bool = False,
     ) -> list[MigotoObject]:
 
         t = time.time()
@@ -75,6 +76,7 @@ class ObjectExtractor:
             draw_call_filter=draw_call_filter,
             identifier=RawObjectIdentifier(),
             raw_object_filter=raw_object_filter,
+            ignore_incomplete_draw_calls=ignore_incomplete_draw_calls,
         ).extract(model)
 
         print(f'Done extracting raw objects from frame model in {time.time() - t:.2f}s.')

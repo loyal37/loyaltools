@@ -163,6 +163,7 @@ class RawObjectExtractor:
     draw_call_filter: DrawCallFilter
     identifier: RawObjectIdentifier
     raw_object_filter: RawObjectFilter
+    ignore_incomplete_draw_calls: bool = False
 
     def register_shader_call(self, extracted_object: RawObject, shader_call: ShaderCall, gpu_posed: bool):
         ib: IndexBuffer = shader_call.resources.get_by_slot(ResourceSlot(ShaderType.Any, SlotType.IndexBuffer, 0))
@@ -233,7 +234,15 @@ class RawObjectExtractor:
                 )
                 raw_objects[object_id] = extracted_object
 
-            self.register_shader_call(extracted_object, shader_call, gpu_posed)
+            try:
+                self.register_shader_call(extracted_object, shader_call, gpu_posed)
+            except (AttributeError, OSError, TypeError, ValueError) as exc:
+                if not self.ignore_incomplete_draw_calls:
+                    raise
+                print(
+                    f"[{shader_call.id:06d}]: Skipped incomplete draw call while "
+                    f"collecting LoD candidates: {exc!r}"
+                )
 
         filtered_objects = {}
         for object_id, extracted_object in raw_objects.items():
