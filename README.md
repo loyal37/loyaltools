@@ -7,6 +7,14 @@
 - 面板位置：Blender 3D 视图 → 侧边栏（N 键）→ `LoyalTools` 标签页
 - Blender 版本要求：4.5+
 
+## 安装
+
+1. 打开 [GitHub Releases](https://github.com/loyal37/loyaltools/releases)，下载附件中名为 `LoyalTools-vX.Y.Z-Blender.zip` 的文件。
+2. 不要解压。在 Blender 中打开「编辑 → 偏好设置 → 插件」，选择「从磁盘安装」，然后选中该 ZIP。
+3. 安装完成后启用 `LoyalTools`。
+
+> 不要下载 GitHub 自动生成的 `Source code (zip)`。它的顶层目录类似 `loyaltools-1.6.1/`，目录名包含连字符和版本号，Blender 无法把它作为 Python 插件模块导入。
+
 ## 与 TheHerta4 的区别
 
 | 功能 | TheHerta4 | LoyalTools |
