@@ -33,7 +33,7 @@ bl_info = {
     "name": "LoyalTools",
     "description": "明日方舟终末地 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力，无需 SSMT4）",
     "blender": (4, 5, 0),
-    "version": (1, 6, 0),
+    "version": (1, 6, 1),
     "location": "View3D",
     "category": "Generic"
 }

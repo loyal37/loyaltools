@@ -77,13 +77,20 @@ def main():
             struct.pack("<2f4B", 0.75, 1.00, 5, 6, 7, 8),
         )
     )
+    blend_rows = numpy.zeros(2, dtype=numpy.dtype([
+        ("weights", "<f4", (4,)),
+        ("indices", "<u2", (4,)),
+    ]))
+    blend_rows["indices"] = numpy.asarray(
+        [[2, 3, 8, 0], [4, 2, 9, 8]], dtype=numpy.uint16
+    )
     submesh = SimpleNamespace(
         unique_str=unique_str,
         d3d11_game_type=_game_type(),
         category_buffer_dict={
             "Position": numpy.zeros(24, dtype=numpy.uint8),
             "Texcoord": numpy.frombuffer(texcoord_bytes, dtype=numpy.uint8).copy(),
-            "Blend": numpy.zeros(48, dtype=numpy.uint8),
+            "Blend": blend_rows.view(numpy.uint8).reshape(-1).copy(),
         },
     )
     exporter = ExportEFMI.__new__(ExportEFMI)
@@ -96,7 +103,9 @@ def main():
                 "component_id": 0,
                 "unique_str": unique_str,
                 "cpu_posed": False,
+                "vg_offset": 10,
                 "vg_count": 3,
+                "vg_map": {"0": 2, "1": 3, "2": 4},
                 "lods": [
                     {
                         "vg_map": {"0": 2, "1": 0, "2": 1},
@@ -118,6 +127,21 @@ def main():
         ]
     }
 
+    exporter.merged_private_vg_rewrite_stats = {}
+    exporter._prepare_merged_component_blend_buffers()
+    rewritten_rows = submesh.category_buffer_dict["Blend"].view(
+        blend_rows.dtype
+    ).reshape(-1)
+    assert rewritten_rows["indices"].tolist() == [
+        [10, 11, 8, 0],
+        [12, 10, 9, 8],
+    ]
+    assert exporter.merged_private_vg_rewrite_stats[unique_str][
+        "changed_channel_count"
+    ] == 4
+    # 8/9 are not supplied by this component and must remain cross-IB weights.
+    assert 8 in rewritten_rows["indices"] and 9 in rewritten_rows["indices"]
+
     exporter._build_merged_lod_export_buffers()
     variant = exporter.merged_lod_variant_buffers[(unique_str, 1, "VB1")]
     assert variant["stride"] == 8
@@ -135,6 +159,7 @@ def main():
     assert any(
         line == "    vb1 = " + variant["resource_name"] for line in lines
     )
+    print("MERGED_LOD_PRIVATE_BLEND_REGRESSION=PASS")
     print("MERGED_LOD_BUFFER_REGRESSION=PASS")
 
 

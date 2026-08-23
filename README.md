@@ -69,7 +69,7 @@
 5. 在骨骼合并模式点「导入」时，各组件的本地顶点组会自动改为 profile 中的全局顶点组；每个物体都会建立同一套 `0..bones_count-1` 顶点组空间，空组用于保持 Blender 组索引与全局骨骼 ID 一致。普通模式导入不会应用这份映射。
 6. 不使用跨 IB 时无需额外节点，自动生成的蓝图和物体标记会让导出器直接进入骨骼合并模式。需要跨 IB 映射时再加入 Cross IB 节点，把「跨 IB 方式」切换为 **骨骼合并**；映射仍填写「源 IndexCount >> 目标 IndexCount」，不需要 VS 200–204 选项。
 7. 骨骼合并模式不需要手动标记 Diffuse/Light/Normal。提取时会按 EFMI-Tools 的组件贴图归属与默认过滤规则（跳过 JPG/BUF、小于 256 KB、非正方形纹理）识别连续材质槽，并在每个 IB 的目录分别准备 `<unique_str>-DiffuseMap/LightMap/NormalMap.dds`。即使多个 IB 使用内容相同的贴图，也不会跨 IB 去重，因此可独立编辑。普通制作流程仍沿用原来的手动贴图标记，不受影响。
-8. 生成 Mod。该模式会把上述独立贴图自动复制到 `Textures/` 并生成各组件自己的 `ps-t` 绑定，同时导出 16 位 `BLENDINDICES`、EFMI 1.4.1 Merged Skeleton 回调和各组件 EntryPoint；不会生成 EFMI-Tools 的全局贴图 hash override，也不会生成一般跨 IB 使用的 HLSL。存在 LOD 时，INI 会新增 `$lod_level` 检测入口、仅对布局不同的槽生成 `<unique_str>-<Category>-LOD<n>.buf`，并按需生成 R16 `BlendRemap`；LOD IB 与完整 IB 相同时不会重复生成哈希入口。profile 中的所有 GPU posed 组件都会保留 EntryPoint 和骨骼合并回调；即使蓝图里删除了某个 GPU IB，它仍会为其他 IB 提供共享骨骼，但不会绑定网格/贴图或发出绘制，因此该 IB 在 Mod 中保持隐藏。真正的 `cpu_posed = true` 组件由蓝图决定是否接管：未连接蓝图时不生成该组件的 EntryPoint、回调、贴图或 Buffer；连接蓝图时生成 `gpu_posed = 0` EntryPoint、自动贴图和 `drawindexed = INDEX_COUNT, FIRST_INDEX, 0` 游戏原网格绘制，但始终不生成自定义 IB/VB，也不使用其 Blender 权重参与合并蒙皮。
+8. 生成 Mod。该模式会把上述独立贴图自动复制到 `Textures/` 并生成各组件自己的 `ps-t` 绑定，同时导出 16 位 `BLENDINDICES`、EFMI 1.4.1 Merged Skeleton 回调和各组件 EntryPoint；不会生成 EFMI-Tools 的全局贴图 hash override，也不会生成一般跨 IB 使用的 HLSL。存在 LOD 时，INI 会新增 `$lod_level` 检测入口、仅对布局不同的槽生成 `<unique_str>-<Category>-LOD<n>.buf`，并按需生成 R16 `BlendRemap`；LOD IB 与完整 IB 相同时不会重复生成哈希入口。v1.6.1 起，导出器会把当前组件自身可提供、但在 Blender 中被跨组件去重的骨骼编号写回该组件的私有骨骼区间，使 LOD 捕获和网格读取使用同一组编号；不属于当前组件的顶点组仍保持原编号，因此真正的跨 IB 权重不受影响。profile 中的所有 GPU posed 组件都会保留 EntryPoint 和骨骼合并回调；即使蓝图里删除了某个 GPU IB，它仍会为其他 IB 提供共享骨骼，但不会绑定网格/贴图或发出绘制，因此该 IB 在 Mod 中保持隐藏。真正的 `cpu_posed = true` 组件由蓝图决定是否接管：未连接蓝图时不生成该组件的 EntryPoint、回调、贴图或 Buffer；连接蓝图时生成 `gpu_posed = 0` EntryPoint、自动贴图和 `drawindexed = INDEX_COUNT, FIRST_INDEX, 0` 游戏原网格绘制，但始终不生成自定义 IB/VB，也不使用其 Blender 权重参与合并蒙皮。
 
 同一张蓝图不能混用「一般跨 IB」和「骨骼合并」。全局顶点组 ID 上限为 65535；单个游戏组件原始骨骼仍受游戏骨骼缓冲区的 256 项范围约束。
 
@@ -87,6 +87,7 @@
 - v1.5.0 起，骨骼合并可从独立远景 FrameAnalysis 添加 LOD 映射；Blender 仍只编辑完整模型，导出器自动生成 LOD 入口、必要的 VB 布局变体与骨骼重映射。普通制作和一般 Cross IB 不读取 LOD profile。
 - v1.5.1 起，LOD 一对一分配会在求解前排除低于组件阈值的候选，允许多余 LOD/缺失主组件保持未匹配，避免弱匹配抢占正确组件。映射后若主组件没有独立 LOD，面板会提示不要在其他网格使用该组件负责的全局顶点组权重。
 - v1.6.0 起，骨骼合并面板把“导入主控”和“导入 LOD”分开：主控可重复导入到新蓝图，真实 LOD 网格导入独立黄色预览集合且不接入导出蓝图；LOD 预览导入区默认折叠，并可弹窗查看 `LOD unique_str → 主控 unique_str` 映射表。
+- v1.6.1 起，骨骼合并导出会在写 Blend 缓冲前把“本组件拥有但被全局去重”的顶点组恢复到本组件私有池编号，修复正确 LOD 映射仍在游戏中读取错误骨矩阵的问题；普通制作、Blender 顶点组和真正的跨 IB 权重不变。已有 `.blend` 无需重新提取或重新导入，安装新版后重新生成 Mod 即可。
 - CPU posed 部件仅支持游戏原网格和贴图替换，不能导出自定义几何或权重；是否生成对应覆盖由该对象是否连接进蓝图决定。
 - 更新器指向 https://github.com/loyal37/loyaltools，「检查版本更新」从该仓库的 Release 获取新版本。
 

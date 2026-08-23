@@ -308,6 +308,50 @@ def get_component_by_unique_str(profile: dict) -> dict[str, dict]:
     }
 
 
+def build_component_private_vg_remap(component: dict) -> dict[int, int]:
+    """Map a component's canonical global groups back to its private pool range.
+
+    Extraction intentionally deduplicates identical bones across components, so
+    ``vg_map`` may point at another component's canonical global group.  EFMI's
+    LoD importer, however, always writes the current component's matrices to
+    ``vg_offset + local_id``.  Exported Blend buffers must therefore read the
+    component-private destination for every bone that the component itself can
+    provide.  Groups that are not present in this component's ``vg_map`` are
+    intentional cross-component weights and are deliberately left untouched.
+
+    When multiple local bones were deduplicated to the same canonical group, we
+    prefer the already-canonical private slot (when available), then the lowest
+    local id.  Those source matrices are identical by the deduplication contract.
+    """
+    vg_offset = _as_non_negative_int(
+        component.get("vg_offset", 0), "component.vg_offset"
+    )
+    vg_count = _as_non_negative_int(
+        component.get("vg_count", 0), "component.vg_count"
+    )
+    vg_map = normalize_vg_map(component.get("vg_map", {}), "component.vg_map")
+
+    local_ids_by_global: dict[int, list[int]] = {}
+    for local_id_text, global_id in vg_map.items():
+        local_id = int(local_id_text)
+        if local_id >= vg_count:
+            raise MergedSkeletonProfileError(
+                "component.vg_map 的本地顶点组 " + str(local_id)
+                + " 超过 vg_count=" + str(vg_count) + "。"
+            )
+        local_ids_by_global.setdefault(int(global_id), []).append(local_id)
+
+    remap: dict[int, int] = {}
+    for global_id, local_ids in local_ids_by_global.items():
+        canonical_local_id = global_id - vg_offset
+        if canonical_local_id in local_ids:
+            target_local_id = canonical_local_id
+        else:
+            target_local_id = min(local_ids)
+        remap[global_id] = vg_offset + target_local_id
+    return remap
+
+
 def build_lod_mapping_groups(profile: dict) -> list[dict]:
     """Build UI-friendly LoD unique_str -> full-detail unique_str groups."""
     normalized = validate_profile(profile)

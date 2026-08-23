@@ -13,7 +13,10 @@ from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...utils.timer_utils import TimerUtils
-from ...common.efmi_merged_skeleton import load_profile
+from ...common.efmi_merged_skeleton import (
+    build_component_private_vg_remap,
+    load_profile,
+)
 from ...common.efmi_merged_texture import (
     copy_merged_auto_textures,
     resolve_merged_auto_textures,
@@ -154,7 +157,9 @@ class ExportEFMI:
         self.merged_auto_texture_binding_dict = {}
         self.merged_lod_variant_buffers = {}
         self.merged_lod_blend_remaps = {}
+        self.merged_private_vg_rewrite_stats = {}
         if self.merged_skeleton_mode:
+            self._prepare_merged_component_blend_buffers()
             self._build_merged_lod_export_buffers()
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
@@ -625,6 +630,93 @@ class ExportEFMI:
             if component["unique_str"] == unique_str:
                 return component
         return None
+
+    def _prepare_merged_component_blend_buffers(self):
+        """Align exported Blend IDs with EFMI's component-private LoD pools.
+
+        Blender keeps the extraction-time canonical global vertex groups so
+        users can transfer weights across IBs naturally.  EFMI captures LoD
+        bones into each component's private ``vg_offset`` range, though.  This
+        export-only rewrite moves groups supplied by the current component back
+        into that private range while preserving genuine cross-IB groups.
+        """
+        if not self.merged_skeleton_profile:
+            return
+
+        component_by_unique = {
+            component["unique_str"]: component
+            for component in self.merged_skeleton_profile["components"]
+            if not component.get("cpu_posed", False)
+        }
+        for submesh_model in self.submesh_model_list:
+            component = component_by_unique.get(submesh_model.unique_str)
+            if component is None:
+                continue
+            rewrite_map = build_component_private_vg_remap(component)
+            if not rewrite_map:
+                continue
+
+            game_type = submesh_model.d3d11_game_type
+            blend_element = next(
+                (
+                    element for element in game_type.D3D11ElementList
+                    if element.SemanticName == "BLENDINDICES"
+                    and int(element.SemanticIndex) == 0
+                ),
+                None,
+            )
+            if blend_element is None:
+                raise ValueError(
+                    submesh_model.unique_str
+                    + " 缺少 BLENDINDICES0，无法应用骨骼合并 LOD 私有骨骼映射。"
+                )
+            if blend_element.Format != "R16G16B16A16_UINT":
+                raise ValueError(
+                    submesh_model.unique_str + " 的 BLENDINDICES0 格式应为 "
+                    "R16G16B16A16_UINT，实际为 " + blend_element.Format + "。"
+                )
+
+            category = blend_element.Category
+            category_stride = int(game_type.CategoryStrideDict[category])
+            category_buffer = numpy.asarray(
+                submesh_model.category_buffer_dict[category], dtype=numpy.uint8
+            )
+            if category_stride <= 0 or category_buffer.size % category_stride:
+                raise ValueError(
+                    submesh_model.unique_str + " 的 " + category
+                    + " 缓冲步长无效，无法重写 BLENDINDICES0。"
+                )
+
+            rewritten_buffer = numpy.ascontiguousarray(category_buffer).copy()
+            rows = rewritten_buffer.reshape(-1, category_stride)
+            element_offset = self._source_category_element_offset(
+                game_type, blend_element
+            )
+            element_width = int(blend_element.ByteWidth)
+            blend_bytes = numpy.ascontiguousarray(
+                rows[:, element_offset:element_offset + element_width]
+            )
+            blend_values = blend_bytes.view(numpy.uint16).reshape(-1, 4)
+            original_values = blend_values.copy()
+            for canonical_id, private_id in rewrite_map.items():
+                blend_values[original_values == canonical_id] = private_id
+            changed_channel_count = int(numpy.count_nonzero(
+                blend_values != original_values
+            ))
+            rows[:, element_offset:element_offset + element_width] = (
+                blend_values.view(numpy.uint8).reshape(-1, element_width)
+            )
+            submesh_model.category_buffer_dict[category] = rewritten_buffer
+            self.merged_private_vg_rewrite_stats[submesh_model.unique_str] = {
+                "changed_channel_count": changed_channel_count,
+                "rewrite_map": dict(rewrite_map),
+            }
+            if changed_channel_count:
+                print(
+                    "[EFMI骨骼合并] LOD 私有骨骼编号修正: "
+                    + submesh_model.unique_str + "，重写 "
+                    + str(changed_channel_count) + " 个 BLENDINDICES 通道。"
+                )
 
     @staticmethod
     def _decode_dxgi_values(values, fmt):
