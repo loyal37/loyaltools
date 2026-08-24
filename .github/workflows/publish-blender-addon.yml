@@ -25,6 +25,14 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
 
+      - name: Verify public GitHub copy is English
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/check_github_english.py \
+            --repository . \
+            --release-tag "$RELEASE_TAG"
+
       - name: Build installable ZIP
         run: |
           python scripts/build_blender_addon.py \
