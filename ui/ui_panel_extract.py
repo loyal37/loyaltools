@@ -1122,7 +1122,10 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         props = scene.loyal_extract_props
 
         layout.prop(props, "workflow_mode", expand=True)
-        layout.prop(props, "frame_dump_folder")
+        if props.workflow_mode == 'MERGED_SKELETON':
+            layout.prop(props, "frame_dump_folder", text="LOD0")
+        else:
+            layout.prop(props, "frame_dump_folder")
 
         if props.workflow_mode == 'STANDARD':
             # DrawIB分行列表 (SSMT4风格表格: DrawIB | 别名)
@@ -1143,12 +1146,6 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
             button_column.separator()
             button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_UP').direction = 'UP'
             button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_DOWN').direction = 'DOWN'
-        else:
-            merged_box = layout.box()
-            merged_box.label(text="自动识别当前帧的主要角色与全部组件", icon='ARMATURE_DATA')
-            merged_box.label(text="先用近景帧提取完整模型，再用远景帧添加 LOD")
-            merged_box.label(text="导入时自动把各组件本地顶点组映射为全局顶点组")
-
         extract_row = layout.row()
         extract_row.scale_y = 1.5
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
@@ -1163,8 +1160,8 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
             )
 
             lod_box = layout.box()
-            lod_box.label(text="LOD 映射（独立步骤）", icon='MOD_DECIM')
-            lod_box.prop(props, "lod_frame_dump_folder")
+            lod_box.label(text="LOD 映射", icon='MOD_DECIM')
+            lod_box.prop(props, "lod_frame_dump_folder", text="LOD1")
             lod_box.operator(
                 LoyalMapMergedSkeletonLOD.bl_idname,
                 text="添加 / 更新 LOD 映射",
@@ -1175,7 +1172,6 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
                 text="查看 LOD 映射表",
                 icon='PRESET',
             )
-            lod_box.label(text="可更换远景帧重复添加；同一 LOD 对象会自动更新")
             lod_import_box = layout.box()
             lod_import_header = lod_import_box.row(align=True)
             lod_import_header.prop(
