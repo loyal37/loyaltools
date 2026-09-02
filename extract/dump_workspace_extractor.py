@@ -1164,6 +1164,7 @@ class DumpWorkspaceExtractor:
         vertex_count: int,
         unknown_index_offset: int,
         warnings: list[str],
+        layout_format: MigotoFormat | None = None,
     ) -> tuple[_SlotData | None, int]:
         '''
         构建一个 VB 槽位的布局与顶点数据切片。
@@ -1178,7 +1179,15 @@ class DumpWorkspaceExtractor:
         if fmt.vb_layout is None:
             raise ExtractError("vb" + str(slot_id) + " 的 .txt 文件中没有元素布局信息。")
 
-        slot_semantics = copy.deepcopy(fmt.vb_layout.get_elements_in_slot(slot_id))
+        # 同一个 VB 会被多个渲染 Pass 复用。深度/阴影 Pass 的输入布局可能只声明
+        # POSITION/NORMAL，而材质 Pass 才声明同一 40-byte 行末尾的 TANGENT。
+        # layout_format 只提供更完整的语义描述；原始 fmt 仍负责二进制路径、偏移、
+        # first_vertex 与 vertex_count，避免跨 Pass 改变实际几何切片窗口。
+        layout_format = layout_format or fmt
+        if layout_format.vb_layout is None:
+            raise ExtractError("vb" + str(slot_id) + " 的候选 .txt 文件中没有元素布局信息。")
+
+        slot_semantics = copy.deepcopy(layout_format.vb_layout.get_elements_in_slot(slot_id))
         if not slot_semantics:
             # 此槽位在输入布局中没有元素，跳过
             return None, unknown_index_offset
@@ -1187,6 +1196,12 @@ class DumpWorkspaceExtractor:
         if stride <= 0:
             print("警告: vb" + str(slot_id) + " (hash=" + str(vb.hash) + ") stride 为 0，跳过该槽位。")
             return None, unknown_index_offset
+        layout_stride = int(layout_format.stride or 0)
+        if layout_stride != stride:
+            raise ExtractError(
+                "vb" + str(slot_id) + " 的跨 Pass 布局 stride (" + str(layout_stride)
+                + ") 与主绘制 stride (" + str(stride) + ") 不一致。"
+            )
 
         layout = BufferLayout(
             semantics=slot_semantics,
@@ -1280,6 +1295,108 @@ class DumpWorkspaceExtractor:
         )
         return slot_data, unknown_index_offset
 
+    def _score_slot_layout(self, fmt: MigotoFormat, slot_id: int) -> tuple[int, int, int, int]:
+        '''按可导出字节覆盖率评价单个 Pass 的槽位布局；分数越高越完整。'''
+        if fmt is None or fmt.vb_layout is None:
+            return (-1, -1, -1, -1)
+        stride = int(fmt.stride or 0)
+        if stride <= 0:
+            return (-1, -1, -1, -1)
+
+        semantics = copy.deepcopy(fmt.vb_layout.get_elements_in_slot(slot_id))
+        if not semantics:
+            return (-1, -1, -1, -1)
+
+        # 评分必须使用与最终提取相同的清洗/重映射结果。例如 EFMI 的
+        # TEXCOORD4/R8G8B8A8_SNORM 会映射为可导出的 COLOR，不能按无效
+        # TEXCOORD 低估它，再错误改选另一个同宽 Pass。
+        score_layout = BufferLayout(
+            semantics=semantics,
+            auto_offsets=False,
+            auto_stride=False,
+        )
+        score_layout.stride = stride
+        score_layout.sort()
+        score_layout.remove_data_views()
+        score_layout.remap_semantics(self._semantic_remap)
+        score_layout.dedupe_semantics()
+        semantics = score_layout.semantics
+
+        covered_bytes = set()
+        exportable_bytes = set()
+        protected_bytes = set()
+        valid = 1
+        for semantic in semantics:
+            start = int(semantic.offset)
+            width = int(semantic.stride)
+            end = start + width
+            if start < 0 or width <= 0 or end > stride:
+                valid = 0
+                continue
+
+            byte_range = range(start, end)
+            covered_bytes.update(byte_range)
+            is_exportable = semantic.abstract.enum != Semantic.Unknown
+            if semantic.abstract.enum == Semantic.TexCoord:
+                is_exportable = semantic.format.format in _VALID_TEXCOORD_FORMATS
+            if is_exportable:
+                exportable_bytes.update(byte_range)
+            if semantic.abstract.enum in _PROTECTED_SEMANTICS:
+                protected_bytes.update(byte_range)
+
+        return (
+            valid,
+            len(exportable_bytes),
+            len(covered_bytes),
+            len(protected_bytes),
+        )
+
+    def _select_slot_layout_format(
+        self,
+        records: list[_DrawRecord],
+        primary_vb: VertexBuffer,
+        slot_id: int,
+    ) -> MigotoFormat | None:
+        '''从同一几何分组的所有 Pass 中选择覆盖最完整的同 stride VB 布局。'''
+        primary_fmt = self._load_txt_format(primary_vb)
+        if primary_fmt is None:
+            return None
+        primary_stride = int(primary_fmt.stride or 0)
+        primary_hash = str(primary_vb.hash)
+
+        best_fmt = primary_fmt
+        best_score = self._score_slot_layout(primary_fmt, slot_id)
+        best_call_id = None
+
+        for record in records:
+            candidate_vb = record.shader_call.model_resources.get_by_slot("vb" + str(slot_id))
+            if candidate_vb is None or not isinstance(candidate_vb, VertexBuffer):
+                continue
+            if str(candidate_vb.hash) != primary_hash:
+                continue
+            try:
+                candidate_fmt = self._load_txt_format(candidate_vb)
+            except Exception:
+                continue
+            if candidate_fmt is None or int(candidate_fmt.stride or 0) != primary_stride:
+                continue
+
+            candidate_score = self._score_slot_layout(candidate_fmt, slot_id)
+            if candidate_score > best_score:
+                best_fmt = candidate_fmt
+                best_score = candidate_score
+                best_call_id = getattr(record.shader_call, "id", "?")
+
+        primary_score = self._score_slot_layout(primary_fmt, slot_id)
+        if self.verbose and best_fmt is not primary_fmt:
+            print(
+                "vb" + str(slot_id) + " (hash=" + primary_hash + ") 使用调用 "
+                + str(best_call_id) + " 的更完整跨 Pass 布局: "
+                + str(primary_score[1]) + "/" + str(primary_stride) + " -> "
+                + str(best_score[1]) + "/" + str(primary_stride) + " 可导出字节。"
+            )
+        return best_fmt
+
     # ------------------------------------------------------------------
     # 子网格构建
     # ------------------------------------------------------------------
@@ -1309,6 +1426,7 @@ class DumpWorkspaceExtractor:
             vb = record.shader_call.model_resources.get_by_slot("vb" + str(slot_id))
             if vb is None or not isinstance(vb, VertexBuffer):
                 continue
+            layout_format = self._select_slot_layout_format(records, vb, slot_id)
             slot_data, unknown_index_offset = self._build_slot_data(
                 vb=vb,
                 slot_id=slot_id,
@@ -1316,6 +1434,7 @@ class DumpWorkspaceExtractor:
                 vertex_count=vertex_count,
                 unknown_index_offset=unknown_index_offset,
                 warnings=warnings,
+                layout_format=layout_format,
             )
             if slot_data is not None:
                 slot_datas.append(slot_data)
