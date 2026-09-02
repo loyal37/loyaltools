@@ -38,6 +38,7 @@ class UnityBufferBuildResult:
     index_loop_id_dict: Optional[dict] = field(default=None, repr=False)
     unique_first_loop_indices: Optional[numpy.ndarray] = field(default=None, repr=False)
     shape_key_buffer_dict: dict = field(default_factory=dict, repr=False)
+    efmi_packed_tbn: Optional[numpy.ndarray] = field(default=None, repr=False)
 
 
 @dataclass
@@ -267,6 +268,7 @@ class ExportUtils:
     def build_unity_obj_buffer_result(
         obj: bpy.types.Object,
         d3d11_game_type: D3D11GameType,
+        collect_efmi_packed_tbn: bool = False,
     ) -> UnityBufferBuildResult:
         ObjBufferHelper.check_and_verify_attributes(obj=obj, d3d11_game_type=d3d11_game_type)
 
@@ -315,6 +317,15 @@ class ExportUtils:
             )
         TimerUtils.end_stage("ShapeKey计算")
 
+        efmi_packed_tbn = None
+        if collect_efmi_packed_tbn:
+            loop_tbn = ObjBufferHelper._parse_efmi_encoded_tbn(
+                element_context.mesh.loops, len(element_context.mesh.loops)
+            )
+            efmi_packed_tbn = numpy.ascontiguousarray(
+                loop_tbn[unique_first_loop_indices], dtype=numpy.uint32
+            )
+
         return UnityBufferBuildResult(
             obj_name=element_context.obj_name,
             dtype=element_context.total_structured_dtype,
@@ -324,6 +335,7 @@ class ExportUtils:
             index_loop_id_dict=index_loop_id_dict,
             unique_first_loop_indices=unique_first_loop_indices,
             shape_key_buffer_dict=shape_key_buffer_dict,
+            efmi_packed_tbn=efmi_packed_tbn,
         )
 
     @staticmethod

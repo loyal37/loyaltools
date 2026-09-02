@@ -51,6 +51,7 @@ class SubMeshModel:
     index_vertex_id_dict:dict = field(init=False,repr=False,default_factory=dict) 
     shape_key_buffer_dict:dict = field(init=False,repr=False,default_factory=dict)
     unique_first_loop_indices:numpy.ndarray = field(init=False,repr=False,default=None)
+    efmi_packed_tbn:numpy.ndarray = field(init=False,repr=False,default=None)
     object_export_context_map:dict = field(init=False,repr=False,default_factory=dict)
 
     def __post_init__(self):
@@ -271,11 +272,13 @@ class SubMeshModel:
         obj_buffer_result = ExportUtils.build_unity_obj_buffer_result(
             obj=submesh_merged_obj,
             d3d11_game_type=self.d3d11_game_type,
+            collect_efmi_packed_tbn=self.efmi_merged_skeleton,
         )
         self.ib = obj_buffer_result.ib
         self.category_buffer_dict = obj_buffer_result.category_buffer_dict
         self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
         self.unique_first_loop_indices = obj_buffer_result.unique_first_loop_indices
+        self.efmi_packed_tbn = obj_buffer_result.efmi_packed_tbn
         self.shape_key_buffer_dict = obj_buffer_result.shape_key_buffer_dict
         self.object_export_context_map = self._build_object_export_context_map(
             cache_key_to_geometry_record=cache_key_to_geometry_record,
@@ -304,7 +307,7 @@ class SubMeshModel:
 
     @staticmethod
     def _build_efmi_merged_skeleton_game_type(game_type:D3D11GameType) -> D3D11GameType:
-        '''Clone the selected LoyalTools layout and widen BLENDINDICES0 to R16x4.'''
+        '''Clone the selected LoyalTools layout and normalize BLENDINDICES0 to R16x4.'''
         element_list = []
         blendindices_found = False
         for element in game_type.D3D11ElementList:
@@ -322,10 +325,12 @@ class SubMeshModel:
                 if element.Format not in (
                     "R8G8B8A8_UINT",
                     "R16G16B16A16_UINT",
+                    "R32G32B32A32_UINT",
                 ):
                     from ..utils.ssmt_error_utils import SSMTErrorUtils
                     SSMTErrorUtils.raise_fatal(
-                        "EFMI 骨骼合并目前只支持 R8G8B8A8_UINT/R16G16B16A16_UINT "
+                        "EFMI 骨骼合并目前只支持 R8G8B8A8_UINT/"
+                        "R16G16B16A16_UINT/R32G32B32A32_UINT "
                         "的 BLENDINDICES0，当前为 " + element.Format
                     )
                 element_json["Format"] = "R16G16B16A16_UINT"

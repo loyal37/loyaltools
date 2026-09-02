@@ -811,21 +811,68 @@ class ExportEFMI:
         source_rows = source_buffer.reshape(-1, source_stride)
 
         semantics = slot_format["semantics"]
-        declared_strides = {
-            int(semantic.get("stride", 0))
-            for semantic in semantics
-            if int(semantic.get("stride", 0)) > 0
-        }
-        if len(declared_strides) > 1:
-            raise ValueError(slot + " 的 LOD 语义声明了不一致的步长。")
-        target_stride = next(iter(declared_strides), 0)
         packed_semantics = []
         packed_width = 0
         for semantic in semantics:
             semantic_name = str(semantic["name"]).upper()
             semantic_index = int(semantic.get("index", 0))
             element_name = semantic_name + (str(semantic_index) if semantic_index else "")
+            target_format = str(semantic["format"]).upper()
+            # Merged Skeleton uses one stable R16x4 skin-index layout for both
+            # the base mesh and every LoD. This prevents private/global IDs
+            # above 255 from being truncated by an original R8 LoD declaration.
+            if semantic_name == "BLENDINDICES" and semantic_index == 0:
+                target_format = "R16G16B16A16_UINT"
+            target_dtype = numpy.dtype(FormatUtils.get_nptype_from_format(target_format))
+            native_target_width = int(FormatUtils.format_size(target_format))
+            declared_width = int(semantic.get("stride", 0))
+            if semantic_name == "BLENDINDICES" and semantic_index == 0:
+                target_width = native_target_width
+            else:
+                target_width = declared_width or native_target_width
+            if target_width <= 0 or target_width % target_dtype.itemsize:
+                raise ValueError("LOD 目标格式无效: " + target_format)
+            if target_width < native_target_width:
+                raise ValueError(
+                    element_name + " 的 LOD 语义宽度 " + str(target_width)
+                    + " 小于格式宽度 " + str(native_target_width) + "。"
+                )
+
             source_element = game_type.ElementNameD3D11ElementDict.get(element_name)
+            use_generated_tbn = (
+                semantic_name in {"ENCODEDDATA", "NORMAL"}
+                and semantic_index == 0
+                and target_format == "R32_UINT"
+                and (source_element is None or source_element.Format != "R32_UINT")
+            )
+            if use_generated_tbn:
+                packed_tbn = getattr(submesh_model, "efmi_packed_tbn", None)
+                if packed_tbn is None:
+                    raise ValueError(
+                        submesh_model.unique_str
+                        + " 缺少用于 LOD 的 EFMI 打包切线空间数据。"
+                    )
+                encoded = numpy.ascontiguousarray(packed_tbn, dtype=numpy.uint32)
+                if encoded.shape != (len(source_rows), 1):
+                    raise ValueError(
+                        submesh_model.unique_str + " 的 EFMI 打包切线空间行数无效。"
+                    )
+                if target_width > native_target_width:
+                    padded = numpy.zeros(
+                        (len(source_rows), target_width), dtype=numpy.uint8
+                    )
+                    padded[:, :native_target_width] = encoded.view(
+                        numpy.uint8
+                    ).reshape(len(source_rows), native_target_width)
+                    semantic_bytes = padded
+                else:
+                    semantic_bytes = encoded.view(numpy.uint8).reshape(
+                        len(source_rows), native_target_width
+                    )
+                packed_semantics.append(semantic_bytes)
+                packed_width += target_width
+                continue
+
             if source_element is None:
                 raise ValueError(
                     submesh_model.unique_str + " 缺少 LOD 语义 " + element_name + "。"
@@ -852,11 +899,6 @@ class ExportEFMI:
                 source_values, source_element.Format
             )
 
-            target_format = str(semantic["format"]).upper()
-            target_dtype = numpy.dtype(FormatUtils.get_nptype_from_format(target_format))
-            target_width = int(FormatUtils.format_size(target_format))
-            if target_width <= 0 or target_width % target_dtype.itemsize:
-                raise ValueError("LOD 目标格式无效: " + target_format)
             target_count = target_width // target_dtype.itemsize
             logical_values = self._resize_semantic_components(
                 logical_values, target_count, semantic_name
@@ -869,13 +911,7 @@ class ExportEFMI:
             )
             packed_width += target_width
 
-        if target_stride == 0:
-            target_stride = packed_width
-        if packed_width > target_stride:
-            raise ValueError(
-                slot + " 的 LOD 语义宽度 " + str(packed_width)
-                + " 超过目标步长 " + str(target_stride) + "。"
-            )
+        target_stride = packed_width
         target_rows = numpy.zeros(
             (len(source_rows), target_stride), dtype=numpy.uint8
         )
