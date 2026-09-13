@@ -874,6 +874,20 @@ class ExportEFMI:
                 continue
 
             if source_element is None:
+                # EFMI LODs can request an extra UV layer absent from the main
+                # mesh. Match EFMI-Tools' missing-UV default, but only for
+                # secondary float2 UVs; required mesh/skin data must still fail.
+                # COLOR and UNKNOWN fields are not aliases for these UVs.
+                if (
+                    semantic_name == "TEXCOORD"
+                    and semantic_index > 0
+                    and target_format in {"R16G16_FLOAT", "R32G32_FLOAT"}
+                ):
+                    packed_semantics.append(numpy.zeros(
+                        (len(source_rows), target_width), dtype=numpy.uint8
+                    ))
+                    packed_width += target_width
+                    continue
                 raise ValueError(
                     submesh_model.unique_str + " 缺少 LOD 语义 " + element_name + "。"
                 )
