@@ -12,6 +12,7 @@ from .logic_name import LogicName
 from .global_config import GlobalConfig
 from .d3d11_gametype import D3D11GameType
 from .submesh_metadata import SubmeshMetadataResolver
+from .efmi_merged_skeleton import OBJECT_MARKER_COMPONENT_ID
 from ..blueprint.export_helper import BlueprintExportHelper
 
 
@@ -53,6 +54,7 @@ class SubMeshModel:
     unique_first_loop_indices:numpy.ndarray = field(init=False,repr=False,default=None)
     efmi_packed_tbn:numpy.ndarray = field(init=False,repr=False,default=None)
     object_export_context_map:dict = field(init=False,repr=False,default_factory=dict)
+    object_export_context_list:list = field(init=False,repr=False,default_factory=list)
 
     def __post_init__(self):
 
@@ -157,7 +159,13 @@ class SubMeshModel:
             if obj_hash is None:
                 obj_hash = f"FALLBACK_{blender_obj_name}"
             original_name = original_names[i]
+            # 骨骼合并模式下，同一份几何可能被改名后挂到别的 IB 上渲染（跨 IB）。
+            # 此时两个源物体的数据哈希可能一致，但权重归属的组件不同，必须拆开，
+            # 否则几何复用会把它们折叠成一段，无法再按组件分别做私有池重写。
+            merge_component_id = self._resolve_source_component_id(source_obj)
             cache_key = (obj_hash, original_name)
+            if self.efmi_merged_skeleton:
+                cache_key = (obj_hash, original_name, merge_component_id)
             cached_result = None if preserve_distinct_export_contexts else data_hash_cache.get(cache_key)
 
             if cached_result is not None:
@@ -215,6 +223,9 @@ class SubMeshModel:
                 "label": self.unique_str,
                 "d3d11_game_type": self.d3d11_game_type,
                 "preferred_source_name": self._resolve_preferred_source_name(source_obj, draw_call_model),
+                "efmi_component_id": merge_component_id,
+                "efmi_mesh_name": self._resolve_source_mesh_name(source_obj),
+                "source_object_name": getattr(source_obj, "name", ""),
             }
 
             index_offset += draw_call_model.index_count
@@ -280,7 +291,10 @@ class SubMeshModel:
         self.unique_first_loop_indices = obj_buffer_result.unique_first_loop_indices
         self.efmi_packed_tbn = obj_buffer_result.efmi_packed_tbn
         self.shape_key_buffer_dict = obj_buffer_result.shape_key_buffer_dict
-        self.object_export_context_map = self._build_object_export_context_map(
+        (
+            self.object_export_context_map,
+            self.object_export_context_list,
+        ) = self._build_object_export_context_map(
             cache_key_to_geometry_record=cache_key_to_geometry_record,
             cache_key_to_candidate_names=cache_key_to_candidate_names,
         )
@@ -445,12 +459,41 @@ class SubMeshModel:
                 return normalized_name
         return ""
 
-    def _build_object_export_context_map(self, cache_key_to_geometry_record: dict, cache_key_to_candidate_names: dict) -> dict:
+    @staticmethod
+    def _resolve_source_component_id(source_obj: bpy.types.Object):
+        '''Read the persistent merged-skeleton component marker written at import.
+
+        The marker survives renaming, so it stays correct when a component is
+        renamed to be drawn through another IB.  Returns None for objects that
+        predate the marker or were created outside the import flow.
+        '''
+        if source_obj is None:
+            return None
+        try:
+            raw = source_obj.get(OBJECT_MARKER_COMPONENT_ID)
+        except (AttributeError, TypeError):
+            return None
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _resolve_source_mesh_name(source_obj: bpy.types.Object) -> str:
+        '''Mesh datablock name, used as a secondary weight-owner hint.'''
+        if source_obj is None:
+            return ""
+        return getattr(getattr(source_obj, "data", None), "name", "") or ""
+
+    def _build_object_export_context_map(self, cache_key_to_geometry_record: dict, cache_key_to_candidate_names: dict) -> tuple[dict, list]:
         if self.unique_first_loop_indices is None:
-            return {}
+            return {}, []
 
         unique_first_loop_indices = numpy.asarray(self.unique_first_loop_indices, dtype=numpy.int32)
         object_export_context_map = {}
+        object_export_context_list = []
 
         for cache_key, geometry_record in cache_key_to_geometry_record.items():
             loop_start = int(geometry_record.get("loop_start", 0))
@@ -473,13 +516,17 @@ class SubMeshModel:
                 "label": geometry_record.get("label", self.unique_str),
                 "d3d11_game_type": geometry_record.get("d3d11_game_type", self.d3d11_game_type),
                 "preferred_source_name": geometry_record.get("preferred_source_name", ""),
+                "efmi_component_id": geometry_record.get("efmi_component_id"),
+                "efmi_mesh_name": geometry_record.get("efmi_mesh_name", ""),
+                "source_object_name": geometry_record.get("source_object_name", ""),
             }
+            object_export_context_list.append(context)
 
             for candidate_name in cache_key_to_candidate_names.get(cache_key, set()):
                 if candidate_name:
                     object_export_context_map[candidate_name] = context
 
-        return object_export_context_map
+        return object_export_context_map, object_export_context_list
 
     def _should_duplicate_source_for_merge(self, source_obj: bpy.types.Object) -> bool:
         if source_obj is None:

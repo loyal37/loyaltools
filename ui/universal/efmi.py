@@ -14,9 +14,14 @@ from ...common.m_ini_builder import M_IniBuilder,M_IniSection, M_SectionType
 from .export_helper import ExportHelper
 from ...utils.timer_utils import TimerUtils
 from ...common.efmi_merged_skeleton import (
+    audit_exported_global_vgs,
     build_component_private_vg_remap,
+    build_stale_pool_substitution,
+    format_id_ranges,
     load_profile,
+    resolve_weight_owner_component,
 )
+from ...common.object_prefix_helper import ObjectPrefixHelper
 from ...common.efmi_merged_texture import (
     copy_merged_auto_textures,
     resolve_merged_auto_textures,
@@ -631,29 +636,116 @@ class ExportEFMI:
                 return component
         return None
 
+    @staticmethod
+    def _unique_str_from_name(name: str) -> str:
+        """Normalize a Blender object/mesh name down to its unique_str prefix."""
+        if not name:
+            return ""
+        prefix_info = ObjectPrefixHelper.extract_prefix_info(name)
+        return prefix_info[0] if prefix_info else name
+
+    def _resolve_merged_weight_segments(self, submesh_model):
+        """Resolve which component owns the weights of each source object.
+
+        A merged-skeleton object carries two independent identities: the draw it
+        is rendered by (the object name) and the component that supplies its
+        bone matrices (fixed at import).  Renaming an object so it renders
+        through another IB changes only the first one, so the weight owner must
+        come from the persistent import marker.  Resolution order is marker ->
+        mesh datablock name -> object name, with the object name alone matching
+        the historical behaviour for un-renamed projects.
+
+        Returns ``[(component, row_indices_or_None, label), ...]``; a ``None``
+        row selection means the component owns the whole buffer.
+        """
+        profile = self.merged_skeleton_profile
+        contexts = list(getattr(submesh_model, "object_export_context_list", []) or [])
+        submesh_unique_str = submesh_model.unique_str
+
+        # Fast path: a single source object whose weight owner matches the draw
+        # it is exported under. This is every non cross-IB mesh, and it keeps
+        # the original whole-buffer numpy rewrite.
+        if len(contexts) <= 1:
+            context = contexts[0] if contexts else {}
+            component, source = resolve_weight_owner_component(
+                profile,
+                component_id=context.get("efmi_component_id"),
+                unique_str_candidates=(
+                    self._unique_str_from_name(context.get("efmi_mesh_name", "")),
+                    submesh_unique_str,
+                ),
+            )
+            if component is None or component.get("cpu_posed", False):
+                return []
+            self._report_cross_ib_weight_owner(
+                context.get("source_object_name", "") or submesh_unique_str,
+                submesh_unique_str,
+                component,
+                source,
+            )
+            return [(component, None, submesh_unique_str)]
+
+        segments = []
+        for context in contexts:
+            object_name = context.get("source_object_name", "") or submesh_unique_str
+            component, source = resolve_weight_owner_component(
+                profile,
+                component_id=context.get("efmi_component_id"),
+                unique_str_candidates=(
+                    self._unique_str_from_name(context.get("efmi_mesh_name", "")),
+                    self._unique_str_from_name(object_name),
+                    submesh_unique_str,
+                ),
+            )
+            if component is None or component.get("cpu_posed", False):
+                continue
+            self._report_cross_ib_weight_owner(
+                object_name, submesh_unique_str, component, source
+            )
+            export_indices = context.get("export_indices")
+            if export_indices is None:
+                continue
+            rows = numpy.asarray(export_indices, dtype=numpy.int64)
+            if rows.size == 0:
+                continue
+            segments.append((component, rows, object_name))
+        return segments
+
+    def _report_cross_ib_weight_owner(
+        self, object_name, submesh_unique_str, component, source
+    ):
+        """Log when an object's weight owner differs from the draw it feeds."""
+        if component["unique_str"] == submesh_unique_str:
+            return
+        print(
+            "[EFMI骨骼合并] 跨 IB 归属: 物体 " + str(object_name)
+            + " 绘制于 " + str(submesh_unique_str)
+            + "，权重归属 Component " + str(component["component_id"])
+            + " (" + str(component["unique_str"]) + ")，私有池 "
+            + str(component["vg_offset"]) + "-"
+            + str(int(component["vg_offset"]) + int(component["vg_count"]) - 1)
+            + "，来源=" + str(source)
+        )
+
     def _prepare_merged_component_blend_buffers(self):
         """Align exported Blend IDs with EFMI's component-private LoD pools.
 
         Blender keeps the extraction-time canonical global vertex groups so
         users can transfer weights across IBs naturally.  EFMI captures LoD
         bones into each component's private ``vg_offset`` range, though.  This
-        export-only rewrite moves groups supplied by the current component back
+        export-only rewrite moves groups supplied by the owning component back
         into that private range while preserving genuine cross-IB groups.
+
+        The rewrite runs per source object, because one draw may carry geometry
+        from several components once meshes are renamed to render through
+        another IB.
         """
         if not self.merged_skeleton_profile:
             return
 
-        component_by_unique = {
-            component["unique_str"]: component
-            for component in self.merged_skeleton_profile["components"]
-            if not component.get("cpu_posed", False)
-        }
         for submesh_model in self.submesh_model_list:
-            component = component_by_unique.get(submesh_model.unique_str)
-            if component is None:
-                continue
-            rewrite_map = build_component_private_vg_remap(component)
-            if not rewrite_map:
+            segments = self._resolve_merged_weight_segments(submesh_model)
+            if not segments:
                 continue
 
             game_type = submesh_model.d3d11_game_type
@@ -688,35 +780,183 @@ class ExportEFMI:
                 )
 
             rewritten_buffer = numpy.ascontiguousarray(category_buffer).copy()
-            rows = rewritten_buffer.reshape(-1, category_stride)
+            buffer_rows = rewritten_buffer.reshape(-1, category_stride)
             element_offset = self._source_category_element_offset(
                 game_type, blend_element
             )
             element_width = int(blend_element.ByteWidth)
             blend_bytes = numpy.ascontiguousarray(
-                rows[:, element_offset:element_offset + element_width]
+                buffer_rows[:, element_offset:element_offset + element_width]
             )
             blend_values = blend_bytes.view(numpy.uint16).reshape(-1, 4)
             original_values = blend_values.copy()
-            for canonical_id, private_id in rewrite_map.items():
-                blend_values[original_values == canonical_id] = private_id
+            vertex_count = int(blend_values.shape[0])
+
+            applied_rewrite_maps = {}
+            for component, row_indices, segment_label in segments:
+                rewrite_map = build_component_private_vg_remap(component)
+                if not rewrite_map:
+                    continue
+                if row_indices is None:
+                    segment_slice = slice(None)
+                else:
+                    row_indices = row_indices[
+                        (row_indices >= 0) & (row_indices < vertex_count)
+                    ]
+                    if row_indices.size == 0:
+                        continue
+                    segment_slice = row_indices
+                segment_values = blend_values[segment_slice].copy()
+                segment_original = original_values[segment_slice]
+                for canonical_id, private_id in rewrite_map.items():
+                    segment_values[segment_original == canonical_id] = private_id
+                blend_values[segment_slice] = segment_values
+                applied_rewrite_maps[int(component["component_id"])] = dict(rewrite_map)
+
+            owner_changed_count = int(numpy.count_nonzero(
+                blend_values != original_values
+            ))
+            if owner_changed_count:
+                print(
+                    "[EFMI骨骼合并] LOD 私有骨骼编号修正: "
+                    + submesh_model.unique_str + "，重写 "
+                    + str(owner_changed_count) + " 个 BLENDINDICES 通道"
+                    + ("。" if len(segments) <= 1
+                       else "，覆盖 " + str(len(segments)) + " 个源物体分段。")
+                )
+
+            drawing_component = self._get_merged_profile_component(
+                submesh_model.unique_str
+            )
+            active_mask = self._build_active_blend_weight_mask(
+                game_type, category, buffer_rows, vertex_count
+            )
+            substituted_channel_count = self._substitute_stale_pool_vgs(
+                submesh_model.unique_str, blend_values, active_mask,
+                drawing_component,
+            )
+
             changed_channel_count = int(numpy.count_nonzero(
                 blend_values != original_values
             ))
-            rows[:, element_offset:element_offset + element_width] = (
+            buffer_rows[:, element_offset:element_offset + element_width] = (
                 blend_values.view(numpy.uint8).reshape(-1, element_width)
             )
             submesh_model.category_buffer_dict[category] = rewritten_buffer
             self.merged_private_vg_rewrite_stats[submesh_model.unique_str] = {
                 "changed_channel_count": changed_channel_count,
-                "rewrite_map": dict(rewrite_map),
+                "rewrite_map": dict(next(iter(applied_rewrite_maps.values()), {}))
+                if len(applied_rewrite_maps) == 1 else {},
+                "rewrite_map_by_component": applied_rewrite_maps,
+                "segment_count": len(segments),
+                "stale_pool_substituted_channel_count": substituted_channel_count,
             }
-            if changed_channel_count:
-                print(
-                    "[EFMI骨骼合并] LOD 私有骨骼编号修正: "
-                    + submesh_model.unique_str + "，重写 "
-                    + str(changed_channel_count) + " 个 BLENDINDICES 通道。"
-                )
+
+            self._audit_merged_exported_vgs(
+                submesh_model.unique_str, blend_values, active_mask,
+                drawing_component,
+            )
+
+    def _substitute_stale_pool_vgs(
+        self, label, blend_values, active_mask, drawing_component
+    ):
+        """Move weighted bone ids off pools that go stale while the draw is visible.
+
+        Runs after the owner rewrite, so it only sees ids that no owner moved,
+        such as the part of a component joined into another object.  Channels
+        with zero weight are left untouched.  Returns the changed channel count.
+        """
+        channel_mask = (
+            active_mask if active_mask is not None
+            else numpy.ones(blend_values.shape, dtype=bool)
+        )
+        if not channel_mask.any():
+            return 0
+        substitution = build_stale_pool_substitution(
+            self.merged_skeleton_profile,
+            numpy.unique(blend_values[channel_mask]).tolist(),
+            drawing_component=drawing_component,
+        )
+        if not substitution:
+            return 0
+        current_values = blend_values.copy()
+        for stale_id, target_id in substitution.items():
+            blend_values[channel_mask & (current_values == stale_id)] = target_id
+        changed = int(numpy.count_nonzero(blend_values != current_values))
+        print(
+            "[EFMI骨骼合并] 远景骨骼池替换: " + label + "，"
+            + str(changed) + " 个 BLENDINDICES 通道从远景不刷新的骨骼池 "
+            + format_id_ranges(substitution.keys()) + " 改读等价骨骼 "
+            + format_id_ranges(substitution.values()) + "。"
+        )
+        return changed
+
+    def _audit_merged_exported_vgs(
+        self, label, blend_values, active_mask, drawing_component
+    ):
+        """Warn about exported bone ids no component reliably supplies.
+
+        Reports only; the export continues so existing projects keep building.
+        """
+        if active_mask is not None:
+            used_values = blend_values[active_mask]
+        else:
+            used_values = blend_values
+        if used_values.size == 0:
+            return
+
+        warnings = audit_exported_global_vgs(
+            self.merged_skeleton_profile,
+            numpy.unique(used_values).tolist(),
+            drawing_component_id=(
+                drawing_component["component_id"] if drawing_component else None
+            ),
+            label=label,
+        )
+        for line in warnings:
+            print("[EFMI骨骼合并][警告] " + line)
+
+    def _build_active_blend_weight_mask(
+        self, game_type, category, buffer_rows, vertex_count
+    ):
+        """Mask of BLENDINDICES channels whose weight is non-zero.
+
+        Padding channels normally carry bone 0 with weight 0; ignoring them
+        keeps the pool audit free of false positives.  Returns ``None`` when the
+        layout has no readable BLENDWEIGHTS0 (implicit components), in which
+        case every channel is audited.
+        """
+        weight_element = next(
+            (
+                element for element in game_type.D3D11ElementList
+                if element.SemanticName in ("BLENDWEIGHT", "BLENDWEIGHTS")
+                and int(element.SemanticIndex) == 0
+                and element.Category == category
+            ),
+            None,
+        )
+        if weight_element is None:
+            return None
+        try:
+            weight_dtype = numpy.dtype(
+                FormatUtils.get_nptype_from_format(weight_element.Format)
+            )
+        except Exception:
+            return None
+        weight_width = int(weight_element.ByteWidth)
+        if weight_dtype.itemsize <= 0 or weight_width % weight_dtype.itemsize:
+            return None
+        if weight_width // weight_dtype.itemsize != 4:
+            return None
+        weight_offset = self._source_category_element_offset(
+            game_type, weight_element
+        )
+        weight_values = numpy.ascontiguousarray(
+            buffer_rows[:, weight_offset:weight_offset + weight_width]
+        ).view(weight_dtype).reshape(-1, 4)
+        if weight_values.shape[0] != vertex_count:
+            return None
+        return weight_values != 0
 
     @staticmethod
     def _decode_dxgi_values(values, fmt):
@@ -972,6 +1212,11 @@ class ExportEFMI:
                         "data": data,
                     }
 
+                # The remap is emitted even when the blueprint has no mesh for
+                # this component. EFMI's bone importer binds it as cs-t1 when
+                # the component's LoD draw captures bones, which bone-only
+                # components still do; without it the importer falls back to
+                # identity and fills the private pool with the wrong matrices.
                 if lod.get("vg_map") or "VB2" in lod.get("vb_formats", {}):
                     vg_count = int(component["vg_count"])
                     vg_map = lod.get("vg_map", {})
@@ -1619,6 +1864,14 @@ class ExportEFMI:
             "$\\EFMIv1\\cfg_ms_skeletons_count * $bones_count * $max_instance_count) "
             "* $\\EFMIv1\\cfg_ms_bone_entry_size"
         )
+        # The merged skeleton buffer is written as a UAV by the skinning
+        # compute shader and read as an SRV by the vertex shader. XXMI can
+        # infer bind flags through nested ``ref`` chains, but the inference
+        # depends on parse order and may drop one of them; a buffer created
+        # without the missing usage is never fixed up afterwards, which shows
+        # up as correct bone data that the draw cannot read (vs-t0 unbound).
+        # Declaring both usages explicitly removes that ordering dependency.
+        resources.append("bind_flags = shader_resource unordered_access")
         resources.new_line()
         buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
         for submesh in self.submesh_model_list:
