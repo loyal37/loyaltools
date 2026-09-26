@@ -90,7 +90,9 @@ from ..common.efmi_merged_skeleton import (
     PROFILE_FORMAT_VERSION,
     PROFILE_MODE,
     REQUIRED_EFMI_VERSION,
+    MergedSkeletonProfileError,
     make_submesh_metadata,
+    normalize_first_vertex,
     write_profile,
 )
 
@@ -505,8 +507,8 @@ class DumpWorkspaceExtractor:
         )
 
     @staticmethod
-    def get_component_primary_draw(component) -> tuple[tuple[str, int, int], list[_DrawRecord], int]:
-        """Return the LoyalTools key and matching draw records for one EFMI component."""
+    def get_component_draw_records(component) -> list[_DrawRecord]:
+        """Read this component's original calls, before primary-range filtering."""
         records = []
         raw_data = getattr(component, "raw_data", None)
         for shader_call in getattr(raw_data, "shader_calls", []):
@@ -521,6 +523,38 @@ class DumpWorkspaceExtractor:
 
         if not records:
             raise ExtractError("组件没有可导出的 DrawIndexedInstanced。")
+        return records
+
+    @staticmethod
+    def get_component_first_vertex(component) -> int:
+        """Require one original BaseVertexLocation across this component's passes.
+
+        Inspect all ranges, not just the first primary key: otherwise filtering
+        could conceal another pass that needs a different entry-point guard.
+        Mesh format.first_vertex and metadata.vertex_offset are geometry slices
+        and must not be substituted for this original draw parameter.
+        """
+        records = DumpWorkspaceExtractor.get_component_draw_records(component)
+        try:
+            values = {
+                normalize_first_vertex(record.draw_call.first_vertex,
+                                       "组件原始绘制 first_vertex")
+                for record in records
+            }
+        except MergedSkeletonProfileError as exc:
+            raise ExtractError(str(exc)) from exc
+        if len(values) != 1:
+            raise ExtractError(
+                "组件各 Pass 的 BaseVertexLocation（first_vertex）不一致: "
+                + ", ".join(map(str, sorted(values)))
+                + "。无法生成唯一的 match_first_vertex，请重新抓帧或分别处理绘制入口。"
+            )
+        return values.pop()
+
+    @staticmethod
+    def get_component_primary_draw(component) -> tuple[tuple[str, int, int], list[_DrawRecord], int]:
+        """Return the LoyalTools key and matching draw records for one EFMI component."""
+        records = DumpWorkspaceExtractor.get_component_draw_records(component)
 
         primary_key = (
             str(records[0].ib.hash).lower(),
@@ -666,6 +700,7 @@ class DumpWorkspaceExtractor:
                 primary_key, matching_records, total_record_count = self.get_component_primary_draw(
                     component
                 )
+                first_vertex = self.get_component_first_vertex(component)
             except ExtractError as exc:
                 raise ExtractError(
                     "骨骼合并组件 " + str(source_component_id) + " 提取失败: " + str(exc)
@@ -693,6 +728,7 @@ class DumpWorkspaceExtractor:
                 "ib_hash": ib_hash,
                 "index_count": index_count,
                 "first_index": first_index,
+                "first_vertex": first_vertex,
                 "vertex_count": int(component.mesh.format.vertex_count),
                 "cpu_posed": bool(component.mesh.cpu_posed),
                 "vg_offset": int(vg_metadata["vg_offset"]),

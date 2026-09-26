@@ -37,6 +37,20 @@ def _as_non_negative_int(value, field_name: str) -> int:
     return result
 
 
+def normalize_first_vertex(value, field_name: str = "first_vertex") -> int:
+    """Validate the original DrawIndexedInstanced BaseVertexLocation.
+
+    This is a signed draw parameter, not a mesh slicing offset.  Do not coerce
+    floats, booleans or strings: a silently changed value would make a runtime
+    entry point match a different draw (or stop matching the intended one).
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MergedSkeletonProfileError(field_name + " 必须是有符号 32 位整数。")
+    if not -(1 << 31) <= value < (1 << 31):
+        raise MergedSkeletonProfileError(field_name + " 超出有符号 32 位整数范围。")
+    return value
+
+
 def normalize_vg_map(vg_map, field_name: str = "vg_map") -> dict[str, int]:
     if vg_map is None:
         return {}
@@ -115,6 +129,12 @@ def normalize_lod(lod, field_name: str = "lod") -> dict:
         "vertex_offset", "vertex_count", "index_offset", "index_count", "first_index"
     ):
         result[key] = _as_non_negative_int(result.get(key, 0), field_name + "." + key)
+    # Preserve absence for pre-field profiles so export can warn before using
+    # its compatibility default.  A synthesized zero would hide missing data.
+    if "first_vertex" in result:
+        result["first_vertex"] = normalize_first_vertex(
+            result["first_vertex"], field_name + ".first_vertex"
+        )
     result["unique_str"] = str(result.get("unique_str", "")).strip()
     if not result["unique_str"]:
         result["unique_str"] = (
@@ -187,6 +207,10 @@ def validate_profile(profile: dict) -> dict:
         component["first_index"] = _as_non_negative_int(
             component.get("first_index", 0), unique_str + ".first_index"
         )
+        if "first_vertex" in component:
+            component["first_vertex"] = normalize_first_vertex(
+                component["first_vertex"], unique_str + ".first_vertex"
+            )
         component["vertex_count"] = _as_non_negative_int(
             component.get("vertex_count", 0), unique_str + ".vertex_count"
         )

@@ -156,6 +156,15 @@ def map_merged_skeleton_lod(
     for profile_component in profile["components"]:
         component_id = int(profile_component["component_id"])
         full_component = full_components[component_id]
+        # Refresh old profiles from the full-detail capture only.  LoD geometry
+        # slicing offsets (or the LoD draw itself) are not the main draw's base.
+        try:
+            full_first_vertex = full_extractor.get_component_first_vertex(full_component)
+        except ExtractError as exc:
+            raise ExtractError(
+                "主模型 Component " + str(component_id) + " 绘制参数无效: " + str(exc)
+            ) from exc
+        profile_component["first_vertex"] = full_first_vertex
         lod_component, vg_map = matched_components.get(full_component, (None, None))
         is_fallback = lod_component is None
         if is_fallback:
@@ -182,9 +191,16 @@ def map_merged_skeleton_lod(
 
         if is_fallback:
             lod_first_index = int(profile_component.get("first_index", 0))
+            lod_first_vertex = full_first_vertex
             lod_unique_str = profile_component["unique_str"]
         else:
             lod_primary_key, _, _ = lod_extractor.get_component_primary_draw(lod_component)
+            try:
+                lod_first_vertex = lod_extractor.get_component_first_vertex(lod_component)
+            except ExtractError as exc:
+                raise ExtractError(
+                    "LOD Component " + str(component_id) + " 绘制参数无效: " + str(exc)
+                ) from exc
             lod_first_index = int(lod_primary_key[2])
             lod_unique_str = (
                 str(lod_primary_key[0]).lower() + "-" + str(lod_primary_key[1])
@@ -200,6 +216,7 @@ def map_merged_skeleton_lod(
             "index_offset": int(lod_component.metadata.index_offset),
             "index_count": int(lod_component.metadata.index_count),
             "first_index": lod_first_index,
+            "first_vertex": lod_first_vertex,
             "unique_str": lod_unique_str,
             "is_fallback": is_fallback,
             "vg_map": {

@@ -19,6 +19,7 @@ from ...common.efmi_merged_skeleton import (
     build_stale_pool_substitution,
     format_id_ranges,
     load_profile,
+    normalize_first_vertex,
     resolve_weight_owner_component,
 )
 from ...common.object_prefix_helper import ObjectPrefixHelper
@@ -1451,6 +1452,40 @@ class ExportEFMI:
             # 也避免重复生成目标贴图或错误恢复源 IB 贴图。
             self._append_merged_draw_lines(section, incoming_drawcalls)
 
+    @staticmethod
+    def _merged_entrypoint_signature(source):
+        """Use draw parameters, never the extracted mesh's vertex window."""
+        return (
+            source["ib_hash"],
+            int(source["index_count"]),
+            int(source["first_index"]),
+            normalize_first_vertex(source["first_vertex"])
+            if "first_vertex" in source else 0,
+        )
+
+    @staticmethod
+    def _append_merged_entrypoint_match(section, source, label):
+        if "first_vertex" in source:
+            first_vertex = normalize_first_vertex(source["first_vertex"])
+        else:
+            # Older profiles never stored BaseVertexLocation. Zero is only a
+            # compatibility assumption, not a property of every game mesh.
+            first_vertex = 0
+            print(
+                "[EFMI骨骼合并][警告] " + label
+                + " 缺少原始绘制 first_vertex，暂按 0 限定入口。"
+                "请重新提取主帧并更新 LOD 映射以记录真实值；"
+                "若原始偏移不是 0，该入口不会替换模型。"
+            )
+            section.append(
+                "; Legacy profile: first_vertex is assumed 0; "
+                "re-extract the main frame and refresh LoD mapping to verify."
+            )
+        section.append("hash = " + source["ib_hash"])
+        section.append("match_first_index = " + str(source["first_index"]))
+        section.append("match_index_count = " + str(source["index_count"]))
+        section.append("match_first_vertex = " + str(first_vertex))
+
     def _generate_merged_skeleton_ini_file(self):
         profile = self.merged_skeleton_profile
         if profile is None:
@@ -1750,9 +1785,9 @@ class ExportEFMI:
             entrypoints.append(
                 "[TextureOverride_EntryPoint_Component" + str(component_id) + "]"
             )
-            entrypoints.append("hash = " + component["ib_hash"])
-            entrypoints.append("match_first_index = " + str(component["first_index"]))
-            entrypoints.append("match_index_count = " + str(component["index_count"]))
+            self._append_merged_entrypoint_match(
+                entrypoints, component, "Component " + str(component_id) + " LOD0"
+            )
             entrypoints.append("$object_detected = 1")
             entrypoints.append("if $mod_enabled && DRAW_TYPE == 4")
             entrypoints.append(
@@ -1763,7 +1798,8 @@ class ExportEFMI:
                 + ("0" if component["cpu_posed"] else "1")
             )
             if any(
-                lod["ib_hash"] != component["ib_hash"]
+                self._merged_entrypoint_signature(lod)
+                != self._merged_entrypoint_signature(component)
                 for lod in component.get("lods", [])
             ):
                 entrypoints.append("    $lod_level = 0")
@@ -1786,7 +1822,10 @@ class ExportEFMI:
                 if len(lods) < lod_level:
                     continue
                 lod = lods[lod_level - 1]
-                if lod["ib_hash"] == component["ib_hash"]:
+                if (
+                    self._merged_entrypoint_signature(lod)
+                    == self._merged_entrypoint_signature(component)
+                ):
                     continue
                 component_id = component["component_id"]
                 submesh = submesh_by_unique.get(component["unique_str"])
@@ -1794,9 +1833,9 @@ class ExportEFMI:
                     "[TextureOverride_EntryPoint_Component"
                     + str(component_id) + "_LOD" + str(lod_level) + "]"
                 )
-                entrypoints.append("hash = " + lod["ib_hash"])
-                entrypoints.append(
-                    "match_index_count = " + str(lod["index_count"])
+                self._append_merged_entrypoint_match(
+                    entrypoints, lod,
+                    "Component " + str(component_id) + " LOD" + str(lod_level),
                 )
                 entrypoints.append("$object_detected = 1")
                 entrypoints.append("if $mod_enabled && DRAW_TYPE == 4")
