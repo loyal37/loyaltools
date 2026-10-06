@@ -811,6 +811,79 @@ class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LoyalMapMergedSkeletonLODFromJson(bpy.types.Operator):
+    bl_idname = "loyal.map_merged_skeleton_lod_json"
+    bl_label = "JSON 匹配"
+    bl_description = "不读取帧分析，直接套用工作空间 JSON 中已有的 LOD 映射 (包括重新提取前保留的映射)"
+    bl_options = {'REGISTER'}
+
+    # 面板上不显示。脚本可以用它指定同角色另一个工作空间的 EFMI_MergedSkeleton.json
+    json_path: bpy.props.StringProperty(
+        name="LOD 映射 JSON",
+        description="留空时使用当前工作空间的 JSON",
+        default="",
+        options={'HIDDEN', 'SKIP_SAVE'},
+    ) # type: ignore
+
+    def execute(self, context):
+        props = context.scene.loyal_extract_props
+        if props.workflow_mode != 'MERGED_SKELETON':
+            self.report({'ERROR'}, "LOD 映射只属于骨骼合并制作流程。")
+            return {'CANCELLED'}
+
+        GlobalConfig.read_from_main_json_ssmt4()
+        workspace_folder = GlobalConfig.path_workspace_folder()
+        if not workspace_folder:
+            self.report({'ERROR'}, "未解析到工作空间，请先设置自定义工作空间。")
+            return {'CANCELLED'}
+
+        try:
+            from ..extract.merged_skeleton_lod_mapper import restore_merged_skeleton_lod
+            json_path = (self.json_path or "").strip()
+            if json_path:
+                json_path = bpy.path.abspath(json_path)
+            result = restore_merged_skeleton_lod(workspace_folder, json_path)
+        except (ValueError, OSError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        except Exception as exc:
+            import traceback
+            traceback.print_exc()
+            self.report({'ERROR'}, "LOD 映射失败: " + repr(exc))
+            return {'CANCELLED'}
+
+        for warning in result.warnings:
+            print("[LoyalTools LOD警告] " + warning)
+        for note in result.notes:
+            print("[LoyalTools LOD] " + note)
+        report_lines = ["LOD 映射完成 (JSON): " + "、".join(result.lod_object_names)]
+        several_lod_objects = len(result.lod_object_names) > 1
+        for lod_object_name, matched_count, lower_poly_count in zip(
+            result.lod_object_names,
+            result.matched_component_counts,
+            result.lower_poly_component_counts,
+        ):
+            report_lines.append(
+                (lod_object_name + ": " if several_lod_objects else "")
+                + "匹配 " + str(matched_count) + "/"
+                + str(result.component_count) + " 个组件，"
+                + str(lower_poly_count) + " 个使用独立 LOD IB"
+            )
+        report_lines.append("当前工作空间共 " + str(result.max_lod_count) + " 级 LOD")
+        if result.warnings:
+            report_lines.extend("警告: " + warning for warning in result.warnings)
+        props.last_report = "\n".join(report_lines)
+        if result.warnings:
+            self.report(
+                {'WARNING'},
+                report_lines[0] + "，有 " + str(len(result.warnings)) + " 条警告。"
+                + result.warnings[0],
+            )
+        else:
+            self.report({'INFO'}, report_lines[0])
+        return {'FINISHED'}
+
+
 # ----------------------------------------------------------------------
 # 独立导入操作符（不重新提取，仅把工作空间现有文件导入到场景）
 # ----------------------------------------------------------------------
@@ -1162,10 +1235,16 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
             lod_box = layout.box()
             lod_box.label(text="LOD 映射", icon='MOD_DECIM')
             lod_box.prop(props, "lod_frame_dump_folder", text="LOD1")
-            lod_box.operator(
+            match_row = lod_box.row(align=True)
+            match_row.operator(
                 LoyalMapMergedSkeletonLOD.bl_idname,
-                text="添加 / 更新 LOD 映射",
+                text="帧分析匹配",
                 icon='FILE_REFRESH',
+            )
+            match_row.operator(
+                LoyalMapMergedSkeletonLODFromJson.bl_idname,
+                text="JSON 匹配",
+                icon='FILE_TEXT',
             )
             lod_box.operator(
                 LoyalShowMergedSkeletonLODMap.bl_idname,
@@ -1210,6 +1289,7 @@ classes = (
     LoyalExtractIBMove,
     LoyalExtractFromDump,
     LoyalMapMergedSkeletonLOD,
+    LoyalMapMergedSkeletonLODFromJson,
     LoyalImportWorkspace,
     LoyalImportMergedSkeletonLOD,
     LoyalShowMergedSkeletonLODMap,

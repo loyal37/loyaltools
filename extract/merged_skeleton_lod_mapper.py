@@ -10,11 +10,24 @@ mesh per component; alternate LoD vertex layouts are generated during export.
 
 from __future__ import annotations
 
+import json
 import os
 
 from dataclasses import dataclass, field
 
-from ..common.efmi_merged_skeleton import load_profile, write_profile
+from ..common.efmi_merged_skeleton import (
+    LOD_BACKUP_FILENAME,
+    LOD_ENTRY_FALLBACK,
+    LOD_ENTRY_INCOMPATIBLE,
+    LOD_ENTRY_MATCHED,
+    PROFILE_FILENAME,
+    apply_lod_mapping,
+    get_profile_path,
+    load_profile,
+    profile_has_lod_mapping,
+    validate_profile,
+    write_profile,
+)
 from ..efmi_extract.migoto_io.migoto_model.migoto_mesh import (
     GeometryMatcherConfig,
     GeometryMatcherMethod,
@@ -25,6 +38,10 @@ from ..efmi_extract.migoto_io.object_extractor.lod_matcher import (
     ObjectLowSimilarityError,
 )
 from .dump_workspace_extractor import DumpWorkspaceExtractor, ExtractError
+
+
+# Folder name of a custom workspace's data directory (see GlobalConfig).
+WORKSPACE_DATA_FOLDER = "workplace"
 
 
 @dataclass
@@ -287,6 +304,200 @@ def map_merged_skeleton_lod(
         warnings=warnings,
         preview_workspace_folder=preview_workspace_folder,
         preview_component_count=preview_component_count,
+    )
+
+
+@dataclass
+class LODRestoreResult:
+    """Outcome of applying a LoD mapping that was already stored as JSON."""
+    lod_object_names: list[str]
+    # One entry per LoD object, in the same order.
+    matched_component_counts: list[int]
+    lower_poly_component_counts: list[int]
+    component_count: int
+    max_lod_count: int
+    source_path: str
+    # False when the workspace profile already held this mapping.
+    changed: bool
+    warnings: list[str] = field(default_factory=list)
+    # Background for the log only; nothing the user has to act on.
+    notes: list[str] = field(default_factory=list)
+
+
+def _read_lod_mapping_source(path: str) -> tuple[dict, dict] | None:
+    """Load a profile JSON as ``(normalized, raw)``; None without a LoD mapping."""
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            raw = json.load(file)
+        normalized = validate_profile(raw)
+    except (OSError, ValueError):
+        return None
+    if not profile_has_lod_mapping(normalized):
+        return None
+    return normalized, raw
+
+
+def find_lod_mapping_source(path: str) -> str:
+    """Return the JSON at or under ``path`` that carries a LoD mapping, or "".
+
+    ``path`` may be a workspace's data folder, the folder that contains it, or
+    a profile JSON itself.  A workspace's current profile is preferred over the
+    copy kept from before its full-detail model was extracted again.
+    """
+    path = os.path.abspath(str(path))
+    if os.path.isfile(path):
+        candidates = [path]
+    else:
+        candidates = [
+            os.path.join(folder, filename)
+            for folder in (path, os.path.join(path, WORKSPACE_DATA_FOLDER))
+            for filename in (PROFILE_FILENAME, LOD_BACKUP_FILENAME)
+        ]
+    for candidate in candidates:
+        if os.path.isfile(candidate) and _read_lod_mapping_source(candidate):
+            return candidate
+    return ""
+
+
+def _find_preview_workspace(source: dict, source_folder: str, object_name: str) -> str:
+    """Locate the LoD preview workspace that belongs to a stored mapping."""
+    recorded = source.get("lod_preview_workspaces", {}).get(object_name, "")
+    if recorded:
+        preview = recorded if os.path.isabs(recorded) else os.path.join(
+            source_folder, recorded
+        )
+    else:
+        preview = DumpWorkspaceExtractor.get_lod_preview_workspace_folder(
+            source_folder, object_name
+        )
+    if os.path.isfile(os.path.join(preview, "Import.json")):
+        return os.path.abspath(preview)
+    return ""
+
+
+def restore_merged_skeleton_lod(
+    workspace_folder: str,
+    source_path: str = "",
+) -> LODRestoreResult:
+    """Apply a LoD mapping that already exists as JSON; no capture is read.
+
+    Without ``source_path`` the workspace's own JSON is used: its current
+    profile, or the copy kept when the full-detail model was extracted again.
+    ``source_path`` may instead name the profile, or the workspace, of the
+    same character that already holds the mapping.
+    """
+    workspace_folder = os.path.abspath(str(workspace_folder))
+    profile = load_profile(workspace_folder, required=True)
+    source_file = find_lod_mapping_source(source_path or workspace_folder)
+    if not source_file:
+        if source_path:
+            raise ExtractError(
+                "所选位置没有带 LOD 映射的 " + PROFILE_FILENAME + ": "
+                + str(source_path)
+            )
+        raise ExtractError("当前工作空间的 JSON 中还没有 LOD 映射，请用帧分析匹配。")
+    source, source_raw = _read_lod_mapping_source(source_file)
+    source_folder = os.path.dirname(source_file)
+    already_current = (
+        os.path.normcase(os.path.abspath(source_file))
+        == os.path.normcase(get_profile_path(workspace_folder))
+    )
+
+    reports = apply_lod_mapping(profile, source, source_raw)
+    applied = [report for report in reports if report["applied"]]
+    if not applied:
+        raise ExtractError(
+            "JSON 中的 LOD 映射与当前主模型没有可对应的组件，无法套用: " + source_file
+        )
+    applied_names = [report["lod_object_name"] for report in applied]
+
+    components = {
+        component["unique_str"]: component for component in profile["components"]
+    }
+    warnings = []
+    notes = []
+    for report in applied:
+        for item in report["statuses"]:
+            if item["status"] == LOD_ENTRY_MATCHED:
+                continue
+            component = components[item["unique_str"]]
+            warning = (
+                "主模型 Component " + str(item["component_id"]) + "（"
+                + item["unique_str"] + "）"
+            )
+            if item["status"] == LOD_ENTRY_FALLBACK:
+                warning += "没有独立对应的 LOD。"
+            elif item["status"] == LOD_ENTRY_INCOMPATIBLE:
+                warning += (
+                    "与 JSON 中的 LOD 记录不一致（" + item["problem"]
+                    + "），已按没有独立 LOD 处理；需要用帧分析重新匹配。"
+                )
+            else:
+                warning += (
+                    "在 JSON 中没有 LOD 记录，已按没有独立 LOD 处理；"
+                    "需要用帧分析重新匹配。"
+                )
+            vg_offset = int(component.get("vg_offset", 0))
+            vg_count = int(component.get("vg_count", 0))
+            if not component.get("cpu_posed", False) and vg_count > 0:
+                warning += (
+                    "不要在其他网格上使用该组件负责的全局顶点组 "
+                    + str(vg_offset) + "-" + str(vg_offset + vg_count - 1)
+                    + " 的权重。"
+                )
+            warnings.append(warning)
+        if report["legacy"]:
+            notes.append(
+                "JSON 中 " + report["lod_object_name"]
+                + " 的映射来自旧版格式，没有记录 LOD 绘制的 first_index/first_vertex；"
+                "独立 LOD IB 的这两项按 0 处理。"
+            )
+    warnings.extend(
+        "JSON 中的 LOD 对象 " + report["lod_object_name"]
+        + " 与当前主模型没有可对应的组件，已跳过。"
+        for report in reports if not report["applied"]
+    )
+
+    if not already_current:
+        lod_sources = dict(profile.get("lod_sources", {}))
+        preview_workspaces = dict(profile.get("lod_preview_workspaces", {}))
+        for object_name in applied_names:
+            source_dump = source.get("lod_sources", {}).get(object_name, "")
+            if source_dump:
+                lod_sources[object_name] = source_dump
+            preview = _find_preview_workspace(source, source_folder, object_name)
+            if not preview:
+                continue
+            # Stay relative inside this workspace so the folder can be moved;
+            # a preview that lives in another workspace is referenced in place.
+            relative = os.path.relpath(preview, workspace_folder) if (
+                os.path.splitdrive(preview)[0].lower()
+                == os.path.splitdrive(workspace_folder)[0].lower()
+            ) else ""
+            preview_workspaces[object_name] = (
+                relative if relative and not relative.startswith("..") else preview
+            )
+        if lod_sources:
+            profile["lod_sources"] = lod_sources
+        if preview_workspaces:
+            profile["lod_preview_workspaces"] = preview_workspaces
+        last_name = str(source.get("last_lod_object_name", "")).strip()
+        profile["last_lod_object_name"] = (
+            last_name if last_name in applied_names else applied_names[-1]
+        )
+        write_profile(workspace_folder, profile)
+
+    normalized = load_profile(workspace_folder, required=True)
+    return LODRestoreResult(
+        lod_object_names=applied_names,
+        matched_component_counts=[report["matched"] for report in applied],
+        lower_poly_component_counts=[report["lower_poly"] for report in applied],
+        component_count=len(profile["components"]),
+        max_lod_count=int(normalized.get("max_lod_count", 0)),
+        source_path=source_file,
+        changed=not already_current,
+        warnings=warnings,
+        notes=notes,
     )
 
 

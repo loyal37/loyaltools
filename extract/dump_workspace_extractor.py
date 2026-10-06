@@ -91,6 +91,7 @@ from ..common.efmi_merged_skeleton import (
     PROFILE_MODE,
     REQUIRED_EFMI_VERSION,
     MergedSkeletonProfileError,
+    backup_lod_mapping,
     make_submesh_metadata,
     normalize_first_vertex,
     write_profile,
@@ -783,6 +784,15 @@ class DumpWorkspaceExtractor:
             "source_frame_dump": self.dump_folder,
             "components": profile_components,
         }
+        # The new profile starts without LoD levels.  Keep the mapping this
+        # workspace already had so it can be applied again from JSON.
+        try:
+            backup_lod_mapping(workspace_folder)
+        except OSError as exc:
+            warnings.append(
+                "无法备份工作空间已有的 LOD 映射，重新提取后需要用帧分析重新匹配: "
+                + repr(exc)
+            )
         write_profile(workspace_folder, profile)
 
         self._update_workspace_root_files(

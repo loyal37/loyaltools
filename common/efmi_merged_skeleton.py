@@ -8,11 +8,14 @@ the normal LoyalTools workflow continues to use Import.json/SubmeshJson only.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import shutil
 
 
 PROFILE_FILENAME = "EFMI_MergedSkeleton.json"
+LOD_BACKUP_FILENAME = "EFMI_MergedSkeleton_LODBackup.json"
 PROFILE_MODE = "EFMI_MERGED_SKELETON"
 PROFILE_FORMAT_VERSION = 1
 REQUIRED_EFMI_VERSION = "1.4.1"
@@ -408,6 +411,254 @@ def build_lod_mapping_groups(profile: dict) -> list[dict]:
             })
         groups.append({"lod_object_name": object_name, "rows": rows})
     return groups
+
+
+# ---------------------------------------------------------------------------
+# Reusing a stored LoD mapping
+#
+# A LoD entry records which LoD mesh stands in for one full-detail component
+# and how that component's local vertex groups map onto the LoD skeleton.  Both
+# are properties of the two meshes, not of the captures they were read from, so
+# an entry stays valid for a profile that is extracted again as long as the
+# component is the same draw with the same local vertex group count.  This is
+# what lets a mapping be applied from JSON when the captures no longer exist.
+# ---------------------------------------------------------------------------
+
+LOD_ENTRY_MATCHED = "matched"
+LOD_ENTRY_FALLBACK = "fallback"
+LOD_ENTRY_MISSING = "missing"
+LOD_ENTRY_INCOMPATIBLE = "incompatible"
+
+
+def get_lod_backup_path(workspace_folder: str) -> str:
+    return os.path.join(os.path.abspath(str(workspace_folder)), LOD_BACKUP_FILENAME)
+
+
+def profile_has_lod_mapping(profile: dict | None) -> bool:
+    """True when at least one component carries a LoD entry."""
+    if not profile:
+        return False
+    return any(component.get("lods") for component in profile.get("components", []))
+
+
+def get_lod_object_order(profile: dict) -> list[str]:
+    """LoD object names in mapping order, then any name without a source."""
+    object_names = list(profile.get("lod_object_names", []))
+    order = [
+        object_name for object_name in profile.get("lod_sources", {})
+        if object_name in object_names
+    ]
+    order.extend(
+        object_name for object_name in object_names if object_name not in order
+    )
+    return order
+
+
+def backup_lod_mapping(workspace_folder: str) -> list[str]:
+    """Keep the workspace's LoD mapping before its profile is rewritten.
+
+    Extraction rebuilds the profile from the full-detail capture and starts
+    every component with an empty ``lods`` list.  The previous file is copied
+    aside first so the mapping can be applied again without the LoD capture.
+    A profile that has no mapping never replaces an existing backup.
+
+    Returns the LoD object names that were saved (empty when none were).
+    """
+    try:
+        previous = load_profile(workspace_folder, required=False)
+    except MergedSkeletonProfileError:
+        return []
+    if not profile_has_lod_mapping(previous):
+        return []
+    shutil.copyfile(
+        get_profile_path(workspace_folder),
+        get_lod_backup_path(workspace_folder),
+    )
+    return get_lod_object_order(previous)
+
+
+def make_fallback_lod(
+    component: dict,
+    lod_object_name: str,
+    previous: dict | None = None,
+) -> dict:
+    """Build the entry of a component that has no LoD mesh of its own.
+
+    The entry mirrors the full-detail draw, as the capture based mapper writes
+    it, so every component keeps the same number of LoD levels and no separate
+    LoD entry point is generated for it.
+    """
+    previous = previous or {}
+    lod = {
+        "lod_object_name": str(lod_object_name),
+        "ib_hash": component["ib_hash"],
+        "vb0_hash": str(previous.get("vb0_hash", "")),
+        "vertex_offset": int(previous.get("vertex_offset", 0)),
+        "vertex_count": int(
+            previous.get("vertex_count", component.get("vertex_count", 0))
+        ),
+        "index_offset": int(previous.get("index_offset", 0)),
+        "index_count": int(component["index_count"]),
+        "first_index": int(component["first_index"]),
+        "unique_str": component["unique_str"],
+        "is_fallback": True,
+        "vg_map": {},
+        "vb_formats": {},
+    }
+    # The fallback must keep matching the main draw exactly, including whether
+    # the base vertex was recorded at all.
+    if "first_vertex" in component:
+        lod["first_vertex"] = component["first_vertex"]
+    return lod
+
+
+def _find_lod(component: dict | None, lod_object_name: str) -> dict | None:
+    if component is None:
+        return None
+    for lod in component.get("lods", []):
+        if lod.get("lod_object_name") == lod_object_name:
+            return lod
+    return None
+
+
+def _lod_entry_problem(component: dict, source_component: dict, lod: dict) -> str:
+    """Explain why a stored LoD entry cannot be used for ``component``."""
+    for key in ("ib_hash", "index_count", "first_index"):
+        if source_component.get(key) != component.get(key):
+            return "绘制参数 " + key + " 不同"
+    if bool(source_component.get("cpu_posed")) != bool(component.get("cpu_posed")):
+        return "CPU/GPU 蒙皮类型不同"
+    vg_count = int(component.get("vg_count", 0))
+    if int(source_component.get("vg_count", 0)) != vg_count:
+        return (
+            "本地顶点组数量不同（JSON "
+            + str(int(source_component.get("vg_count", 0)))
+            + "，当前 " + str(vg_count) + "）"
+        )
+    if any(int(local_id) >= vg_count for local_id in lod.get("vg_map", {})):
+        return "LOD 顶点组映射超出当前组件的顶点组范围"
+    return ""
+
+
+def _raw_lods_without_first_index(source_raw: dict | None) -> set[tuple[str, str]]:
+    """Find entries written before LoD draws recorded their first index."""
+    legacy = set()
+    if not isinstance(source_raw, dict):
+        return legacy
+    for component in source_raw.get("components", []) or []:
+        if not isinstance(component, dict):
+            continue
+        unique_str = str(component.get("unique_str", "")).strip()
+        for lod in component.get("lods", []) or []:
+            if isinstance(lod, dict) and "first_index" not in lod:
+                legacy.add((unique_str, str(lod.get("lod_object_name", "")).strip()))
+    return legacy
+
+
+def _reuse_lod_entry(component: dict, source_lod: dict, lacks_first_index: bool) -> dict:
+    """Copy a stored entry, completing what older mappings did not record.
+
+    An entry that covers the component's own index range is the full-detail
+    draw itself, so it shares that draw's first index and base vertex.  Values
+    that were stored are never replaced.
+    """
+    lod = copy.deepcopy(source_lod)
+    if (
+        lod["ib_hash"] != component["ib_hash"]
+        or lod["index_count"] != component["index_count"]
+    ):
+        return lod
+    if lacks_first_index:
+        lod["first_index"] = component["first_index"]
+        lod["unique_str"] = component["unique_str"]
+    if (
+        lod["first_index"] == component["first_index"]
+        and "first_vertex" not in lod
+        and "first_vertex" in component
+    ):
+        lod["first_vertex"] = component["first_vertex"]
+    return lod
+
+
+def apply_lod_mapping(
+    profile: dict,
+    source: dict,
+    source_raw: dict | None = None,
+) -> list[dict]:
+    """Apply the LoD mapping stored in ``source`` to ``profile`` in place.
+
+    Components are paired by ``unique_str``.  A stored entry is reused only
+    when the component is still the same draw with the same skinning type and
+    local vertex group count; every other component receives the full-detail
+    fallback.  A LoD object that matches no component at all is skipped, so a
+    mapping made for a different character changes nothing.
+
+    ``source_raw`` is the unnormalized source JSON.  It is only used to detect
+    entries from before ``first_index`` was stored (see ``_reuse_lod_entry``).
+
+    Returns one report per LoD object in ``source``.
+    """
+    source_components = {
+        component["unique_str"]: component for component in source["components"]
+    }
+    legacy_entries = _raw_lods_without_first_index(source_raw)
+    reports = []
+    for lod_object_name in get_lod_object_order(source):
+        entries = []
+        report = {
+            "lod_object_name": lod_object_name,
+            "applied": False,
+            "legacy": False,
+            "matched": 0,
+            "lower_poly": 0,
+            "statuses": [],
+        }
+        for component in profile["components"]:
+            unique_str = component["unique_str"]
+            source_component = source_components.get(unique_str)
+            source_lod = _find_lod(source_component, lod_object_name)
+            problem = ""
+            if source_lod is None:
+                status = LOD_ENTRY_MISSING
+            else:
+                problem = _lod_entry_problem(component, source_component, source_lod)
+                if problem:
+                    status = LOD_ENTRY_INCOMPATIBLE
+                elif source_lod.get("is_fallback", False):
+                    status = LOD_ENTRY_FALLBACK
+                else:
+                    status = LOD_ENTRY_MATCHED
+
+            if status == LOD_ENTRY_MATCHED:
+                lacks_first_index = (unique_str, lod_object_name) in legacy_entries
+                report["legacy"] = report["legacy"] or lacks_first_index
+                lod = _reuse_lod_entry(component, source_lod, lacks_first_index)
+                report["matched"] += 1
+                if lod["ib_hash"] != component["ib_hash"]:
+                    report["lower_poly"] += 1
+            else:
+                lod = make_fallback_lod(
+                    component,
+                    lod_object_name,
+                    previous=source_lod if status == LOD_ENTRY_FALLBACK else None,
+                )
+            entries.append(lod)
+            report["statuses"].append({
+                "component_id": int(component["component_id"]),
+                "unique_str": unique_str,
+                "status": status,
+                "problem": problem,
+            })
+
+        if report["matched"]:
+            report["applied"] = True
+            for component, lod in zip(profile["components"], entries):
+                component["lods"] = [
+                    previous for previous in component.get("lods", [])
+                    if previous.get("lod_object_name") != lod_object_name
+                ] + [lod]
+        reports.append(report)
+    return reports
 
 
 def make_submesh_metadata(component: dict) -> dict:
