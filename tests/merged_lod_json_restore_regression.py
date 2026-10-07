@@ -458,6 +458,108 @@ def check_older_format_is_noted_in_the_log_only():
         assert reused["unique_str"] == "dddddddd-45-12" and reused["first_index"] == 12
 
 
+def check_current_legacy_profile_is_migrated_once():
+    lod = _lod("dddddddd-45-12", vg_map={"0": 0, "1": 1})
+    del lod["first_index"]
+    del lod["unique_str"]
+    raw = _profile(
+        [_component(0, "dddddddd-45-12", 0, 2, [lod], first_vertex=9)],
+        lod_sources={LOD_OBJECT: "D:\\capture-no-longer-present"},
+        lod_preview_workspaces={LOD_OBJECT: "LODPreview/kept-location"},
+        last_lod_object_name=LOD_OBJECT,
+    )
+    with tempfile.TemporaryDirectory(prefix="loyal-lod-json-current-legacy-") as workspace:
+        profile_path = profile_module.get_profile_path(workspace)
+        # Write the original JSON, not write_profile's normalized representation.
+        _write_json(profile_path, raw)
+        before = _read_bytes(profile_path)
+        restored = mapper_module.restore_merged_skeleton_lod(workspace)
+        assert restored.source_path == profile_path and restored.changed
+        assert len(restored.notes) == 1 and "旧版格式" in restored.notes[0]
+        profile = profile_module.load_profile(workspace)
+        component = profile["components"][0]
+        reused = component["lods"][0]
+        assert _entry_signature(reused) == _entry_signature(component)
+        assert reused["unique_str"] == "dddddddd-45-12"
+        assert reused["vg_map"] == {"0": 0, "1": 1}
+        for key in ("lod_sources", "lod_preview_workspaces", "last_lod_object_name"):
+            assert profile[key] == raw[key]
+        migrated = _read_bytes(profile_path)
+        assert migrated != before
+        assert not mapper_module.restore_merged_skeleton_lod(workspace).changed
+        assert _read_bytes(profile_path) == migrated
+
+
+def check_current_invalid_entries_are_saved_as_fallbacks():
+    raw = _mapped_source()
+    # One stored fallback no longer mirrors its main draw; another entry refers
+    # to a main local group outside this component's palette.
+    raw["components"][1]["lods"][0].update(
+        ib_hash="99999999", index_count=12, first_index=3, first_vertex=8,
+        unique_str="99999999-12-3", vg_map={"0": 1}, vb_formats=UV_LAYOUT,
+    )
+    raw["components"][2]["lods"][0]["vg_map"] = {"9": 0}
+    with tempfile.TemporaryDirectory(prefix="loyal-lod-json-current-fallback-") as workspace:
+        profile_module.write_profile(workspace, raw)
+        profile_path = profile_module.get_profile_path(workspace)
+        restored = mapper_module.restore_merged_skeleton_lod(workspace)
+        assert restored.changed and restored.matched_component_counts == [3]
+        assert len(restored.warnings) == 2
+        assert "超出" in restored.warnings[1]
+        profile = profile_module.load_profile(workspace)
+        for component_id in (1, 2):
+            component = profile["components"][component_id]
+            fallback = component["lods"][0]
+            assert fallback["is_fallback"]
+            assert _entry_signature(fallback) == _entry_signature(component)
+            assert fallback["unique_str"] == component["unique_str"]
+            assert fallback["vg_map"] == {} and fallback["vb_formats"] == {}
+        repaired = _read_bytes(profile_path)
+        again = mapper_module.restore_merged_skeleton_lod(workspace)
+        assert not again.changed and _read_bytes(profile_path) == repaired
+
+
+def check_current_equal_size_lod_order_does_not_trigger_a_write():
+    other_lod = "Character 200"
+    lods = [
+        _lod("11111111-120-0", lod_object_name=LOD_OBJECT, vg_map={"0": 0}),
+        _lod("22222222-120-0", lod_object_name=other_lod, vg_map={"0": 0}),
+    ]
+    raw = _profile(
+        [
+            _component(0, "aaaaaaaa-300-0", 0, 1, copy.deepcopy(lods)),
+            _component(1, "bbbbbbbb-300-0", 1, 1, copy.deepcopy(lods[::-1])),
+        ],
+        # Mapping traversal order differs from the first component's tied
+        # vertex/index-count order, but the stored entries are already valid.
+        lod_sources={other_lod: "D:\\LOD2", LOD_OBJECT: "D:\\LOD1"},
+        last_lod_object_name=LOD_OBJECT,
+    )
+    with tempfile.TemporaryDirectory(prefix="loyal-lod-json-current-order-") as workspace:
+        profile_module.write_profile(workspace, raw)
+        profile_path = profile_module.get_profile_path(workspace)
+        before = _read_bytes(profile_path)
+        restored = mapper_module.restore_merged_skeleton_lod(workspace)
+        assert not restored.changed
+        assert restored.matched_component_counts == [2, 2]
+        assert _read_bytes(profile_path) == before
+
+
+def check_current_normalization_defaults_do_not_trigger_a_write():
+    lod = _lod("11111111-120-0", vg_map={"0": 0})
+    # These absent fields normalize to the correct zero first index already;
+    # formatting/default expansion alone is not a semantic compatibility fix.
+    del lod["first_index"]
+    del lod["unique_str"]
+    raw = _profile([_component(0, "aaaaaaaa-300-0", 0, 1, [lod])])
+    with tempfile.TemporaryDirectory(prefix="loyal-lod-json-current-defaults-") as workspace:
+        profile_path = profile_module.get_profile_path(workspace)
+        _write_json(profile_path, raw)
+        before = _read_bytes(profile_path)
+        restored = mapper_module.restore_merged_skeleton_lod(workspace)
+        assert not restored.changed and _read_bytes(profile_path) == before
+
+
 def check_mapping_from_another_workspace():
     with tempfile.TemporaryDirectory(prefix="loyal-lod-json-other-") as root:
         mapped_workspace = os.path.join(root, "mapped", "workplace")
@@ -521,6 +623,10 @@ def main():
     check_backup_keeps_the_last_mapping()
     check_extraction_then_restore_in_the_same_workspace()
     check_older_format_is_noted_in_the_log_only()
+    check_current_legacy_profile_is_migrated_once()
+    check_current_invalid_entries_are_saved_as_fallbacks()
+    check_current_equal_size_lod_order_does_not_trigger_a_write()
+    check_current_normalization_defaults_do_not_trigger_a_write()
     check_mapping_from_another_workspace()
     print("MERGED_LOD_JSON_RESTORE_REGRESSION=PASS")
 

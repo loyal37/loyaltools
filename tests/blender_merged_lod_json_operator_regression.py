@@ -9,6 +9,7 @@ extracted again.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -253,6 +254,34 @@ def main():
         )
         assert json_match(json_path=profile_path)[:3] == report[:3]
         assert profile_module.load_profile(other)["lod_object_names"] == [LOD_OBJECT]
+
+        # A legacy mapping selected from the current profile needs the same
+        # persisted migration as one selected from a backup or another folder.
+        legacy_workspace = use_workspace(os.path.join(root, "legacy character"))
+        legacy_path = profile_module.get_profile_path(legacy_workspace)
+        legacy_lod = _lod("dddddddd-45-12", vg_map={"0": 0, "1": 1})
+        del legacy_lod["first_index"]
+        del legacy_lod["unique_str"]
+        legacy = _profile(mapped=False)
+        legacy["components"] = [
+            _component(0, "dddddddd-45-12", 0, 2, [legacy_lod]),
+        ]
+        with open(legacy_path, "w", encoding="utf-8") as file:
+            json.dump(legacy, file, ensure_ascii=False, indent=4)
+        before = read(legacy_path)
+        set_captures(lod_folder=missing_capture)
+        legacy_report = json_match()
+        assert legacy_report[:3] == [
+            "LOD 映射完成 (JSON): " + LOD_OBJECT,
+            "匹配 1/1 个组件，0 个使用独立 LOD IB",
+            "当前工作空间共 1 级 LOD",
+        ], legacy_report
+        reused = profile_module.load_profile(legacy_workspace)["components"][0]["lods"][0]
+        assert (reused["first_index"], reused["unique_str"]) == (12, "dddddddd-45-12")
+        migrated = read(legacy_path)
+        assert migrated != before
+        assert json_match()[:3] == legacy_report[:3]
+        assert read(legacy_path) == migrated
 
     print("BLENDER_MERGED_LOD_JSON_OPERATOR_REGRESSION=PASS")
 

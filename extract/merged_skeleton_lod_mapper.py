@@ -10,6 +10,7 @@ mesh per component; alternate LoD vertex layouts are generated during export.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 
@@ -388,6 +389,7 @@ def restore_merged_skeleton_lod(
     """
     workspace_folder = os.path.abspath(str(workspace_folder))
     profile = load_profile(workspace_folder, required=True)
+    original_profile = copy.deepcopy(profile)
     source_file = find_lod_mapping_source(source_path or workspace_folder)
     if not source_file:
         if source_path:
@@ -485,7 +487,25 @@ def restore_merged_skeleton_lod(
         profile["last_lod_object_name"] = (
             last_name if last_name in applied_names else applied_names[-1]
         )
-        write_profile(workspace_folder, profile)
+    else:
+        # Applying entries visits lod_sources order, which need not be the
+        # stored level order when two LoDs have equal vertex/index counts.
+        # Keep existing levels stable while saving any actual repairs.
+        for component, original in zip(profile["components"], original_profile["components"]):
+            lod_order = {
+                lod["lod_object_name"]: index
+                for index, lod in enumerate(original["lods"])
+            }
+            component["lods"].sort(
+                key=lambda lod: lod_order.get(lod["lod_object_name"], len(lod_order))
+            )
+
+    normalized = validate_profile(profile)
+    changed = not already_current or normalized != original_profile
+    if changed:
+        # Even the current JSON may need legacy fields or fallback entries
+        # repaired. Only a semantically unchanged current profile is a no-op.
+        write_profile(workspace_folder, normalized)
 
     normalized = load_profile(workspace_folder, required=True)
     return LODRestoreResult(
@@ -495,7 +515,7 @@ def restore_merged_skeleton_lod(
         component_count=len(profile["components"]),
         max_lod_count=int(normalized.get("max_lod_count", 0)),
         source_path=source_file,
-        changed=not already_current,
+        changed=changed,
         warnings=warnings,
         notes=notes,
     )
