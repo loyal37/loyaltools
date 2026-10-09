@@ -427,11 +427,13 @@ class LoyalTexMarkSettings(bpy.types.PropertyGroup):
     mark_name: bpy.props.EnumProperty(
         name="标记名称",
         description="写入 TextureMarkUpInfoList 的 MarkName",
+        # 显式编号: MaterialMap 是后加的，自定义保持原来的 3，旧 .blend 里存的选项不会错位
         items=[
-            ('DiffuseMap', 'DiffuseMap', '漫反射贴图'),
-            ('NormalMap', 'NormalMap', '法线贴图'),
-            ('LightMap', 'LightMap', '光照贴图'),
-            ('CUSTOM', '自定义', '使用自定义标记名称'),
+            ('DiffuseMap', 'DiffuseMap', '漫反射贴图', 'NONE', 0),
+            ('NormalMap', 'NormalMap', '法线贴图', 'NONE', 1),
+            ('LightMap', 'LightMap', '光照贴图', 'NONE', 2),
+            ('MaterialMap', 'MaterialMap', '材质贴图 (绝区零)', 'NONE', 4),
+            ('CUSTOM', '自定义', '使用自定义标记名称', 'NONE', 3),
         ],
         default='DiffuseMap',
     )  # type: ignore

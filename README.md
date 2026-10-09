@@ -1,8 +1,8 @@
 # LoyalTools
 
-A Blender add-on for creating mods for **Arknights: Endfield**.
+A Blender add-on for creating mods for **Arknights: Endfield** and **Zenless Zone Zero**.
 
-LoyalTools is based on **TheHerta4** and integrates the Frame Analysis parsing capabilities of **EFMI-Tools**. It provides an end-to-end workflow from **model extraction → editing → texture marking → mod export**, without requiring SSMT4.
+LoyalTools is based on **TheHerta4** and integrates the Frame Analysis parsing capabilities of **EFMI-Tools**. It provides an end-to-end workflow from **model extraction → editing → texture marking → mod export**, without requiring SSMT4. Starting with v1.7.0 the same workflow covers Zenless Zone Zero, following the mod layout of **XXMI-Tools**; see [Zenless Zone Zero workflow](#zenless-zone-zero-workflow).
 
 - Panel location: Blender 3D Viewport → Sidebar (`N`) → `LoyalTools`
 - Required Blender version: 4.5+
@@ -93,10 +93,30 @@ Editing and export follow the original TheHerta4 workflow. Use the blueprint sys
 
 In standalone mode, when no game directory is configured, the mod is written to `<workspace>/GeneratedMod/`. Copy that output into the game's Mods directory.
 
+## Zenless Zone Zero workflow
+
+Select the `ZZMI` preset in the **Basic Information** panel (enable the standalone-preset override if SSMT4 is installed with another game selected). The extraction panel then shows a Frame Analysis directory, the DrawIB table, two extraction buttons, and **Import**. Zenless Zone Zero has a single level of detail, so there is no Merged Skeleton mode and no LOD mapping.
+
+1. Set the Frame Analysis options in ZZMI's `d3dx.ini` so that textures are dumped losslessly, then capture a frame (`F8` in hunting mode) while the character is visible:
+
+   ```ini
+   analyse_options = dump_tex dump_cb dump_vb dump_ib buf txt dds
+   ```
+
+   Without `dds`, 3dmigoto stores uncompressed textures such as normal maps as JPG, which is lossy and drops the alpha channel. Render target dumps (`dump_rt`) are not needed and become several gigabytes per frame once `dds` is set, so they are left out. The XXMI Launcher keeps this line when it starts the game; reinstalling or updating ZZMI restores the default.
+2. Extract the models in one of two ways. **Extract all** needs no DrawIB: it extracts every mesh of the frame that the game skins, which is the whole character on a character screen and every character in view elsewhere. **Extract** reads the DrawIB table instead: enter the index buffer hash of each component you want (body, hair, face, and so on). Either way, each `first index` range of an index buffer becomes one object named `<IBHash>-<IndexCount>-<FirstIndex>`, stored under `workplace/<name>/TYPE_GPU-ZZMI/`.
+3. The game skins characters with a stream-output draw before the indexed draws. LoyalTools follows the stream-output target back to that draw and reads the unposed position, texcoord, and blend buffers from it, so the imported mesh is in its bind pose with its weights. Index buffers without such a draw are extracted as static meshes.
+4. Textures are marked automatically during extraction, using the slot layout of the ZZMI SlotFix library: Diffuse, Normal, Light, and Material maps of the main shading pass. Only lossless DDS dumps are marked. If a dump was captured without `dds`, its JPG normal map stays available in the texture-marking panel but is not marked, because exporting it would replace the game's texture with a degraded copy; the extraction report says so once. Marks can be changed or removed in the texture-marking panel, and re-extracting keeps existing marks.
+5. Generate the mod from the blueprint as usual. The INI follows the XXMI-Tools Zenless Zone Zero layout: the blend buffer override swaps in the position buffer for the stream-output draw (`DRAW_TYPE == 1`) and the texcoord buffer for indexed draws, each part matches its `first index` and `index count`, and marked textures are passed to SlotFix (`Resource\ZZMI\Diffuse = ref ...` followed by `run = CommandList\ZZMI\SetTextures`) instead of being bound to fixed `ps-t` slots. Mark names without a SlotFix resource fall back to their slot.
+6. **Outline optimization** on the Generate Mod node (enabled by default) recomputes the outline data stored in `TEXCOORD1` from the exported geometry, as XXMI-Tools does. Disable it to export the `TEXCOORD1.xy` layer unchanged.
+
+Custom meshes need the same UV layers and colour attribute as the object they are merged into. Workspaces extracted with SSMT4 keep the original TheHerta4 INI layout.
+
 ## Notes
 
 - **Do not enable LoyalTools and TheHerta4 at the same time.** They share many internal operator, panel, and node identifiers, which causes registration conflicts.
-- Extraction is specific to Endfield/EFMI. Other game presets display a warning.
+- Extraction supports Endfield/EFMI and Zenless Zone Zero/ZZMI. Other game presets display a warning.
+- Starting with v1.7.0, Zenless Zone Zero models can be extracted from Frame Analysis dumps and exported with the XXMI-Tools INI layout, SlotFix texture bindings, automatic texture marks, and outline optimization. The Endfield workflows are unchanged. Face meshes driven by shape keys are extracted with the expression they had in the captured frame.
 - v1.4.8 fixed incorrect VB starting offsets for shared-buffer Merged Skeleton components with `FirstIndex > 0`. Incorrect `.buf` or `.ib` files extracted with older versions cannot be repaired in place; extract and import them again from the original Frame Analysis dump.
 - Starting with v1.4.10, a Merged Skeleton Cross IB segment binds only the source IB/VB and inherits the Diffuse, Light, and Normal textures already bound by the target component earlier in the same command list. Standard Cross IB behavior is unchanged.
 - Starting with v1.5.0, Merged Skeleton profiles can add LOD mappings from independent distant Frame Analysis captures. Blender continues to edit only the full-detail model; export creates LOD entry points, required VB layout variants, and bone remaps automatically. Standard DrawIB and Cross IB workflows do not read the LOD profile.
@@ -124,3 +144,6 @@ Older profiles can still export: missing `first_vertex` is assumed to be zero, w
 
 - **TheHerta4** (GPL-3.0): the main add-on framework on which LoyalTools is based.
 - **EFMI-Tools** (including work by SpectrumQT and other contributors): the Frame Analysis parsing and data-type code under `efmi_extract/` was ported from this project. EFMI-Tools did not include an open-source license in the referenced source. Obtain permission from the original authors before publicly redistributing this add-on.
+- **XXMI-Tools** (leotorrez and contributors, v1.8.2): the Zenless Zone Zero INI layout follows its template, and the outline calculation in `common/zzmi_outline.py` is ported from its exporter. The referenced source did not declare an open-source license either, so the same caution applies.
+- **gui_collect** (Petrascyll, GPL-3.0): reference for locating a character's unposed buffers in a Zenless Zone Zero Frame Analysis dump. LoyalTools' extractor is an independent implementation.
+- **ZZMI SlotFix**: the slot layout used for automatic texture marks and the `Resource\ZZMI\...` texture interface.

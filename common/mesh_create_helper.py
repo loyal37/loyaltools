@@ -103,7 +103,10 @@ class MeshCreateHelper:
                     # LoyalTools: SNORM 格式的颜色数据范围为 [-1,1] (如终末地 R8G8B8A8_SNORM 的 COLOR0/1/2)，
                     # BYTE_COLOR 会被 Blender 钳位到 [0,1] 导致负分量丢失，
                     # 因此 SNORM 格式使用 FLOAT_COLOR 无损存储原始浮点值，其它格式保持 BYTE_COLOR 不变。
-                    if 'SNORM' in element.Format:
+                    # 绝区零的 COLOR 也用 FLOAT_COLOR: BYTE_COLOR 按 sRGB 存储，线性值存取一遍后
+                    # 亮部会差 1 (160 -> 161)，而它的顶点色各通道是给着色器用的参数不是颜色；
+                    # 部分网格的 COLOR 还是 R32G32B32A32_FLOAT，更不能量化成 8 位。
+                    if 'SNORM' in element.Format or logic_name == LogicName.ZZMI:
                         color_attr = mesh.color_attributes.new(name=element.ElementName, type='FLOAT_COLOR', domain='CORNER')
                     else:
                         color_attr = mesh.color_attributes.new(name=element.ElementName, type='BYTE_COLOR', domain='CORNER')
@@ -170,9 +173,13 @@ class MeshCreateHelper:
         if len(blend_weights) == 0 and len(blend_indices) != 0:
             print("检测到BLENDWEIGHTS为空，但是含有BLENDINDICES数据，特殊情况，默认补充1,0,0,0的BLENDWEIGHTS")
             for semantic_index, blendindices_tuple in blend_indices.items():
+                # 权重列数跟随索引列数: 绝区零的单骨骼网格是 R32_UINT (每顶点 1 个索引)，
+                # 固定补 4 列会和索引形状对不上。4 列索引时仍是原来的 (1,0,0,0)。
+                index_width = numpy.asarray(blendindices_tuple).reshape(len(blendindices_tuple), -1).shape[1]
+                default_weights = (1.0,) + (0,) * (index_width - 1)
                 new_list = []
                 for _indices in blendindices_tuple:
-                    new_list.append((1.0, 0, 0, 0))
+                    new_list.append(default_weights)
                 blend_weights[semantic_index] = new_list
 
         MeshCreateHelper.import_uv_layers(mesh, obj, texcoords)

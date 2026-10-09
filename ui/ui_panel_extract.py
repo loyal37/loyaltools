@@ -3,7 +3,8 @@
 LoyalTools DrawIB 提取面板。
 功能：按行填写 DrawIB 和别名 (SSMT4风格表格)，从 3dmigoto 帧分析 Dump 中提取模型，
 生成 SSMT 风格工作空间并导入 Blender，导入后自动接入当前工作空间的 SSMT 蓝图节点树。
-提取核心逻辑位于 extract/dump_workspace_extractor.py (与 Blender 解耦，可独立运行)。
+提取核心逻辑位于 extract/dump_workspace_extractor.py (终末地) 和
+extract/zzmi_dump_extractor.py (绝区零)，都与 Blender 解耦，可独立运行。
 '''
 import os
 import re
@@ -209,6 +210,30 @@ def get_cached_extractor(dump_folder: str):
     extractor = DumpWorkspaceExtractor(dump_folder)
     _EXTRACTOR_CACHE["entry"] = (cache_key, extractor)
     return extractor
+
+
+def get_cached_zzmi_extractor(dump_folder: str):
+    '''获取 (或复用缓存的) 绝区零 ZZMIDumpExtractor 实例'''
+    from ..extract.zzmi_dump_extractor import ZZMIDumpExtractor
+
+    log_path = os.path.join(dump_folder, "log.txt")
+    try:
+        cache_key = (dump_folder, os.path.getmtime(log_path))
+    except OSError:
+        cache_key = (dump_folder, None)
+
+    cached = _EXTRACTOR_CACHE.get("zzmi_entry")
+    if cached is not None and cached[0] == cache_key:
+        return cached[1]
+
+    extractor = ZZMIDumpExtractor(dump_folder)
+    _EXTRACTOR_CACHE["zzmi_entry"] = (cache_key, extractor)
+    return extractor
+
+
+def is_zzmi_preset() -> bool:
+    '''当前游戏预设是否为绝区零 (绝区零只有普通制作流程，没有骨骼合并和 LOD)'''
+    return GlobalConfig.logic_name == LogicName.ZZMI
 
 
 # ----------------------------------------------------------------------
@@ -575,15 +600,28 @@ class LoyalExtractFromDump(bpy.types.Operator):
     bl_description = "从帧分析Dump中提取列表中所有DrawIB的模型和贴图，写入当前工作空间，并可自动导入到场景、接入蓝图节点"
     bl_options = {'REGISTER', 'UNDO'}
 
+    # 绝区零"自动提取" (LoyalExtractZZMIWholeFrame) 复用本操作符的 execute，
+    # 只把这个开关置为 True: 不读 DrawIB 表，提取整帧所有带骨骼权重的网格
+    zzmi_whole_frame = False
+
     def execute(self, context):
         scene = context.scene
         props = scene.loyal_extract_props
-        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
+
+        # 先刷新一次全局配置：绝区零 (ZZMI) 只有普通制作流程，
+        # 即使场景里还留着终末地用过的"骨骼合并"选项也按 DrawIB 列表提取
+        GlobalConfig.read_from_main_json_ssmt4()
+        zzmi_mode = is_zzmi_preset()
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not zzmi_mode
+        whole_frame_mode = bool(self.zzmi_whole_frame)
+        if whole_frame_mode and not zzmi_mode:
+            self.report({'ERROR'}, "自动提取只用于绝区零(ZZMI)，当前游戏预设为 " + (GlobalConfig.logic_name or "未设置") + "。")
+            return {'CANCELLED'}
 
         # 1.校验输入。普通模式仍读取 DrawIB 表；骨骼合并模式由整帧自动识别角色。
         try:
             dump_folder = resolve_dump_folder(props)
-            if merged_skeleton_mode:
+            if merged_skeleton_mode or whole_frame_mode:
                 ib_hashes, aliases = [], {}
             else:
                 ib_hashes, aliases = gather_ib_rows_input(scene, props)
@@ -591,36 +629,51 @@ class LoyalExtractFromDump(bpy.types.Operator):
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
 
-        # 2.解析工作空间 (和其它操作符一样，先刷新一次全局配置)
-        GlobalConfig.read_from_main_json_ssmt4()
+        # 2.解析工作空间
         workspace_folder = GlobalConfig.path_workspace_folder()
         if workspace_folder == "":
             self.report({'ERROR'}, "未解析到工作空间，请在\"基础信息\"面板中把工作空间来源切换为自定义目录并填写路径。")
             return {'CANCELLED'}
 
-        # 3.提取是终末地(EFMI)专用功能，其它预设下警告但仍允许执行
-        if GlobalConfig.logic_name != "" and GlobalConfig.logic_name != LogicName.EFMI:
+        # 3.提取只支持终末地(EFMI)和绝区零(ZZMI)，其它预设下警告但仍按终末地规则执行
+        if GlobalConfig.logic_name not in ("", LogicName.EFMI, LogicName.ZZMI):
             if merged_skeleton_mode:
                 self.report({'ERROR'}, "骨骼合并仅支持终末地(EFMI)，当前游戏预设为 " + GlobalConfig.logic_name + "。")
                 return {'CANCELLED'}
-            self.report({'WARNING'}, "当前游戏预设为 " + GlobalConfig.logic_name + "，DrawIB提取是终末地(EFMI)专用功能，结果可能不正确。")
+            self.report({'WARNING'}, "当前游戏预设为 " + GlobalConfig.logic_name + "，DrawIB提取只支持终末地(EFMI)和绝区零(ZZMI)，结果可能不正确。")
 
         # 4.延迟导入提取模块并执行提取
         try:
-            from ..extract.dump_workspace_extractor import DumpWorkspaceExtractor, ExtractError
+            if zzmi_mode:
+                from ..extract.zzmi_dump_extractor import ExtractError
+            else:
+                from ..extract.dump_workspace_extractor import DumpWorkspaceExtractor, ExtractError
         except Exception as e:
             self.report({'ERROR'}, "无法加载提取模块: " + repr(e))
             return {'CANCELLED'}
 
         try:
-            extractor = get_cached_extractor(dump_folder)
-            if merged_skeleton_mode:
-                result = extractor.extract_merged_skeleton(
+            if zzmi_mode:
+                zzmi_extractor = get_cached_zzmi_extractor(dump_folder)
+                if whole_frame_mode:
+                    ib_hashes = zzmi_extractor.list_skinned_draw_ibs()
+                    if not ib_hashes:
+                        raise ExtractError(
+                            "帧分析里没有找到经过预蒙皮的角色网格。请确认是在角色出现在画面里时按 F8 抓的完整一帧。"
+                        )
+                result = zzmi_extractor.extract(
+                    ib_hashes=ib_hashes,
+                    workspace_folder=workspace_folder,
+                    copy_textures=True,
+                    aliases=aliases or None,
+                )
+            elif merged_skeleton_mode:
+                result = get_cached_extractor(dump_folder).extract_merged_skeleton(
                     workspace_folder=workspace_folder,
                     copy_textures=True,
                 )
             else:
-                result = extractor.extract(
+                result = get_cached_extractor(dump_folder).extract(
                     ib_hashes=ib_hashes,
                     workspace_folder=workspace_folder,
                     copy_textures=True,
@@ -714,7 +767,7 @@ class LoyalExtractFromDump(bpy.types.Operator):
                         if filename.lower().endswith((".dds", ".jpg", ".png")):
                             texture_count += 1
 
-        workflow_label = "骨骼合并" if merged_skeleton_mode else "普通"
+        workflow_label = "骨骼合并" if merged_skeleton_mode else ("自动" if whole_frame_mode else "普通")
         report_lines = [workflow_label + "提取完成: " + str(len(result.unique_strs)) + " 个子网格, 贴图 " + str(texture_count) + " 张"]
         report_lines.append("已导入 " + str(len(imported_objects)) + " 个物体到集合 \"" + collection_name + "\"")
         if import_error_count > 0:
@@ -733,6 +786,18 @@ class LoyalExtractFromDump(bpy.types.Operator):
         props.last_report = "\n".join(report_lines)
         self.report({'INFO'}, report_lines[0])
         return {'FINISHED'}
+
+
+class LoyalExtractZZMIWholeFrame(bpy.types.Operator):
+    bl_idname = "loyal.extract_zzmi_whole_frame"
+    bl_label = "自动提取"
+    bl_description = "绝区零：不用填DrawIB，直接提取帧分析里所有带骨骼权重的角色网格 (画面里有几个角色就提取几个)，导入到场景并接入蓝图节点"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    zzmi_whole_frame = True
+
+    def execute(self, context):
+        return LoyalExtractFromDump.execute(self, context)
 
 
 class LoyalMapMergedSkeletonLOD(bpy.types.Operator):
@@ -898,8 +963,8 @@ class LoyalImportWorkspace(bpy.types.Operator):
         import json as _json
 
         props = context.scene.loyal_extract_props
-        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
         GlobalConfig.read_from_main_json_ssmt4()
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not is_zzmi_preset()
         workspace_folder = GlobalConfig.path_workspace_folder()
         if workspace_folder == "":
             self.report({'ERROR'}, "未解析到工作空间，请在\"基础信息\"面板中把工作空间来源切换为自定义目录并填写路径。")
@@ -1194,13 +1259,19 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         scene = context.scene
         props = scene.loyal_extract_props
 
-        layout.prop(props, "workflow_mode", expand=True)
-        if props.workflow_mode == 'MERGED_SKELETON':
+        # 基础信息面板折叠时不会刷新游戏预设，这里自己读一次 (带 mtime 缓存，不写任何属性)
+        GlobalConfig.read_from_main_json_ssmt4()
+
+        # 绝区零只有普通制作 (没有骨骼合并和 LOD)，不显示流程切换
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not is_zzmi_preset()
+        if not is_zzmi_preset():
+            layout.prop(props, "workflow_mode", expand=True)
+        if merged_skeleton_mode:
             layout.prop(props, "frame_dump_folder", text="LOD0")
         else:
             layout.prop(props, "frame_dump_folder")
 
-        if props.workflow_mode == 'STANDARD':
+        if not merged_skeleton_mode:
             # DrawIB分行列表 (SSMT4风格表格: DrawIB | 别名)
             header_split = layout.split(factor=0.55, align=True)
             header_split.label(text="DrawIB", icon='MESH_DATA')
@@ -1219,11 +1290,14 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
             button_column.separator()
             button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_UP').direction = 'UP'
             button_column.operator(LoyalExtractIBMove.bl_idname, text="", icon='TRIA_DOWN').direction = 'DOWN'
-        extract_row = layout.row()
+        extract_row = layout.row(align=True)
         extract_row.scale_y = 1.5
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
+        if is_zzmi_preset():
+            # 绝区零的两种提取方式各一个按钮: 按 DrawIB 表 / 整帧自动
+            extract_row.operator(LoyalExtractZZMIWholeFrame.bl_idname, text="自动提取", icon='OUTLINER_OB_ARMATURE')
 
-        if props.workflow_mode == 'MERGED_SKELETON':
+        if merged_skeleton_mode:
             main_import_row = layout.row()
             main_import_row.scale_y = 1.2
             main_import_row.operator(
@@ -1288,6 +1362,7 @@ classes = (
     LoyalExtractIBRemove,
     LoyalExtractIBMove,
     LoyalExtractFromDump,
+    LoyalExtractZZMIWholeFrame,
     LoyalMapMergedSkeletonLOD,
     LoyalMapMergedSkeletonLODFromJson,
     LoyalImportWorkspace,

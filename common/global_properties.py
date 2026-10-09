@@ -117,9 +117,17 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=True,
     ) # type: ignore
 
+    # 已不在 UI 中显示，也不再被读取: 绝区零的 Slot 标记统一按 SlotFix 写法生成
+    # (见 ui/universal/zzmi.py)。保留属性定义只为旧 .blend 文件不报错。
     zzz_use_slot_fix: bpy.props.BoolProperty(
         name="槽位风格贴图使用SlotFix技术",
         description="仅适用于槽位风格贴图，勾选后，特定名称标记的贴图将使用SlotFix风格，能一定程度上解决槽位风格贴图跨槽位的问题，跨Pixel槽位指的是在前一个DrawCall中是ps-t3但是下一个DrawCall变为ps-t5这种情况，但由于负责维护的人也在偷懒所以并不可靠",
+        default=True,
+    ) # type: ignore
+
+    zzz_outline_optimization: bpy.props.BoolProperty(
+        name="轮廓线优化(重算TEXCOORD1)",
+        description="生成绝区零Mod时按导出的几何重新计算描边数据并写入TEXCOORD1，改过模型后描边才会贴合新形状（与XXMI-Tools的Outline Optimization相同）。取消勾选则原样导出TEXCOORD1.xy这层UV里的数据",
         default=True,
     ) # type: ignore
 
@@ -385,6 +393,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def zzz_use_slot_fix(cls):
         return cls._instance().zzz_use_slot_fix
+
+    @classmethod
+    def zzz_outline_optimization(cls):
+        return cls._instance().zzz_outline_optimization
 
     @classmethod
     def gimi_use_orfix(cls):

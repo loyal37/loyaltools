@@ -426,7 +426,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
                         "recalculate_color",text="算术平均归一化法线存入COLOR(全局)")
 
         if GlobalConfig.logic_name == LogicName.ZZMI:
-            layout.prop(context.scene.global_properties, "zzz_use_slot_fix")
+            layout.prop(context.scene.global_properties, "zzz_outline_optimization")
 
         if GlobalConfig.logic_name == LogicName.GIMI:
             layout.prop(context.scene.global_properties, "gimi_use_orfix")

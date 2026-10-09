@@ -31,9 +31,9 @@ importlib.reload(ui_prefix_quick_ops)
 
 bl_info = {
     "name": "LoyalTools",
-    "description": "明日方舟终末地 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力，无需 SSMT4）",
+    "description": "明日方舟终末地 / 绝区零 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力与 XXMI-Tools 的绝区零支持，无需 SSMT4）",
     "blender": (4, 5, 0),
-    "version": (1, 6, 8),
+    "version": (1, 7, 0),
     "location": "View3D",
     "category": "Generic"
 }
