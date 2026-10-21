@@ -10,6 +10,7 @@ from .efmi_merged_skeleton import (
 	load_profile,
 	parse_submesh_metadata,
 )
+from . import zzmi_merged_skeleton
 from ..utils.format_utils import Fatal, FormatUtils
 
 
@@ -29,6 +30,11 @@ class SSMTImportHelper:
 		logic_name = submesh_json.GamePreset
 		gametypename = submesh_json.WorkGameType
 		merged_component = None
+		if merged_skeleton and zzmi_merged_skeleton.SUBMESH_METADATA_KEY in submesh_json.JsonDict:
+			return SSMTImportHelper._create_zzmi_merged_mesh(
+				submesh_json, json_file_path, mesh_name, elements, vb_data, vb_vertex_count,
+				ib_data, ib_count, ib_polygon_count, import_collection,
+			)
 		if merged_skeleton:
 			embedded = parse_submesh_metadata(submesh_json.JsonDict)
 			if embedded is None:
@@ -77,6 +83,49 @@ class SSMTImportHelper:
 			obj["LoyalTools:EFMIVGCount"] = int(merged_component["vg_count"])
 			obj["LoyalTools:EFMIBonesCount"] = int(profile["bones_count"])
 			obj["LoyalTools:EFMIProfile"] = str(embedded["profile"])
+		return obj
+
+	@staticmethod
+	def _create_zzmi_merged_mesh(
+		submesh_json, json_file_path, mesh_name, elements, vb_data, vb_vertex_count,
+		ib_data, ib_count, ib_polygon_count, import_collection,
+	):
+		'''
+		绝区零骨骼合并: 合并部件的本地骨骼编号换成全局编号 (所有合并物体共用同一套顶点组)；
+		脸部 (形态键驱动) 和独立部件不参与合并，保留本地顶点组。
+		'''
+		embedded = zzmi_merged_skeleton.parse_submesh_metadata(submesh_json.JsonDict)
+		workspace_folder = os.path.dirname(os.path.dirname(os.path.dirname(json_file_path)))
+		profile = zzmi_merged_skeleton.load_profile(workspace_folder, required=True)
+		component = zzmi_merged_skeleton.get_component_by_unique_str(profile).get(mesh_name)
+		if component is None:
+			raise Fatal("骨骼合并配置中找不到子网格: " + mesh_name)
+		if int(component["component_id"]) != int(embedded["component_id"]):
+			raise Fatal("子网格与骨骼合并配置的 ComponentId 不一致，请重新提取: " + mesh_name)
+		is_merged = component["role"] == zzmi_merged_skeleton.ROLE_MERGED
+
+		obj = MeshCreateHelper.create_mesh_object(
+			mesh_name=mesh_name,
+			source_path=submesh_json.JsonFilePath,
+			logic_name=submesh_json.GamePreset,
+			gametypename=submesh_json.WorkGameType,
+			elements=elements,
+			vb_data=vb_data,
+			ib_data=ib_data,
+			vb_vertex_count=vb_vertex_count,
+			ib_count=ib_count,
+			ib_polygon_count=ib_polygon_count,
+			local_bounding_box_min=submesh_json.LocalBoundingBoxMin,
+			local_bounding_box_max=submesh_json.LocalBoundingBoxMax,
+			vertex_compression_params=submesh_json.VertexCompressionParams,
+			import_collection=import_collection,
+			vertex_group_map=component["vg_map"] if is_merged else None,
+			vertex_group_count=int(profile["bones_count"]) if is_merged else None,
+		)
+		if obj is not None:
+			obj[zzmi_merged_skeleton.OBJECT_MARKER_MERGED_SKELETON] = True
+			obj[zzmi_merged_skeleton.OBJECT_MARKER_COMPONENT_ID] = int(component["component_id"])
+			obj[zzmi_merged_skeleton.OBJECT_MARKER_ROLE] = component["role"]
 		return obj
 
 	@staticmethod

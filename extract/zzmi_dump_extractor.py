@@ -85,8 +85,12 @@ _DUMP_FILE_RE = re.compile(
 )
 _SHADER_TOKEN_RE = re.compile(r'-([a-z]{2})=([0-9a-f]{16})')
 _LOG_CALL_RE = re.compile(r'^(\d{6}) (\w+)\((.*)\)(?: hash=([0-9a-f]+))?\s*$')
-# 槽位行。OMSetRenderTargets 的深度目标写作 "D:"
-_LOG_SLOT_RE = re.compile(r'^\s+(\d+|D): (?:view=0x[0-9A-Fa-f]+ )?resource=0x[0-9A-Fa-f]+ hash=([0-9a-f]+)')
+# 槽位行。OMSetRenderTargets 的深度目标写作 "D:"，CopyResource 的两行写作 "Src:" / "Dst:"
+_LOG_SLOT_RE = re.compile(
+    r'^\s+(\d+|D|Src|Dst): (?:view=0x[0-9A-Fa-f]+ )?resource=(0x[0-9A-Fa-f]+) hash=([0-9a-f]+)'
+)
+# 这些调用写入的资源是 GPU 在本帧生成的 (脸部形态键先拷贝底模再用计算着色器叠加表情)
+_GPU_WRITE_CALL_NAMES = ("CopyResource", "CopySubresourceRegion", "CSSetUnorderedAccessViews")
 _LOG_ARG_RE = re.compile(r'(\w+):([^,]+)')
 _LOG_TEXTURE_RE = re.compile(r'^\d{6} 3DMigoto Dumping Texture2D (.+?) -> (.+?)\s*$')
 _DRAW_CALL_NAMES = ("Draw", "DrawInstanced", "DrawIndexed", "DrawIndexedInstanced")
@@ -136,6 +140,7 @@ class _Draw:
     so: dict = field(default_factory=dict)      # {slot: hash}
     vs: str = ""
     ps: str = ""
+    vb_ptr: dict = field(default_factory=dict)  # {slot: 日志里的资源地址}，hash 相同的缓冲靠它区分
 
 
 @dataclass
@@ -196,6 +201,7 @@ class _Component:
     parts: list
     pose_draw_id: str = ""
     root_vs: str = ""
+    pose_vertex_count: int = 0      # 预蒙皮 Draw 的 VertexCount (游戏每帧传入的值)
 
     def category_hash(self, name: str) -> str:
         for category in self.categories:
@@ -284,6 +290,25 @@ def _read_image_info(path: str):
     return 0, 0, ""
 
 
+def _load_merged_skeleton_module():
+    '''common/zzmi_merged_skeleton.py；本文件被单独运行 (没有包上下文) 时按路径加载'''
+    try:
+        from ..common import zzmi_merged_skeleton
+        return zzmi_merged_skeleton
+    except ImportError:
+        import importlib.util
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "common", "zzmi_merged_skeleton.py",
+        )
+        module = sys.modules.get("loyaltools_zzmi_merged_skeleton")
+        if module is None:
+            spec = importlib.util.spec_from_file_location("loyaltools_zzmi_merged_skeleton", path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["loyaltools_zzmi_merged_skeleton"] = module
+            spec.loader.exec_module(module)
+        return module
+
+
 class ZZMIDumpExtractor:
     '''
     从绝区零帧分析 Dump 中按 DrawIB 提取模型并生成 SSMT 风格工作空间。
@@ -317,6 +342,7 @@ class ZZMIDumpExtractor:
         self._image_info_cache = {}
         self._component_cache = {}
         self._lossy_mark_names = set()     # 本次提取中因为只有 jpg 而没有自动标记的贴图名
+        self._gpu_written_resources = {}   # {资源地址: 第一次被 GPU 写入的调用号}
 
     def _log(self, message: str):
         if self.verbose:
@@ -360,6 +386,7 @@ class ZZMIDumpExtractor:
         self._index_dump_files()
 
         vb_state = {}
+        vb_ptr_state = {}
         so_state = {}
         ib_state = ["", "", 0]   # hash, format, offset
         vs_state = ""
@@ -392,14 +419,22 @@ class ZZMIDumpExtractor:
             draw_id, call_name, args_text, trailing_hash = call_match.groups()
 
             slots = {}
+            slot_ptrs = {}
             while line_index < line_count:
                 slot_match = _LOG_SLOT_RE.match(lines[line_index])
                 if slot_match is None:
                     break
                 slot_key = slot_match.group(1)
-                slots[int(slot_key) if slot_key.isdigit() else slot_key] = slot_match.group(2)
+                slot_key = int(slot_key) if slot_key.isdigit() else slot_key
+                slots[slot_key] = slot_match.group(3)
+                slot_ptrs[slot_key] = slot_match.group(2)
                 line_index += 1
 
+            if call_name in _GPU_WRITE_CALL_NAMES:
+                written = [slot_ptrs.get("Dst")] if call_name.startswith("Copy") else list(slot_ptrs.values())
+                for resource_ptr in written:
+                    if resource_ptr:
+                        self._gpu_written_resources.setdefault(resource_ptr, draw_id)
             if call_name == "OMSetRenderTargets":
                 # 没有 dump_rt 时目录里没有 o* 文件，渲染目标只能从日志得知
                 self._render_target_hashes.update(slots.values())
@@ -409,8 +444,10 @@ class ZZMIDumpExtractor:
                 for slot in range(start_slot, start_slot + int(args.get("NumBuffers", "0"))):
                     if slot in slots:
                         vb_state[slot] = slots[slot]
+                        vb_ptr_state[slot] = slot_ptrs[slot]
                     else:
                         vb_state.pop(slot, None)
+                        vb_ptr_state.pop(slot, None)
             elif call_name == "IASetIndexBuffer":
                 args = dict(_LOG_ARG_RE.findall(args_text))
                 ib_state[0] = trailing_hash or ""
@@ -440,6 +477,7 @@ class ZZMIDumpExtractor:
                     so=dict(so_state),
                     vs=vs_state,
                     ps=ps_state,
+                    vb_ptr=dict(vb_ptr_state),
                 )
                 if indexed:
                     draw.index_count = self._to_int(args.get("IndexCount", args.get("IndexCountPerInstance")))
@@ -594,6 +632,240 @@ class ZZMIDumpExtractor:
             warnings=warnings,
             workspace_folder=workspace_folder,
         )
+
+    # ------------------------------------------------------------------
+    # 骨骼合并提取 (common/zzmi_merged_skeleton.py 说明了运行时原理)
+    # ------------------------------------------------------------------
+
+    def extract_merged_skeleton(
+        self,
+        workspace_folder: str,
+        gametype_name: str = DEFAULT_GAMETYPE,
+        copy_textures: bool = True,
+    ) -> ExtractResult:
+        '''
+        从整帧自动识别角色并按骨骼合并流程提取:
+            角色 = 和最大的蒙皮部件通过共用骨骼连在一起的部件；
+            脸部 (形态键驱动) 和没有一一对应共用骨骼的部件随角色提取，但不参与合并；
+            和角色没有任何共用骨骼的部件 (邦布、武器、其它角色) 不提取。
+        子网格仍按普通提取写出，另外写 ZZMI_MergedSkeleton.json 和每个 SubmeshJson 的
+        ZZMIMergedSkeleton 块，供导入时建立全局顶点组、导出时生成合并骨骼运行时。
+        '''
+        merged_skeleton = _load_merged_skeleton_module()
+        ROLE_MERGED = merged_skeleton.ROLE_MERGED
+        SUBMESH_METADATA_KEY = merged_skeleton.SUBMESH_METADATA_KEY
+        ZZMIMergedSkeletonError = merged_skeleton.ZZMIMergedSkeletonError
+        make_submesh_metadata = merged_skeleton.make_submesh_metadata
+        plan_merged_skeleton = merged_skeleton.plan_merged_skeleton
+        validate_profile = merged_skeleton.validate_profile
+        write_profile = merged_skeleton.write_profile
+
+        workspace_folder = os.path.abspath(str(workspace_folder))
+        warnings = []
+        draws_by_ib = self._indexed_draws_by_ib()
+        candidates = []
+        for ib_hash in self.list_skinned_draw_ibs():
+            candidate = self._merged_candidate(ib_hash, draws_by_ib[ib_hash], warnings)
+            if candidate is not None:
+                candidates.append(candidate)
+        if not candidates:
+            raise ExtractError(
+                "帧分析里没有找到经过预蒙皮的角色网格。请确认是在角色出现在画面里时按 F8 抓的完整一帧。"
+            )
+        try:
+            profile, plan_warnings = plan_merged_skeleton(candidates)
+        except ZZMIMergedSkeletonError as error:
+            raise ExtractError(str(error))
+        warnings.extend(plan_warnings)
+
+        result = self.extract(
+            ib_hashes=[component["ib_hash"] for component in profile["components"]],
+            workspace_folder=workspace_folder,
+            gametype_name=gametype_name,
+            copy_textures=copy_textures,
+        )
+        warnings.extend(result.warnings)
+        written = set(result.unique_strs)
+        kept_components = []
+        for component in profile["components"]:
+            component["unique_strs"] = [
+                unique_str for unique_str in component["unique_strs"] if unique_str in written
+            ]
+            if component["unique_strs"]:
+                kept_components.append(component)
+            elif component["role"] == ROLE_MERGED:
+                raise ExtractError("骨骼合并部件 " + component["ib_hash"] + " 没有提取出任何子网格。")
+        # 只有非合并部件可能被丢掉，重新编号即可 (合并部件和锚点在前面，编号不变)
+        id_map = {component["component_id"]: index for index, component in enumerate(kept_components)}
+        for component in kept_components:
+            component["component_id"] = id_map[component["component_id"]]
+            if component["parent_component_id"] in id_map:
+                component["parent_component_id"] = id_map[component["parent_component_id"]]
+        profile["components"] = kept_components
+        profile["source_frame_dump"] = self.dump_folder
+        try:
+            profile = validate_profile(profile)
+        except ZZMIMergedSkeletonError as error:
+            raise ExtractError("骨骼合并配置无效: " + str(error))
+
+        unique_strs = []
+        json_paths = []
+        json_path_by_unique_str = {
+            os.path.splitext(os.path.basename(path))[0]: path for path in result.json_paths
+        }
+        for component in profile["components"]:
+            metadata = make_submesh_metadata(component)
+            for unique_str in component["unique_strs"]:
+                json_path = json_path_by_unique_str[unique_str]
+                submesh_json = self._load_json_file(json_path, None)
+                if not isinstance(submesh_json, dict):
+                    raise ExtractError("无法读回刚写出的子网格 JSON: " + json_path)
+                submesh_json[SUBMESH_METADATA_KEY] = metadata
+                with open(json_path, 'w', encoding='utf-8') as f:
+                    json.dump(submesh_json, f, ensure_ascii=False, indent=4)
+                unique_strs.append(unique_str)
+                json_paths.append(json_path)
+        write_profile(workspace_folder, profile)
+
+        return ExtractResult(
+            unique_strs=unique_strs,
+            json_paths=json_paths,
+            warnings=warnings,
+            workspace_folder=workspace_folder,
+        )
+
+    def _draw_by_id(self, draw_id: str):
+        for draw in self._get_draws():
+            if draw.draw_id == draw_id:
+                return draw
+        return None
+
+    def _merged_candidate(self, ib_hash: str, draws: list, warnings: list):
+        '''收集一个蒙皮部件做骨骼合并规划所需的数据；读不到骨骼表时返回 None'''
+        component = self._build_component(ib_hash, draws, warnings)
+        pose_draw = self._draw_by_id(component.pose_draw_id)
+        if pose_draw is None:
+            return None
+        palette = self._read_palette(pose_draw.draw_id)
+        if palette is None:
+            warnings.append(
+                ib_hash + " 的预蒙皮绘制没有可读的骨骼表 (vs-t0)，不参与骨骼合并。"
+                "请确认 analyse_options 含 dump_tex (或 dump_vb) 和 buf。"
+            )
+            return None
+        indices, weights = self._decode_blend(component)
+        if indices is None:
+            warnings.append(ib_hash + " 没有可读的 BLENDINDICES，不参与骨骼合并。")
+            return None
+        active = indices[weights > 0] if weights is not None else indices.ravel()
+        if active.size and int(active.max()) >= len(palette):
+            warnings.append(
+                ib_hash + " 的骨骼编号最大为 " + str(int(active.max())) + "，超出骨骼表的 "
+                + str(len(palette)) + " 根骨骼，不参与骨骼合并。"
+            )
+            return None
+        weighted_counts = numpy.bincount(
+            active.astype(numpy.int64).ravel(), minlength=len(palette)
+        ) if active.size else numpy.zeros(len(palette), dtype=numpy.int64)
+        return {
+            "ib_hash": ib_hash,
+            "unique_strs": [part.unique_str for part in component.parts],
+            "blend_vb": component.category_hash("Blend"),
+            "pose_vs": pose_draw.vs,
+            "layout_signature": self._skinning_layout_signature(component),
+            "pose_order": int(pose_draw.draw_id),
+            "vertex_count": int(component.vertex_count),
+            "pose_vertex_count": int(pose_draw.vertex_count),
+            "indices_per_vertex": int(indices.shape[1]),
+            "palette": palette,
+            "object_matrix": self._read_object_matrix(self._pick_main_draws(draws)),
+            "shape_keyed": self._is_shape_keyed(pose_draw),
+            "weighted_counts": weighted_counts,
+        }
+
+    @staticmethod
+    def _skinning_layout_signature(component: _Component) -> str:
+        '''预蒙皮绘制读取的 Position / Blend 布局 (元素名、格式、宽度)'''
+        parts = []
+        for category in component.categories:
+            if category.name not in ("Position", "Blend"):
+                continue
+            parts.append(category.name + "=" + ",".join(
+                element.name + ":" + element.format + ":" + str(element.byte_width) for element in category.elements
+            ))
+        return "|".join(parts)
+
+    def _read_palette(self, pose_draw_id: str):
+        '''预蒙皮绘制的 vs-t0: 每根骨骼 3 个 float4 (float4x3 的行)'''
+        path = self._dump_file(pose_draw_id, "vs-t0", "buf")
+        if not path or os.path.getsize(path) == 0 or os.path.getsize(path) % 48:
+            return None
+        return numpy.fromfile(path, dtype=numpy.float32).reshape(-1, 3, 4)
+
+    def _read_object_matrix(self, main_draws: list):
+        '''
+        主绘制 vs-cb1 的前 4 行是部件根骨骼的物体->世界矩阵 (行向量写法)。
+        返回列向量写法的 4x4；不是仿射矩阵 (着色器常量布局不同) 时返回 None。
+        '''
+        for draw in main_draws:
+            path = self._dump_file(draw.draw_id, "vs-cb1", "buf")
+            if not path or os.path.getsize(path) < 64:
+                continue
+            rows = numpy.fromfile(path, dtype=numpy.float32, count=16).reshape(4, 4).astype(numpy.float64)
+            if not numpy.all(numpy.isfinite(rows)):
+                continue
+            if numpy.abs(rows[0:3, 3]).max() > 1e-6 or abs(rows[3, 3] - 1.0) > 1e-6:
+                continue
+            if abs(numpy.linalg.det(rows[0:3, 0:3])) < 1e-8:
+                continue
+            return rows.T.copy()
+        return None
+
+    def _is_shape_keyed(self, pose_draw: _Draw) -> bool:
+        '''预蒙皮读的位置缓冲是本帧 GPU 写出来的 (脸部形态键)'''
+        resource_ptr = pose_draw.vb_ptr.get(0)
+        first_write = self._gpu_written_resources.get(resource_ptr) if resource_ptr else None
+        return first_write is not None and first_write <= pose_draw.draw_id
+
+    @staticmethod
+    def _decode_blend(component: _Component):
+        '''从 Blend 分类缓冲解出 (骨骼编号 (n, k), 权重 (n, k) 或 None)'''
+        blend = next((category for category in component.categories if category.name == "Blend"), None)
+        if blend is None or blend.rows is None:
+            return None, None
+        indices = None
+        weights = None
+        byte_offset = 0
+        for element in blend.elements:
+            width = int(element.byte_width)
+            raw = numpy.ascontiguousarray(blend.rows[:, byte_offset:byte_offset + width])
+            byte_offset += width
+            if element.semantic_index != 0:
+                continue
+            fmt = element.format
+            bits_match = _FORMAT_COMPONENT_RE.findall(fmt)
+            if not bits_match:
+                continue
+            bits = int(bits_match[0])
+            if element.semantic_name == "BLENDINDICES":
+                dtype = {
+                    (8, "UINT"): numpy.uint8, (16, "UINT"): numpy.uint16, (32, "UINT"): numpy.uint32,
+                    (8, "SINT"): numpy.int8, (16, "SINT"): numpy.int16, (32, "SINT"): numpy.int32,
+                }.get((bits, fmt.rsplit("_", 1)[-1]))
+                if dtype is not None:
+                    indices = raw.view(dtype).reshape(len(raw), -1).astype(numpy.int64)
+            elif element.semantic_name in ("BLENDWEIGHT", "BLENDWEIGHTS"):
+                if fmt.endswith("_FLOAT"):
+                    dtype = {16: numpy.float16, 32: numpy.float32}.get(bits)
+                    if dtype is not None:
+                        weights = raw.view(dtype).reshape(len(raw), -1).astype(numpy.float32)
+                elif fmt.endswith("_UNORM"):
+                    dtype = {8: numpy.uint8, 16: numpy.uint16}.get(bits)
+                    if dtype is not None:
+                        weights = raw.view(dtype).reshape(len(raw), -1).astype(numpy.float32)
+        if indices is not None and weights is not None and weights.shape != indices.shape:
+            weights = None
+        return indices, weights
 
     # ------------------------------------------------------------------
     # 部件构建
@@ -756,6 +1028,7 @@ class ZZMIDumpExtractor:
             categories=categories,
             parts=parts,
             pose_draw_id=pose_draw.draw_id if pose_draw is not None else "",
+            pose_vertex_count=int(pose_draw.vertex_count) if pose_draw is not None else 0,
             root_vs=pose_draw.vs if pose_draw is not None else "",
         )
         self._component_cache[ib_hash] = component
@@ -1232,6 +1505,7 @@ class ZZMIDumpExtractor:
                 "PoseDrawId": component.pose_draw_id,
                 "RootVS": component.root_vs,
                 "ComponentVertexCount": int(component.vertex_count),
+                "PoseVertexCount": int(component.pose_vertex_count),
             },
         }
         with open(json_path, 'w', encoding='utf-8') as f:
@@ -1304,6 +1578,7 @@ def _standalone_main(argv: list):
     parser.add_argument("dump_folder", help="3dmigoto 帧分析 Dump 目录 (含 log.txt)")
     parser.add_argument("ib_hashes", nargs='*', help="要提取的 DrawIB hash 列表，留空则只列出所有 DrawIB")
     parser.add_argument("--all-skinned", action='store_true', help="提取整帧所有带骨骼权重的 DrawIB (不用填 hash)")
+    parser.add_argument("--merged-skeleton", action='store_true', help="按骨骼合并流程从整帧识别角色并提取")
     parser.add_argument("--workspace", default="", help="输出工作空间目录 (提取时必填)")
     parser.add_argument("--gametype", default=DEFAULT_GAMETYPE, help="数据类型名称 (默认 " + DEFAULT_GAMETYPE + ")")
     parser.add_argument("--no-textures", action='store_true', help="不复制贴图")
@@ -1331,6 +1606,22 @@ def _standalone_main(argv: list):
             + "  blend=" + str(summary.has_blend)
             + "  textures=" + str(summary.texture_count)
         )
+
+    if args.merged_skeleton:
+        if not args.workspace:
+            print("错误: 提取时必须通过 --workspace 指定输出目录。")
+            sys.exit(2)
+        result = extractor.extract_merged_skeleton(
+            workspace_folder=args.workspace,
+            gametype_name=args.gametype,
+            copy_textures=not args.no_textures,
+        )
+        print("骨骼合并提取完成，工作空间: " + result.workspace_folder)
+        for json_path in result.json_paths:
+            print("  " + json_path)
+        for warning in result.warnings:
+            print("警告: " + warning)
+        return
 
     ib_hashes = list(args.ib_hashes)
     if args.all_skinned:

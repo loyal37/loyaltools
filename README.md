@@ -95,7 +95,7 @@ In standalone mode, when no game directory is configured, the mod is written to 
 
 ## Zenless Zone Zero workflow
 
-Select the `ZZMI` preset in the **Basic Information** panel (enable the standalone-preset override if SSMT4 is installed with another game selected). The extraction panel then shows a Frame Analysis directory, the DrawIB table, two extraction buttons, and **Import**. Zenless Zone Zero has a single level of detail, so there is no Merged Skeleton mode and no LOD mapping.
+Select the `ZZMI` preset in the **Basic Information** panel (enable the standalone-preset override if SSMT4 is installed with another game selected). In the standard workflow the extraction panel shows a Frame Analysis directory, the DrawIB table, two extraction buttons, and **Import**; the Merged Skeleton workflow is described [below](#merged-skeleton-for-zenless-zone-zero). Zenless Zone Zero has a single level of detail, so there is no LOD mapping.
 
 1. Set the Frame Analysis options in ZZMI's `d3dx.ini` so that textures are dumped losslessly, then capture a frame (`F8` in hunting mode) while the character is visible:
 
@@ -111,6 +111,17 @@ Select the `ZZMI` preset in the **Basic Information** panel (enable the standalo
 6. **Outline optimization** on the Generate Mod node (enabled by default) recomputes the outline data stored in `TEXCOORD1` from the exported geometry, as XXMI-Tools does. Disable it to export the `TEXCOORD1.xy` layer unchanged.
 
 Custom meshes need the same UV layers and colour attribute as the object they are merged into. Workspaces extracted with SSMT4 keep the original TheHerta4 INI layout.
+
+### Merged Skeleton for Zenless Zone Zero
+
+Switch the extraction panel to **Merged Skeleton** to let any part of the character use the bones of any other part, for example to move hair geometry into the body or to weight a new mesh to bones of several components. ZZMI itself is not modified; the generated mod carries its own runtime.
+
+1. Select a Frame Analysis dump and run **Extract**. No DrawIB is needed. LoyalTools picks the character from the frame: the largest skinned mesh and every component connected to it through shared bones. Components that share no bone with it, such as a Bangboo, a weapon, or other characters, are skipped and listed in the report.
+2. Zenless Zone Zero skins every component in the space of its own root bone, so the same bone has a different matrix in each component. Bones shared by two components agree in world space; LoyalTools uses one of them as an anchor to convert between the two spaces and merges the shared bones. Merged components are imported with one shared set of vertex groups, `0..bones_count-1`, recorded in `ZZMI_MergedSkeleton.json` at the workspace root.
+3. Face meshes are driven by shape keys: a compute pass rewrites their positions every frame before they are skinned, so they are not merged. Like CPU-posed components in the Endfield workflow, they keep the game's own mesh. A face connected to the blueprint only replaces its marked textures; a disconnected one generates nothing. A component that touches the character only through bones that do not move in the captured frame cannot be anchored reliably; it keeps its own vertex groups and is exported the standard way.
+4. Generate the mod. A component whose weights use only its own bones is skinned exactly as in the standard workflow. When a component uses bones of other components, the mod ships two compute shaders in `Shaders/`: each involved component copies its bone palette into a shared pool when the game skins it, and before the component that uses foreign bones is skinned, a palette in its own space is built from the pool. As in the Endfield Merged Skeleton workflow, a merged component that is removed from the blueprint is no longer drawn, so geometry moved into another component is not drawn twice; it still provides its bones when another part uses them. Faces and standalone parts are drawn by the game as usual when they are left out of the blueprint.
+
+The game uploads each component's bones right before that component's skinning draw. As in the Endfield Merged Skeleton workflow, bones that come from a component skinned later in the frame are therefore one frame old; because they are converted through a shared bone, the difference is only how far those bones move relative to that bone within one frame. The pool holds at most 1,024 bones, the limit of the game's skinning shader. Parts skinned by the game's rigid (single-index) shader keep one bone per vertex.
 
 ## Notes
 
@@ -130,6 +141,7 @@ Custom meshes need the same UV layers and colour attribute as the object they ar
 - CPU-posed components support only original-game-mesh rendering and texture replacement. They cannot export custom geometry or weights, and their overrides are generated only when the object is connected to the blueprint.
 - The updater points to `https://github.com/loyal37/loyaltools` and checks this repository's Releases for new versions.
 - Starting with v1.6.6, Merged Skeleton export keeps renamed and joined components correct at distance. A component renamed to render through another index buffer is resolved through the component marker written at import instead of its object name, so its bone IDs move into its own private pool. When a component is joined into another object, bone IDs that point at a pool no LOD draw refreshes, such as the pool of a component without an independent LOD, are redirected to the same bones in a pool that is refreshed at every LOD level where the mesh is drawn. The merged skeleton buffer also declares its bind flags explicitly, and export warns about bone IDs that no component can supply. Existing workspaces and `.blend` files can be exported again without re-extraction or re-import.
+- Starting with v1.7.1, Zenless Zone Zero supports the Merged Skeleton workflow; see [Merged Skeleton for Zenless Zone Zero](#merged-skeleton-for-zenless-zone-zero). The stream-output branch of every Zenless Zone Zero blend override now also checks the vertex count of the game's skinning draw (`DRAW_TYPE == 1 && VERTEX_COUNT == ...`): full-screen post-processing draws can leave a character's blend buffer bound, and without the check they were replaced by the character's skinning draw. Endfield workflows are unchanged.
 - Starting with v1.6.8, LOD mapping offers a **JSON match** button next to **Frame Analysis match**. It reuses the mapping stored in the workspace's JSON, including the copy kept before the full-detail model was extracted again, so re-matching no longer needs the captures. See the Merged Skeleton workflow above.
 
 ## Entry-point compatibility in v1.6.7

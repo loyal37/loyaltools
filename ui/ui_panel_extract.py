@@ -328,7 +328,10 @@ def wire_objects_into_blueprint(context, imported_entries, drawib_aliasname_dict
 
         # 将制作流程写入蓝图本身，导出时不再依赖用户额外添加 Cross IB 节点。
         # 物体上的合并标记仍作为旧蓝图的兼容检测依据。
-        tree["LoyalTools:EFMIMergedSkeleton"] = bool(merged_skeleton)
+        from ..common.zzmi_merged_skeleton import TREE_MARKER_MERGED_SKELETON as ZZMI_TREE_MARKER
+        zzmi_tree = is_zzmi_preset()
+        tree["LoyalTools:EFMIMergedSkeleton"] = bool(merged_skeleton) and not zzmi_tree
+        tree[ZZMI_TREE_MARKER] = bool(merged_skeleton) and zzmi_tree
 
         # 和打开蓝图窗口/一键导入相同的选中方式，保证"生成所选蓝图Mod"立即可用
         try:
@@ -447,7 +450,7 @@ class LoyalExtractProperties(bpy.types.PropertyGroup):
         description="普通制作保持原流程；骨骼合并会自动从整帧识别角色并建立全局顶点组",
         items=[
             ('STANDARD', "普通制作", "按 DrawIB 列表提取，使用 LoyalTools 原有制作流程"),
-            ('MERGED_SKELETON', "骨骼合并", "自动识别帧中的角色组件，使用 EFMI 1.4.1 骨骼合并流程"),
+            ('MERGED_SKELETON', "骨骼合并", "自动识别帧中的角色组件并建立全局顶点组 (终末地使用 EFMI 1.4.1 骨骼合并；绝区零由 Mod 自带的合并骨骼着色器运行，不需要修改 ZZMI)"),
         ],
         default='STANDARD',
     ) # type: ignore
@@ -608,12 +611,12 @@ class LoyalExtractFromDump(bpy.types.Operator):
         scene = context.scene
         props = scene.loyal_extract_props
 
-        # 先刷新一次全局配置：绝区零 (ZZMI) 只有普通制作流程，
-        # 即使场景里还留着终末地用过的"骨骼合并"选项也按 DrawIB 列表提取
+        # 先刷新一次全局配置，按当前游戏预设选择提取器
         GlobalConfig.read_from_main_json_ssmt4()
         zzmi_mode = is_zzmi_preset()
-        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not zzmi_mode
+        # "自动提取"只属于普通流程 (面板只在普通流程里显示它)，被调用时总是按普通流程整帧提取
         whole_frame_mode = bool(self.zzmi_whole_frame)
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not whole_frame_mode
         if whole_frame_mode and not zzmi_mode:
             self.report({'ERROR'}, "自动提取只用于绝区零(ZZMI)，当前游戏预设为 " + (GlobalConfig.logic_name or "未设置") + "。")
             return {'CANCELLED'}
@@ -638,7 +641,7 @@ class LoyalExtractFromDump(bpy.types.Operator):
         # 3.提取只支持终末地(EFMI)和绝区零(ZZMI)，其它预设下警告但仍按终末地规则执行
         if GlobalConfig.logic_name not in ("", LogicName.EFMI, LogicName.ZZMI):
             if merged_skeleton_mode:
-                self.report({'ERROR'}, "骨骼合并仅支持终末地(EFMI)，当前游戏预设为 " + GlobalConfig.logic_name + "。")
+                self.report({'ERROR'}, "骨骼合并仅支持终末地(EFMI)和绝区零(ZZMI)，当前游戏预设为 " + GlobalConfig.logic_name + "。")
                 return {'CANCELLED'}
             self.report({'WARNING'}, "当前游戏预设为 " + GlobalConfig.logic_name + "，DrawIB提取只支持终末地(EFMI)和绝区零(ZZMI)，结果可能不正确。")
 
@@ -653,7 +656,12 @@ class LoyalExtractFromDump(bpy.types.Operator):
             return {'CANCELLED'}
 
         try:
-            if zzmi_mode:
+            if zzmi_mode and merged_skeleton_mode:
+                result = get_cached_zzmi_extractor(dump_folder).extract_merged_skeleton(
+                    workspace_folder=workspace_folder,
+                    copy_textures=True,
+                )
+            elif zzmi_mode:
                 zzmi_extractor = get_cached_zzmi_extractor(dump_folder)
                 if whole_frame_mode:
                     ib_hashes = zzmi_extractor.list_skinned_draw_ibs()
@@ -964,7 +972,7 @@ class LoyalImportWorkspace(bpy.types.Operator):
 
         props = context.scene.loyal_extract_props
         GlobalConfig.read_from_main_json_ssmt4()
-        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not is_zzmi_preset()
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
         workspace_folder = GlobalConfig.path_workspace_folder()
         if workspace_folder == "":
             self.report({'ERROR'}, "未解析到工作空间，请在\"基础信息\"面板中把工作空间来源切换为自定义目录并填写路径。")
@@ -989,7 +997,19 @@ class LoyalImportWorkspace(bpy.types.Operator):
         # 普通模式按 Import.json；骨骼合并模式严格按 profile 的组件顺序导入，
         # 避免同一工作空间中旧的普通提取数据混入全局 VG 地址空间。
         ordered_unique_strs = list(import_map.keys())
-        if merged_skeleton_mode:
+        if merged_skeleton_mode and is_zzmi_preset():
+            try:
+                from ..common.zzmi_merged_skeleton import load_profile as load_zzmi_profile
+                merged_profile = load_zzmi_profile(workspace_folder, required=True)
+                ordered_unique_strs = [
+                    unique_str
+                    for component in merged_profile["components"]
+                    for unique_str in component["unique_strs"]
+                ]
+            except Exception as e:
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
+        elif merged_skeleton_mode:
             try:
                 from ..common.efmi_merged_skeleton import load_profile
                 merged_profile = load_profile(workspace_folder, required=True)
@@ -1262,11 +1282,11 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         # 基础信息面板折叠时不会刷新游戏预设，这里自己读一次 (带 mtime 缓存，不写任何属性)
         GlobalConfig.read_from_main_json_ssmt4()
 
-        # 绝区零只有普通制作 (没有骨骼合并和 LOD)，不显示流程切换
-        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON' and not is_zzmi_preset()
-        if not is_zzmi_preset():
-            layout.prop(props, "workflow_mode", expand=True)
-        if merged_skeleton_mode:
+        # 绝区零只有 LOD0，骨骼合并模式下没有 LOD 映射
+        zzmi_mode = is_zzmi_preset()
+        merged_skeleton_mode = props.workflow_mode == 'MERGED_SKELETON'
+        layout.prop(props, "workflow_mode", expand=True)
+        if merged_skeleton_mode and not zzmi_mode:
             layout.prop(props, "frame_dump_folder", text="LOD0")
         else:
             layout.prop(props, "frame_dump_folder")
@@ -1293,11 +1313,11 @@ class LOYAL_PT_ExtractPanel(bpy.types.Panel):
         extract_row = layout.row(align=True)
         extract_row.scale_y = 1.5
         extract_row.operator(LoyalExtractFromDump.bl_idname, text="提取", icon='IMPORT')
-        if is_zzmi_preset():
-            # 绝区零的两种提取方式各一个按钮: 按 DrawIB 表 / 整帧自动
+        if zzmi_mode and not merged_skeleton_mode:
+            # 绝区零普通流程的两种提取方式各一个按钮: 按 DrawIB 表 / 整帧自动
             extract_row.operator(LoyalExtractZZMIWholeFrame.bl_idname, text="自动提取", icon='OUTLINER_OB_ARMATURE')
 
-        if merged_skeleton_mode:
+        if merged_skeleton_mode and not zzmi_mode:
             main_import_row = layout.row()
             main_import_row.scale_y = 1.2
             main_import_row.operator(

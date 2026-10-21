@@ -9,6 +9,7 @@ from ...common.m_ini_helper import M_IniHelper
 from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .unity import ExportUnity
+from .zzmi_merged_export import ZZMIMergedSkeletonExport
 from ...common.zzmi_outline import compute_outline_texcoord
 from ...extract.zzmi_dump_extractor import FRAME_EXTRACT_KEY
 from ...utils.timer_utils import TimerUtils
@@ -50,6 +51,9 @@ class ExportZZMI(ExportUnity):
         print(f"[CrossIB ZZMI] 初始化: has_cross_ib={self.has_cross_ib}")
         print(f"[CrossIB ZZMI] cross_ib_info_dict={self.cross_ib_info_dict}")
         print(f"[CrossIB ZZMI] cross_ib_object_names={self.cross_ib_object_names}")
+
+        # 骨骼合并 (由提取时写入的蓝图/物体标记自动启用，普通工作空间不受影响)
+        self.merged_skeleton = ZZMIMergedSkeletonExport(blueprint_model, self.drawib_model_list)
 
     def _get_submesh_ib_key(self, submesh_model, draw_ib):
         return f"{draw_ib}_{submesh_model.match_first_index}"
@@ -135,8 +139,18 @@ class ExportZZMI(ExportUnity):
     def generate_buffer_files(self, output_folder: str):
         if GlobalProterties.zzz_outline_optimization():
             for drawib_model in self.drawib_model_list:
-                self._optimize_outline(drawib_model)
-        super().generate_buffer_files(output_folder)
+                if not self.merged_skeleton.is_shape_keyed(drawib_model.draw_ib):
+                    self._optimize_outline(drawib_model)
+        # 骨骼合并下脸部保持游戏原网格，不写它的缓冲
+        all_drawib_models = self.drawib_model_list
+        self.drawib_model_list = [
+            drawib_model for drawib_model in all_drawib_models
+            if not self.merged_skeleton.is_shape_keyed(drawib_model.draw_ib)
+        ]
+        try:
+            super().generate_buffer_files(output_folder)
+        finally:
+            self.drawib_model_list = all_drawib_models
 
     def add_frame_extract_vb_sections(self, ini_builder: M_IniBuilder, drawib_model, frame_extract: dict):
         '''
@@ -175,10 +189,23 @@ class ExportZZMI(ExportUnity):
                 section.append("\t" + slot_dict["Texcoord"] + " = Resource" + draw_ib + "Texcoord")
             section.append("\t" + slot_dict["Blend"] + " = Resource" + draw_ib + "Blend")
             section.append("\tchecktextureoverride = ib")
-            section.append("elif DRAW_TYPE == 1")
-            section.append("\t" + slot_dict["Position"] + " = Resource" + draw_ib + "Position")
-            section.append("\t" + slot_dict["Blend"] + " = Resource" + draw_ib + "Blend")
-            section.append("\tdraw = " + str(drawib_model.draw_number) + ", 0")
+            # 只认这个部件真正的预蒙皮绘制: 后处理的全屏绘制 (Draw(3)) 会残留角色的 vb2，
+            # ZZMI 对所有 DRAW_TYPE 1 的绘制都检查 vb2，不判断顶点数就会把那些绘制换掉
+            vertex_count = int(
+                frame_extract.get("PoseVertexCount") or frame_extract.get("ComponentVertexCount") or 0
+            )
+            if vertex_count > 0:
+                section.append("elif DRAW_TYPE == 1 && VERTEX_COUNT == " + str(vertex_count))
+            else:
+                section.append("elif DRAW_TYPE == 1")
+            merged_lines = self.merged_skeleton.draw_type1_lines(drawib_model, slot_dict)
+            if merged_lines is not None:
+                for line in merged_lines:
+                    section.append("\t" + line)
+            else:
+                section.append("\t" + slot_dict["Position"] + " = Resource" + draw_ib + "Position")
+                section.append("\t" + slot_dict["Blend"] + " = Resource" + draw_ib + "Blend")
+                section.append("\tdraw = " + str(drawib_model.draw_number) + ", 0")
             section.append("endif")
             section.new_line()
 
@@ -359,7 +386,50 @@ class ExportZZMI(ExportUnity):
 
         ini_builder.append_section(texture_override_ib_section)
 
+    def add_shape_keyed_texture_sections(self, ini_builder: M_IniBuilder, drawib_model):
+        '''
+        骨骼合并下的脸部 (形态键驱动): 不替换网格，游戏照常绘制原网格并叠加表情，
+        只按部件把标记的贴图交给 SlotFix。和 EFMI 骨骼合并里已连接的 CPU 组件一样。
+        '''
+        print(
+            "[ZZMI骨骼合并] " + drawib_model.draw_ib + " 是形态键驱动的部件 (脸部表情)，"
+            "保持游戏原网格，只替换贴图；对它的网格修改不会导出"
+        )
+        section = M_IniSection(M_SectionType.TextureOverrideIB)
+        for submesh_model in drawib_model.submesh_model_list:
+            texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            if GlobalProterties.forbid_auto_texture_ini() or not texture_markup_info_list:
+                continue
+            lines = []
+            uses_slot_fix = False
+            for texture_markup_info in texture_markup_info_list:
+                if texture_markup_info.mark_type != "Slot":
+                    continue
+                slot_fix_resource_name = self.SLOT_FIX_RESOURCE_NAME_DICT.get(texture_markup_info.mark_name)
+                if slot_fix_resource_name is not None:
+                    lines.append(slot_fix_resource_name + " = ref " + texture_markup_info.get_resource_name())
+                    uses_slot_fix = True
+                else:
+                    lines.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+            if uses_slot_fix:
+                lines.append(r"run = CommandList\ZZMI\SetTextures")
+            if any(texture_markup_info.mark_type == "Hash" for texture_markup_info in texture_markup_info_list):
+                lines.append("run = CommandListSkinTexture")
+            if not lines:
+                continue
+            section.append("[TextureOverride_" + drawib_model.get_submesh_texture_override_suffix(submesh_model) + "]")
+            section.append("hash = " + drawib_model.draw_ib)
+            section.append("match_first_index = " + str(submesh_model.match_first_index))
+            if int(submesh_model.match_index_count) > 0:
+                section.append("match_index_count = " + str(submesh_model.match_index_count))
+            for line in lines:
+                section.append(line)
+            section.new_line()
+        ini_builder.append_section(section)
+
     def export(self):
+        self.merged_skeleton.prepare_blend_buffers()
+
         TimerUtils.start_stage("缓冲文件生成")
         self.generate_buffer_files(GlobalConfig.path_generatemod_buffer_folder())
         TimerUtils.end_stage("缓冲文件生成")
@@ -382,6 +452,12 @@ class ExportZZMI(ExportUnity):
         M_IniHelper.generate_hash_style_texture_ini(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)
         self._integrate_object_swap_ini_hook(ini_builder)
         for drawib_model in self.drawib_model_list:
+            if self.merged_skeleton.is_shape_keyed(drawib_model.draw_ib):
+                self.add_shape_keyed_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
+                M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
+                GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
+                continue
             frame_extract = self._get_frame_extract_info(drawib_model)
             if frame_extract is not None:
                 self.add_unity_vs_texture_override_vlr_section(
@@ -398,6 +474,9 @@ class ExportZZMI(ExportUnity):
             self.add_resource_texture_sections(ini_builder=ini_builder, drawib_model=drawib_model)
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
+
+        self.merged_skeleton.add_runtime_sections(ini_builder)
+        self.merged_skeleton.write_shaders(GlobalConfig.path_generate_mod_folder())
 
         M_IniHelper.add_branch_key_sections(ini_builder=ini_builder, key_name_mkey_dict=self.blueprint_model.keyname_mkey_dict)
         M_IniHelper.add_shapekey_ini_sections(ini_builder=ini_builder, drawib_drawibmodel_dict=drawib_drawibmodel_dict)

@@ -136,7 +136,8 @@ def main():
             "\tvb1 = Resource" + body_ib + "Texcoord",
             "\tvb2 = Resource" + body_ib + "Blend",
             "\tchecktextureoverride = ib",
-            "elif DRAW_TYPE == 1",
+            # Only the real skinning draw: full-screen passes keep the character's vb2 bound.
+            "elif DRAW_TYPE == 1 && VERTEX_COUNT == 29",
             "\tvb0 = Resource" + body_ib + "Position",
             "\tvb2 = Resource" + body_ib + "Blend",
             "\tdraw = 29, 0",
