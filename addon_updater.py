@@ -1276,7 +1276,7 @@ class SingletonUpdater:
 
         # Get tags from repository
         self.get_tags()
-        
+
         if not self._tags:
             self.print_verbose("No tags found")
             self._json["last_check"] = str(datetime.now())
@@ -1286,15 +1286,15 @@ class SingletonUpdater:
         # Find latest version
         latest_tag = None
         latest_version = ()
-        
+
         for tag in self._tags:
             if "name" not in tag:
                 continue
-            
+
             version = self.version_tuple_from_text(tag["name"])
             if not isinstance(version, tuple) or not version:
                 continue
-            
+
             if version > latest_version:
                 latest_version = version
                 latest_tag = tag
@@ -1320,7 +1320,7 @@ class SingletonUpdater:
 
         self._json["last_check"] = str(datetime.now())
         self.save_updater_json()
-        
+
         return (self._update_ready, self._update_version, self._update_link)
 
     def set_tag(self, name):

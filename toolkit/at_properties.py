@@ -7,7 +7,7 @@ def update_shape_key_value(self, context):
     """当UI滑块变动时，更新所有选中物体上对应的形态键值"""
     shape_key_name = self.name
     new_value = self.value
-    
+
     for obj in context.selected_objects:
         if obj.type == 'MESH' and obj.data.shape_keys:
             if shape_key_name in obj.data.shape_keys.key_blocks:
@@ -53,18 +53,18 @@ class ATP_UL_FrameShapeKeyList(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname, index):
         if self.layout_type in {'DEFAULT', 'COMPACT'}:
             row = layout.row(align=True)
-            
+
             if item.is_processed:
                 row.label(icon='CHECKMARK', text="")
             else:
                 row.label(icon='DOT', text="")
-            
+
             row.prop(item, "end_frame", text="帧", emboss=False)
             row.prop(item, "shape_key_name", text="", emboss=False)
-            
+
             op = row.operator("atp.remove_frame_shape_key_pair", text="", icon='X')
             op.index = index
-            
+
         elif self.layout_type in {'GRID'}:
             layout.alignment = 'CENTER'
             layout.label(text=f"{item.end_frame}: {item.shape_key_name}")
@@ -72,7 +72,7 @@ class ATP_UL_FrameShapeKeyList(bpy.types.UIList):
 
 class ATP_Properties(bpy.types.PropertyGroup):
     """插件的全局属性"""
-    
+
     shape_key_list: bpy.props.CollectionProperty(type=ATP_ShapeKeyItem, name="形态键列表")
     shape_key_list_index: bpy.props.IntProperty(name="形态键列表索引", default=0)
     sk_add_new_name: bpy.props.StringProperty(name="形态键名称", default="NewKey", description="要批量添加或删除的形态键的名称")
@@ -98,7 +98,7 @@ class ATP_Properties(bpy.types.PropertyGroup):
 
     be_start_frame: bpy.props.IntProperty(name="起始帧", default=1, min=1, description="自动化流程从指定的帧数开始执行")
     be_loop_count: bpy.props.IntProperty(name="结束帧", default=15, min=1, description="自动化流程执行的总次数 (作为结束帧)")
-    
+
     be_ini_file_prefix: bpy.props.StringProperty(name="INI前缀", default="filename",
                                                  description="重命名后的.ini文件的前缀")
     be_object_prefix: bpy.props.StringProperty(name="物体前缀", default="",
@@ -136,7 +136,7 @@ class ATP_Properties(bpy.types.PropertyGroup):
     abc_transfer_vertex_groups: bpy.props.BoolProperty(name="传递顶点组", default=True,
                                                        description="将原物体的顶点组和权重传递给烘焙后的物体（仅限单选物体）")
 
-    shape_diff_key_name: bpy.props.StringProperty(name="形态键名称", default="", 
+    shape_diff_key_name: bpy.props.StringProperty(name="形态键名称", default="",
                                                  description="新形态键的名称（留空则使用目标物体名称）")
 
     copy_sk_rotation_x: bpy.props.FloatProperty(name="X轴旋转(度)", default=0.0,
@@ -147,7 +147,7 @@ class ATP_Properties(bpy.types.PropertyGroup):
                                                  description="目标物体相对于源物体在Z轴的旋转角度（度）")
     copy_sk_use_manual_rotation: bpy.props.BoolProperty(name="使用手动旋转", default=False,
                                                        description="是否使用手动输入的旋转角度来校正形态键")
-    
+
     frame_shape_key_pairs: bpy.props.CollectionProperty(
         type=ATP_FrameShapeKeyPair,
         name="帧/形态键对列表",

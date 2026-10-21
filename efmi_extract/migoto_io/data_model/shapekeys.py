@@ -27,7 +27,7 @@ class ShapeKeyBatchBuilder:
     def get_object_shapekeys(self, obj: bpy.types.Object) -> tuple[dict[int, str], dict[str, numpy.ndarray]]:
         shapekey_pattern = re.compile(r'.*(?:deform|custom)[_ -]*(\d+).*')
         shapekey_ids = {}
-        
+
         for shapekey in obj.data.shape_keys.key_blocks:
             match = shapekey_pattern.findall(shapekey.name.lower())
             if len(match) == 0:
@@ -41,21 +41,21 @@ class ShapeKeyBatchBuilder:
         shapekeys = self.data_extractor.get_shapekey_data(obj, names_filter=list(shapekey_ids.values()), deduct_basis=True)
 
         return shapekey_ids, shapekeys
-    
+
     def build_shapekey_batches(
         self,
         shapekey_ids: dict[int, str],
         shapekeys: dict[str, numpy.ndarray],
         vertex_ids: numpy.ndarray
     ) -> list[ShapeKeyBatch]:
-        
+
         max_key_id = max(shapekey_ids.keys())
         batch_count = max(1, math.ceil(max_key_id / 126))
 
         total_vertex_count = 0;
 
         batches = []
-        
+
         for batch_id in range(batch_count):
 
             batch = ShapeKeyBatch()
@@ -66,7 +66,7 @@ class ShapeKeyBatchBuilder:
             batch.shapekey_offsets.append(0)
 
             shapekeyed_vertex_count = 0
-            
+
             # Single batch contains up to 127 shapekeys (since first value is always 0)
             # So 254 shapekeys should be divided to 2 batches:
             # Batch 0: from 0   to 126 (aka range(0,   127))
@@ -95,19 +95,19 @@ class ShapeKeyBatchBuilder:
             batch.vertex_count = shapekeyed_vertex_count
 
             batches.append(batch)
-    
+
         return batches
-    
+
     def get_shapekey_batches(self, obj: bpy.types.Object, vertex_ids: numpy.ndarray) -> list[ShapeKeyBatch]:
         if obj.data.shape_keys is None or len(getattr(obj.data.shape_keys, 'key_blocks', [])) == 0:
             print(f'No shapekeys found to process!')
             return []
-        
+
         shapekey_ids, shapekeys = self.get_object_shapekeys(obj)
 
         if len(shapekeys) == 0:
             return []
-        
+
         batches = self.build_shapekey_batches(shapekey_ids, shapekeys, vertex_ids)
 
         return batches
@@ -157,13 +157,13 @@ class ShapeKeyData:
         self.batch_configs[4:8] = numpy.array([*dequantization_scales, 0.0], dtype=numpy.float32).view(numpy.uint32)
 
     @classmethod
-    def from_batches(cls, batches: list[ShapeKeyBatch]): 
+    def from_batches(cls, batches: list[ShapeKeyBatch]):
         batch_configs, vertex_ids, position_deltas = [], [], []
 
         batch_configs += [0, 0, 0, 0] * 2
 
         for batch in batches:
-            # Each batch config has len of 33, where last entry is [quantization_scales.xyz, batch_vertex_offset] 
+            # Each batch config has len of 33, where last entry is [quantization_scales.xyz, batch_vertex_offset]
             batch_configs += [batch.vertex_offset, 0, 0, 0] + batch.shapekey_offsets
             vertex_ids += batch.vertex_ids
             position_deltas += batch.position_deltas

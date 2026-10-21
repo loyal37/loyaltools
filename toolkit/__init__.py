@@ -1,7 +1,7 @@
 import bpy
 from .model_operators import model_operators_list
 from .ui_panel_toolkit import (
-    ToolkitPanel, 
+    ToolkitPanel,
     VGToolsPanel,
     BMTP_MainPanel,
     BMTP_BoneControlPanel,
@@ -134,180 +134,180 @@ __all__ = [
 
 def register():
     print("[LoyalTools] 注册工具集...")
-    
+
     for op_class in vg_properties_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册属性: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册属性失败: {op_class.__name__} - {e}")
-    
+
     bpy.types.Scene.vg_props = bpy.props.PointerProperty(type=vg_properties_list[-1])
     bpy.types.Object.vg_backups = bpy.props.CollectionProperty(type=vg_properties_list[0])
     bpy.types.Object.vg_backups_index = bpy.props.IntProperty(name="备份列表索引")
-    
+
     for op_class in model_operators_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册失败: {op_class.__name__} - {e}")
-    
+
     for op_class in vg_backup_operators:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册失败: {op_class.__name__} - {e}")
-    
+
     for op_class in vg_create_operators:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册失败: {op_class.__name__} - {e}")
-    
+
     for op_class in vg_weight_adjust_operators:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_properties_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP属性: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP属性失败: {op_class.__name__} - {e}")
-    
+
     bpy.types.Scene.bmtp_props = bpy.props.PointerProperty(type=bmtp_properties_list[2])
-    
+
     for op_class in bmtp_bone_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP骨骼工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP骨骼工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_weight_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP权重工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP权重工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_clean_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP清理工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP清理工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_material_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP材质工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP材质工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_collection_linker_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP集合关联工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP集合关联工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_mesh_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP网格工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP网格工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_modifier_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP修改器工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP修改器工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in bmtp_uv_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册BMTP UV工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册BMTP UV工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_properties_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT属性: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT属性失败: {op_class.__name__} - {e}")
-    
+
     bpy.utils.register_class(tt_material_preview_list[0])
     print(f"[LoyalTools]   已注册TT材质预览项: {tt_material_preview_list[0].__name__}")
-    
+
     bpy.types.Scene.texture_tools_props = bpy.props.PointerProperty(type=tt_properties_list[-1])
     bpy.types.Scene.material_preview_list = bpy.props.CollectionProperty(type=tt_material_preview_list[0])
-    
+
     for op_class in tt_dependency_check_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT依赖检查: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT依赖检查失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_dds_conversion_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT DDS转换: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT DDS转换失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_normal_map_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT法线贴图: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT法线贴图失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_color_bake_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT颜色烘焙: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT颜色烘焙失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_alpha_extract_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT Alpha提取: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT Alpha提取失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_lightmap_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT光照贴图: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT光照贴图失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_material_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT材质工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT材质工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in tt_material_preview_list[1:]:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册TT材质预览: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册TT材质预览失败: {op_class.__name__} - {e}")
-    
+
     print("[LoyalTools] 注册动画处理工具...")
     for op_class in at_properties_list:
         try:
@@ -315,72 +315,72 @@ def register():
             print(f"[LoyalTools]   已注册AT属性: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT属性失败: {op_class.__name__} - {e}")
-    
+
     bpy.types.Scene.atp_props = bpy.props.PointerProperty(type=at_properties_list[-1])
-    
+
     for op_class in at_shape_key_control_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT形态键控制: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT形态键控制失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_shape_key_operations_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT形态键操作: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT形态键操作失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_shape_key_creation_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT形态键创建: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT形态键创建失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_alembic_tools_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT Alembic工具: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT Alembic工具失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_multi_frame_split_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT多帧拆分: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT多帧拆分失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_batch_export_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT批量导出: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT批量导出失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_shape_key_export_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT形态键导出: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT形态键导出失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_animation_export_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT动画导出: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT动画导出失败: {op_class.__name__} - {e}")
-    
+
     for op_class in at_buffer_merge_list:
         try:
             bpy.utils.register_class(op_class)
             print(f"[LoyalTools]   已注册AT缓冲合并: {op_class.__name__}")
         except Exception as e:
             print(f"[LoyalTools]   注册AT缓冲合并失败: {op_class.__name__} - {e}")
-    
+
     bpy.utils.register_class(ToolkitPanel)
     bpy.utils.register_class(VGToolsPanel)
     bpy.utils.register_class(BMTP_MainPanel)
@@ -402,7 +402,7 @@ def register():
     bpy.utils.register_class(TT_MaterialToolsPanel)
     bpy.utils.register_class(TT_LightmapPanel)
     bpy.utils.register_class(TT_MaterialPreviewPanel)
-    
+
     bpy.utils.register_class(ATP_PT_MainPanel)
     bpy.utils.register_class(ATP_PT_ShapeKeyTools)
     bpy.utils.register_class(ATP_PT_AlembicTools)
@@ -413,7 +413,7 @@ def register():
     bpy.utils.register_class(ATP_PT_ShapeKeyAnimationExport)
     bpy.utils.register_class(ATP_PT_AutomationShapeKeyExport)
     bpy.utils.register_class(ATP_PT_AutomationBufferMerge)
-    
+
     print("[LoyalTools] 工具集注册完成")
 
 def unregister():
@@ -427,7 +427,7 @@ def unregister():
     bpy.utils.unregister_class(ATP_PT_AlembicTools)
     bpy.utils.unregister_class(ATP_PT_ShapeKeyTools)
     bpy.utils.unregister_class(ATP_PT_MainPanel)
-    
+
     bpy.utils.unregister_class(TT_MaterialPreviewPanel)
     bpy.utils.unregister_class(TT_LightmapPanel)
     bpy.utils.unregister_class(TT_MaterialToolsPanel)
@@ -449,219 +449,219 @@ def unregister():
     bpy.utils.unregister_class(BMTP_MainPanel)
     bpy.utils.unregister_class(VGToolsPanel)
     bpy.utils.unregister_class(ToolkitPanel)
-    
+
     for op_class in reversed(at_buffer_merge_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_animation_export_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_shape_key_export_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_batch_export_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_multi_frame_split_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_alembic_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_shape_key_creation_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_shape_key_operations_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(at_shape_key_control_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     if hasattr(bpy.types.Scene, 'atp_props'):
         del bpy.types.Scene.atp_props
-    
+
     for op_class in reversed(at_properties_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_material_preview_list[1:]):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_material_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_lightmap_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_alpha_extract_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_color_bake_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_normal_map_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_dds_conversion_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(tt_dependency_check_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     if hasattr(bpy.types.Scene, 'material_preview_list'):
         del bpy.types.Scene.material_preview_list
     if hasattr(bpy.types.Scene, 'texture_tools_props'):
         del bpy.types.Scene.texture_tools_props
-    
+
     bpy.utils.unregister_class(tt_material_preview_list[0])
-    
+
     for op_class in reversed(tt_properties_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_uv_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_modifier_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_mesh_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_collection_linker_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_material_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_clean_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_weight_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(bmtp_bone_tools_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     if hasattr(bpy.types.Scene, 'bmtp_props'):
         del bpy.types.Scene.bmtp_props
-    
+
     for op_class in reversed(bmtp_properties_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(vg_weight_adjust_operators):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(vg_create_operators):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(vg_backup_operators):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     for op_class in reversed(model_operators_list):
         try:
             bpy.utils.unregister_class(op_class)
         except Exception:
             pass
-    
+
     if hasattr(bpy.types.Object, 'vg_backups_index'):
         del bpy.types.Object.vg_backups_index
     if hasattr(bpy.types.Object, 'vg_backups'):
         del bpy.types.Object.vg_backups
     if hasattr(bpy.types.Scene, 'vg_props'):
         del bpy.types.Scene.vg_props
-    
+
     for op_class in reversed(vg_properties_list):
         try:
             bpy.utils.unregister_class(op_class)

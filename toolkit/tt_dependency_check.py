@@ -17,7 +17,7 @@ class TT_OT_ensure_dependencies(bpy.types.Operator):
     installation_finished = False
     installation_success = False
     installation_message = ""
-    
+
     def install_deps(self):
         try:
             python_exe = sys.executable
@@ -31,7 +31,7 @@ class TT_OT_ensure_dependencies(bpy.types.Operator):
             self.installation_message = f"安装失败！\n\n错误信息: {error_msg}\n\n解决方案：\n1. 确认网络连接正常。\n2. 【以管理员身份】重新启动Blender重试。"
         self.installation_finished = True
         return 0.1
-    
+
     def modal(self, context, event):
         if event.type == 'TIMER':
             if self.installation_finished:
@@ -39,7 +39,7 @@ class TT_OT_ensure_dependencies(bpy.types.Operator):
                 context.window_manager.event_timer_remove(self._timer)
                 return {'FINISHED'}
         return {'PASS_THROUGH'}
-    
+
     def execute(self, context):
         if all(is_dependency_installed(dep) for dep in REQUIRED_DEPS):
             self.report({'INFO'}, "所有依赖项均已安装。")
@@ -51,10 +51,10 @@ class TT_OT_ensure_dependencies(bpy.types.Operator):
         context.window_manager.modal_handler_add(self)
         self.report({'INFO'}, f"开始安装 {', '.join(REQUIRED_DEPS)}... 请稍候。")
         return {'RUNNING_MODAL'}
-    
+
     def show_popup(self):
         def draw_popup(menu, context):
-            for line in self.installation_message.split('\n'): 
+            for line in self.installation_message.split('\n'):
                 menu.layout.label(text=line)
         bpy.context.window_manager.popup_menu(draw_popup, title="安装结果", icon='INFO')
 

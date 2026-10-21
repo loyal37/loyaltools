@@ -10,14 +10,14 @@ from .dxgi_format import DXGIFormat, DXGIType
 class BlenderDataImporter:
 
     def set_data(self,
-                 obj: bpy.types.Object, 
-                 mesh: bpy.types.Mesh, 
+                 obj: bpy.types.Object,
+                 mesh: bpy.types.Mesh,
                  index_buffer: NumpyBuffer,
                  vertex_buffer: NumpyBuffer,
-                 semantic_converters: Dict[AbstractSemantic, List[callable]], 
+                 semantic_converters: Dict[AbstractSemantic, List[callable]],
                  format_converters: Dict[AbstractSemantic, List[callable]],
                  legacy_vertex_colors: bool = False):
-        
+
         buffer_semantic = index_buffer.layout.get_element(AbstractSemantic(Semantic.Index))
         index_data = self.get_semantic_data(index_buffer, buffer_semantic, format_converters, semantic_converters)
 
@@ -32,14 +32,14 @@ class BlenderDataImporter:
         texcoords = {}
         shapekeys = {}
         normals = None
-        
+
         for buffer_semantic in vertex_buffer.layout.semantics:
             semantic = buffer_semantic.abstract.enum
 
             # Skip unknown data or tangents import (tangents are recalculated on export)
             if semantic in [Semantic.Unknown, Semantic.Tangent, Semantic.BitangentSign]:
                 continue
-            
+
             # Get converted data from vertex buffer
             data = self.get_semantic_data(vertex_buffer, buffer_semantic, format_converters, semantic_converters)
 
@@ -75,14 +75,14 @@ class BlenderDataImporter:
 
         return vertex_ids
 
-    def get_semantic_data(self, 
-                          buffer: NumpyBuffer, 
-                          buffer_semantic: BufferSemantic, 
-                          format_converters: Dict[AbstractSemantic, List[callable]], 
+    def get_semantic_data(self,
+                          buffer: NumpyBuffer,
+                          buffer_semantic: BufferSemantic,
+                          format_converters: Dict[AbstractSemantic, List[callable]],
                           semantic_converters: Dict[AbstractSemantic, List[callable]]):
-        
+
         data = buffer.get_field(buffer_semantic.get_name())
-    
+
         for converter in format_converters.get(buffer_semantic.abstract, []):
             try:
                 data = converter(data)
@@ -94,7 +94,7 @@ class BlenderDataImporter:
         if buffer_semantic.format.dxgi_type in [DXGIType.UNORM16, DXGIType.UNORM8, DXGIType.SNORM16, DXGIType.SNORM8]:
             if not numpy.issubdtype(data.dtype, numpy.floating):
                 data = buffer_semantic.format.type_decoder(data)
-            
+
         for converter in semantic_converters.get(buffer_semantic.abstract, []):
             try:
                 data = converter(data)
@@ -103,11 +103,11 @@ class BlenderDataImporter:
                     data = converter(data.copy())
 
         return data
-   
-    def import_faces(self, 
-                     mesh: bpy.types.Mesh, 
+
+    def import_faces(self,
+                     mesh: bpy.types.Mesh,
                      index_data: numpy.ndarray):
-        
+
         mesh.loops.add(len(index_data) * 3)
         mesh.polygons.add(len(index_data))
 
@@ -116,17 +116,17 @@ class BlenderDataImporter:
         mesh.polygons.foreach_set('loop_start', [x*3 for x in range(len(index_data))])
         mesh.polygons.foreach_set('loop_total', [3] * len(index_data))
 
-    def import_positions(self, 
-                         mesh: bpy.types.Mesh, 
+    def import_positions(self,
+                         mesh: bpy.types.Mesh,
                          position_data: numpy.ndarray):
-        
+
         mesh.vertices.foreach_set('co', position_data.ravel())
-        
-    def import_vertex_groups(self, 
-                             obj: bpy.types.Object, 
-                             semantic_vg_indices: Dict[int, numpy.ndarray], 
+
+    def import_vertex_groups(self,
+                             obj: bpy.types.Object,
+                             semantic_vg_indices: Dict[int, numpy.ndarray],
                              semantic_vg_weights: Dict[int, numpy.ndarray]):
-        
+
         vg_index_offset = 0
 
         for semantic_index in sorted(semantic_vg_indices.keys()):
@@ -148,7 +148,7 @@ class BlenderDataImporter:
             num_vertex_groups = vg_indices.max()
 
             semantic_prefix = '' if semantic_index == 0 else f'{semantic_index}_'
-            
+
             for i in range(num_vertex_groups + 1):
                 obj.vertex_groups.new(name=semantic_prefix+str(i))
 
@@ -157,16 +157,16 @@ class BlenderDataImporter:
                     if weight == 0.0:
                         continue
                     obj.vertex_groups[vg_index_offset+index].add((vertex_id,), weight, 'REPLACE')
-            
+
             vg_index_offset += num_vertex_groups
 
-    def import_colors(self, 
-                      mesh: bpy.types.Mesh, 
-                      color_name: str, 
-                      color_data: numpy.ndarray, 
+    def import_colors(self,
+                      mesh: bpy.types.Mesh,
+                      color_name: str,
+                      color_data: numpy.ndarray,
                       vertex_ids: numpy.ndarray,
                       legacy_vertex_colors: bool = False):
-        
+
         if legacy_vertex_colors:
             mesh.vertex_colors.new(name=color_name)
             color_layer = mesh.vertex_colors[color_name].data
@@ -174,15 +174,15 @@ class BlenderDataImporter:
         else:
             color_attribute = mesh.color_attributes.new(name=color_name, type='FLOAT_COLOR', domain='CORNER')
             color_attribute.data.foreach_set('color', color_data[vertex_ids].flatten())
-    
-    def import_attribute(self, 
-                      mesh: bpy.types.Mesh, 
-                      attribute_name: str, 
+
+    def import_attribute(self,
+                      mesh: bpy.types.Mesh,
+                      attribute_name: str,
                       attribute_data: numpy.ndarray):
-        
+
         dtype = attribute_data.dtype.type
         columns_count = attribute_data.shape[1] if attribute_data.ndim >= 2 else 1
-            
+
         assert issubclass(dtype, numpy.integer) or issubclass(dtype, numpy.floating)
 
         if issubclass(dtype, numpy.integer):
@@ -203,11 +203,11 @@ class BlenderDataImporter:
         vertex_attribute = mesh.attributes.new(name=attribute_name, type='FLOAT_COLOR', domain='POINT')
         vertex_attribute.data.foreach_set('color', attribute_data.flatten())
 
-    def import_normals(self, 
-                       mesh: bpy.types.Mesh, 
-                       normals: Optional[numpy.ndarray], 
+    def import_normals(self,
+                       mesh: bpy.types.Mesh,
+                       normals: Optional[numpy.ndarray],
                        vertex_ids: numpy.ndarray):
-        
+
         if normals is None:
             if hasattr(mesh, 'calc_normals'):
                 mesh.calc_normals()
@@ -231,14 +231,14 @@ class BlenderDataImporter:
             # Write loop normals to permanent storage
             mesh.normals_split_custom_set(recalculated_normals.tolist())
 
-    def import_texcoords(self, 
-                         mesh: bpy.types.Mesh, 
-                         texcoords: Dict[int, numpy.ndarray], 
+    def import_texcoords(self,
+                         mesh: bpy.types.Mesh,
+                         texcoords: Dict[int, numpy.ndarray],
                          vertex_ids: numpy.ndarray):
-        
+
         if not texcoords:
             return
-        
+
         for (texcoord_id, data) in sorted(texcoords.items()):
             uv_name = f'TEXCOORD{texcoord_id and texcoord_id or ""}.xy'
             mesh.uv_layers.new(name=uv_name)
@@ -246,10 +246,10 @@ class BlenderDataImporter:
             uv_layer = mesh.uv_layers[uv_name].data
             uv_layer.foreach_set('uv', data[vertex_ids].flatten())
 
-    def import_shapekeys(self, 
-                         obj: bpy.types.Object, 
+    def import_shapekeys(self,
+                         obj: bpy.types.Object,
                          shapekeys: Dict[int, numpy.ndarray]):
-        
+
         if not shapekeys:
             return
 
@@ -265,7 +265,7 @@ class BlenderDataImporter:
 
         basis_co = numpy.empty(vert_count * 3, dtype=numpy.float32)
         basis.data.foreach_get('co', basis_co)
-        basis_co = basis_co.reshape(-1, 3)  
+        basis_co = basis_co.reshape(-1, 3)
 
         for shapekey_id, offsets in shapekeys.items():
             # Add new shapekey
@@ -273,7 +273,7 @@ class BlenderDataImporter:
             shapekey.interpolation = 'KEY_LINEAR'
 
             if bpy.app.version >= (5, 0):
-                # Blender 5.0 defaults shapekeys to 1.0 
+                # Blender 5.0 defaults shapekeys to 1.0
                 shapekey.value = 0
 
             position_offsets = numpy.array(offsets, dtype=numpy.float32).reshape(-1, 3)

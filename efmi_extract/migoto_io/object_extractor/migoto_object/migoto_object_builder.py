@@ -113,7 +113,7 @@ class MigotoObjectBuilder:
 
                 if not isinstance(resource, VertexBuffer):
                     raise ValueError(f"{resource} is not an VertexBuffer")
-                
+
                 if resource_slot.slot_id not in self.vb_data_import_slots:
                     continue
 
@@ -159,12 +159,12 @@ class MigotoObjectBuilder:
                     # Ensure consistent buffer semantic for current buffer region across component's draw calls
                     # If same resource pointer + semantic byte offset is mapped differently, semantic_remap must be used
                     sematic_key = (resource.hash, buffer_semantic.offset)
-                    
+
                     # Here we track how semantic for current sematic_key was previously defined
                     vb_data_usage = component_vb_data_usage.get(sematic_key, None)
-                    
+
                     if vb_data_usage is not None:
-                        
+
                         try:
                             sematic_key_defines_unknown = vb_data_usage.semantic.abstract.enum == Semantic.Unknown
                             buffer_semantic_defines_unknown = buffer_semantic.abstract.enum == Semantic.Unknown
@@ -198,7 +198,7 @@ class MigotoObjectBuilder:
                                     - [{vb_data_usage.resource.usage_descriptor.call_id:06d}]: {vb_data_usage.semantic} (layout: {vb_data_usage.layout})
                                     - [{resource.usage_descriptor.call_id:06d}]: {buffer_semantic} (layout: {vb_layout})
                                 """))
-                            
+
                             if buffer_semantic.stride != vb_data_usage.semantic.stride:
                                 # Current VB draw re-defines semantic stride for current sematic_key
                                 raise ValueError(dedent(f"""
@@ -206,7 +206,7 @@ class MigotoObjectBuilder:
                                     - [{vb_data.resource.usage_descriptor.call_id:06d}]: {vb_data_usage.semantic} (layout: {vb_data_usage.layout})
                                     - [{resource.usage_descriptor.call_id:06d}]: {buffer_semantic} (layout: {vb_layout})
                                 """))
-                            
+
                         except Exception as e:
                             print("WARNING! " + str(e).strip())
                             print(f"Suppressed the conflict by selecting first seen semantic {vb_data_usage.semantic} (may cause glitches).")
@@ -310,7 +310,7 @@ class MigotoObjectBuilder:
         )
 
         return component
-    
+
     def filter_components(self, migoto_object: MigotoObject) -> None:
         # Remove components without weights from weighted objects.
         if any(component.mesh.get_weighting_type() != WeightingType.NoWeights for component in migoto_object.components):
@@ -321,13 +321,13 @@ class MigotoObjectBuilder:
                 else:
                     print(f"Skipped component without weights from weighted object: {component}")
             migoto_object.components = filtered_components
-    
+
     def sort_components(self, migoto_object: MigotoObject) -> None:
         migoto_object.components.sort(
             key=lambda component: float(component.mesh.vertex_buffer.get_field(Semantic.Position)[:, 2].max()),
             reverse=True,
         )
-    
+
     def label_object(self, migoto_object: MigotoObject) -> None:
         vertex_count = sum(component.mesh.format.vertex_count for component in migoto_object.components)
         is_weighted = any(component.mesh.get_weighting_type() != WeightingType.NoWeights for component in migoto_object.components)

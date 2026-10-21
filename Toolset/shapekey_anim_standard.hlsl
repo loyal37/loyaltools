@@ -32,10 +32,10 @@ Texture1D<float4> IniParams : register(t120);
 void main(uint3 threadID : SV_DispatchThreadID)
 {
     uint i = threadID.x;
-    
+
     // Start with the base mesh attributes
     VertexAttributes output = rw_buffer[i];
-    
+
     // Initialize total difference vectors.
     float3 total_diff_position = float3(0.0, 0.0, 0.0);
     float3 total_diff_normal = float3(0.0, 0.0, 0.0);
@@ -53,7 +53,7 @@ void main(uint3 threadID : SV_DispatchThreadID)
     output.normal += total_diff_normal;
     output.tangent.xyz += total_diff_tangent;
     // The 'w' component of the tangent remains unchanged from the base mesh.
-    
+
     rw_buffer[i] = output;
 }
 

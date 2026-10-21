@@ -44,7 +44,7 @@ class BE_FrameSplitter:
                 bpy.ops.object.select_all(action='DESELECT')
                 original_obj.select_set(True)
                 self.context.view_layer.objects.active = original_obj
-                
+
                 bpy.ops.object.duplicate()
                 new_obj = self.context.active_object
                 if new_obj:
@@ -115,7 +115,7 @@ class BE_FrameSplitter:
                 move_object_to_collection(snapshot_obj, sub_collection)
                 created_objects.append(snapshot_obj)
                 print(f"    [Splitter] 创建快照: {snapshot_obj.name}")
-        
+
         print(f"  -- [Splitter] 完成, 创建了 {len(created_objects)} 个对象 --")
         return created_objects
 
@@ -165,7 +165,7 @@ class BE_AutomationPipeline:
         """选中指定集合及其包含的所有可见物体，并设置活动层集合"""
         try:
             bpy.ops.object.select_all(action='DESELECT')
-            
+
             valid_objects = [o for o in collection.objects if o.name in self.context.view_layer.objects and o.visible_get()]
             if not valid_objects:
                 print(f"  [Select] 警告: 集合 '{collection.name}' 中没有可见/可选中的物体。")
@@ -200,7 +200,7 @@ class BE_AutomationPipeline:
         if not os.path.isdir(export_path):
             print(f"    [Error] 导出目录 '{export_path}' 不存在！")
             return
-            
+
         original_buffer_path = os.path.join(export_path, "Buffer")
         if os.path.exists(original_buffer_path) and os.path.isdir(original_buffer_path):
             i_rename = loop_index
@@ -226,7 +226,7 @@ class BE_AutomationPipeline:
                 if not os.path.exists(new_ini_path):
                     os.rename(original_ini_path, new_ini_path)
                     print(f"    [File Ops] '{ini_files[0]}' -> '{new_ini_name}'")
-                    
+
                     self.modify_ini_content(new_ini_path, i_rename)
                     break
                 i_rename += 1
@@ -243,7 +243,7 @@ class BE_AutomationPipeline:
         try:
             with open(ini_filepath, 'r', encoding='utf-8') as f:
                 content = f.read()
-            
+
             if string_to_find in content:
                 new_content = content.replace(string_to_find, string_to_replace)
                 with open(ini_filepath, 'w', encoding='utf-8') as f:
@@ -260,9 +260,9 @@ class BE_AutomationPipeline:
         print("\n" + "="*40)
         print("   ATP 批量导出自动化流程启动   ")
         print("="*40)
-        
+
         start_time = time.time()
-        
+
         try:
             if self.props.auto_top_level_collection_name not in bpy.data.collections:
                 raise RuntimeError(f"找不到顶层/导出集合 '{self.props.auto_top_level_collection_name}'")
@@ -293,7 +293,7 @@ class BE_AutomationPipeline:
                                     if obj not in self.all_hidden_source_objects:
                                         self.all_hidden_source_objects.append(obj)
                                     obj.hide_set(True)
-                        
+
                         for child_coll in list(blue_coll.children):
                             if child_coll.name not in bpy.data.collections:
                                 continue
@@ -306,7 +306,7 @@ class BE_AutomationPipeline:
                     for blue_coll in blue_collections_this_loop:
                         target_sub_coll_name = f"{blue_coll.name}_Frame_{current_frame:03d}"
                         target_sub_coll = blue_coll.children.get(target_sub_coll_name)
-                        
+
                         col_source_objs = [obj for obj in blue_coll.objects if obj in self.registered_source_objects]
 
                         if target_sub_coll:
@@ -339,15 +339,15 @@ class BE_AutomationPipeline:
                         bpy.ops.ssmt.generate_mod()
                     else:
                         raise RuntimeError("找不到 SSMT 导出命令 (bpy.ops.ssmt.generate_mod)")
-                    
+
                     print("    导出命令执行完毕。")
-                    self._wait_for_step_delay() 
+                    self._wait_for_step_delay()
 
                     self.rename_exported_files(current_frame)
                     self._wait_for_step_delay()
 
                     self.set_collection_color(blue_collections_this_loop, 'COLOR_05')
-                    
+
                     print(f"<<< 第 {current_frame} 帧处理完成 (耗时: {time.time() - loop_start_time:.2f}s) >>>")
 
                 except Exception as e:
@@ -370,10 +370,10 @@ class BE_AutomationPipeline:
                         obj.hide_set(False)
                         count += 1
                 print(f"  已恢复 {count} 个源物体的可见性。")
-            
+
             self.scene.frame_set(self.props.be_start_frame)
             print("--- [Final] 清理完成 ---")
-            
+
             print(f"\n将在 {self.props.auto_final_delay_seconds} 秒后关闭控制台...")
             time.sleep(self.props.auto_final_delay_seconds)
             bpy.ops.wm.console_toggle()

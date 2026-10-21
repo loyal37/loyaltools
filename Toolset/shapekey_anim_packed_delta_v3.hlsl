@@ -14,7 +14,7 @@ struct VertexAttributes {
 };
 
 RWStructuredBuffer<VertexAttributes> rw_buffer : register(u5);
-StructuredBuffer<float3> shapekey_pos_deltas[MAX_SLOTS] : register(t51); 
+StructuredBuffer<float3> shapekey_pos_deltas[MAX_SLOTS] : register(t51);
 StructuredBuffer<int> shapekey_maps[MAX_SLOTS] : register(t75);
 
 Texture1D<float4> IniParams : register(t120);
@@ -26,10 +26,10 @@ Texture1D<float4> IniParams : register(t120);
 void main(uint3 threadID : SV_DispatchThreadID)
 {
     uint i = threadID.x;
-    
+
     // Start with the base mesh attributes
     VertexAttributes output = rw_buffer[i];
-    
+
     float3 total_diff_position = float3(0.0, 0.0, 0.0);
 
     // --- [PYTHON-MANAGED LOGIC START] ---
@@ -37,7 +37,7 @@ void main(uint3 threadID : SV_DispatchThreadID)
 
     // Apply ONLY the position difference.
     output.position += total_diff_position;
-    
+
     rw_buffer[i] = output;
 }
 // --- END OF FILE shapekey_anim_packed_delta_v3.hlsl ---

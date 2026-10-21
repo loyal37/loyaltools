@@ -30,10 +30,10 @@ class ATP_PT_ShapeKeyTools(bpy.types.Panel):
 
     def draw(self, context):
         from . import at_shape_key_control
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
         box.label(text="统一控制器:")
         for item in props.shape_key_list:
@@ -56,14 +56,14 @@ class ATP_PT_ShapeKeyOperations(bpy.types.Panel):
     def draw(self, context):
         from . import at_shape_key_control
         from . import at_shape_key_operations
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
-        
+
         col = box.column(align=True)
-        
+
         col.label(text="复制功能:", icon='COPYDOWN')
         row = col.row(align=True)
         row.operator(at_shape_key_control.ATP_OT_RefreshShapeKeys.bl_idname, text="刷新列表", icon='FILE_REFRESH')
@@ -88,13 +88,13 @@ class ATP_PT_ShapeKeyOperations(bpy.types.Panel):
         col.label(text="批量控制:", icon='KEY_DEHLT')
         row = col.row(align=True)
         row.operator(at_shape_key_operations.ATP_OT_ResetAllShapeKeys.bl_idname, text="归零所有形态键", icon='KEY_DEHLT')
-        
+
         col.separator()
         col.label(text="设置活动形态键:", icon='SHAPEKEY_DATA')
         col.prop(props, "sk_set_active_name", text="")
         row = col.row(align=True)
         row.operator(at_shape_key_operations.ATP_OT_SetActiveShapeKey.bl_idname, text="设为活动", icon='SHAPEKEY_DATA')
-        
+
         col.separator()
         col.label(text="批量重命名形态键:", icon='OUTLINER_OB_GROUP_INSTANCE')
         row = col.row(align=True)
@@ -117,14 +117,14 @@ class ATP_PT_ShapeKeyCreation(bpy.types.Panel):
     def draw(self, context):
         from . import at_shape_key_creation
         from . import at_multi_frame_split
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
-        
+
         col = box.column(align=True)
-        
+
         col.label(text="形状差异转形态键:", icon='MOD_MESHDEFORM')
         col.prop(props, "shape_diff_key_name", text="形态键名称")
         col.operator(at_shape_key_creation.ATP_OT_ObjectToShapeKey.bl_idname, text="将形状差异转换为形态键", icon='MOD_MESHDEFORM')
@@ -132,13 +132,13 @@ class ATP_PT_ShapeKeyCreation(bpy.types.Panel):
 
         col.separator()
         col.label(text="多物体拆分帧到形态键（增强版）:", icon='MOD_MESHDEFORM')
-        
+
         row = col.row()
         row.label(text="帧/形态键对列表:")
         row.operator(at_shape_key_creation.ATP_OT_AddFrameShapeKeyPair.bl_idname, text="", icon='ADD')
         row.operator(at_shape_key_creation.ATP_OT_AddDefaultFrameShapeKeyPairs.bl_idname, text="", icon='PRESET')
         row.operator(at_shape_key_creation.ATP_OT_ClearFrameShapeKeyPairs.bl_idname, text="", icon='X')
-        
+
         if props.frame_shape_key_pairs:
             col2 = col.column(align=True)
             for i, pair in enumerate(props.frame_shape_key_pairs):
@@ -150,40 +150,40 @@ class ATP_PT_ShapeKeyCreation(bpy.types.Panel):
                 op.index = i
         else:
             col.label(text="暂无帧/形态键对", icon='INFO')
-        
+
         col.prop(props, "multi_object_start_frame", text="起始帧")
         row = col.row(align=True)
         row.prop(props, "use_precise_frame_mode", text="高精度模式")
         row.prop(props, "use_continuous_mode", text="连续模式")
-        
+
         if props.show_processing_status:
             col.prop(props, "show_processing_status", text="显示处理状态", icon='HIDE_OFF')
-            
+
             if props.current_processing_status:
                 col.label(text=props.current_processing_status, icon='TIME')
-            
+
             if props.current_processing_progress > 0:
                 progress_text = f"进度: {props.current_processing_progress*100:.1f}%"
                 box.progress(factor=props.current_processing_progress, text=progress_text)
-            
+
             total_pairs = len(props.frame_shape_key_pairs)
             processed_pairs = sum(1 for pair in props.frame_shape_key_pairs if pair.is_processed)
             if total_pairs > 0:
                 col.label(text=f"已完成: {processed_pairs}/{total_pairs} 帧/形态键对", icon='CHECKMARK')
-            
+
         else:
             col.prop(props, "show_processing_status", text="显示处理状态", icon='HIDE_ON')
-        
+
         row = col.row(align=True)
         row.operator(at_multi_frame_split.ATP_OT_SplitFramesToShapeKeyMulti.bl_idname, text="处理多物体", icon='PLAY')
         row.operator(at_shape_key_creation.ATP_OT_StopMultiProcessing.bl_idname, text="停止", icon='PAUSE')
-        
+
         selected_mesh_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
         if selected_mesh_objects:
             col.label(text=f"已选择 {len(selected_mesh_objects)} 个网格物体", icon='INFO')
         else:
             col.label(text="请先选择网格物体", icon='ERROR')
-        
+
         col.label(text="提示: 每个物体将按顺序处理所有帧/形态键对", icon='QUESTION')
 
 
@@ -199,41 +199,41 @@ class ATP_PT_ShapeKeyAnimationExport(bpy.types.Panel):
 
     def draw(self, context):
         from . import at_shape_key_creation
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
-        
+
         col = box.column(align=True)
-        
+
         col.label(text="导出所选物体的形态键动画序列:", icon='SHAPEKEY_DATA')
         col.label(text="生成播放表并输出到文本编辑器", icon='TEXT')
-        
+
         col.separator()
-        
+
         row = col.row(align=True)
         row.prop(props, "shape_anim_export_start_frame", text="起始帧")
         row.prop(props, "shape_anim_export_end_frame", text="结束帧")
-        
+
         col.separator()
-        
+
         col.label(text="播放表格式示例:", icon='INFO')
         example_box = col.box()
         example_box.label(text="Key_发 = 0.5,0.25,1,0.68,0.6,0.7")
         example_box.label(text="Key_脸 = 0.0,0.3,0.5,0.8,1.0,0.5")
-        
+
         col.separator()
-        
+
         selected_mesh_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
         if selected_mesh_objects:
             col.label(text=f"已选择 {len(selected_mesh_objects)} 个网格物体", icon='INFO')
         else:
             col.label(text="请先选择网格物体", icon='ERROR')
-        
+
         col.separator()
-        
-        col.operator(at_shape_key_creation.ATP_OT_ShapeKeyAnimationExport.bl_idname, 
+
+        col.operator(at_shape_key_creation.ATP_OT_ShapeKeyAnimationExport.bl_idname,
                     icon='PLAY', text="导出形态键动画序列")
 
 
@@ -249,7 +249,7 @@ class ATP_PT_AlembicTools(bpy.types.Panel):
 
     def draw(self, context):
         from . import at_alembic_tools
-        
+
         layout = self.layout
         props = context.scene.atp_props
 
@@ -281,7 +281,7 @@ class ATP_PT_AlembicTools(bpy.types.Panel):
         elif not context.selected_objects:
             box.label(text="错误: 请选择要烘焙的物体", icon='ERROR')
             enabled = False
-            
+
         col = box.column()
         col.enabled = enabled
         col.operator(at_alembic_tools.ATP_OT_BakeAndImportAlembic.bl_idname, icon='PLAY', text="执行烘焙与导入")
@@ -300,18 +300,18 @@ class ATP_PT_AnimationFrameSplit(bpy.types.Panel):
     def draw(self, context):
         from . import at_alembic_tools
         from . import at_utils
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
         box.label(text="将选中物体的每一帧拆分为新物体", icon='SEQUENCE')
         box.label(text="并在源集合下创建子集合存放", icon='OUTLINER_COLLECTION')
-        
+
         box.separator()
         box.prop(props, "be_object_prefix", text="新物体名称前缀")
         box.prop(props, "anim_split_sub_prefix")
-        
+
         row = box.row(align=True)
         row.prop(props, "anim_split_start_frame")
         row.prop(props, "anim_split_end_frame")
@@ -319,11 +319,11 @@ class ATP_PT_AnimationFrameSplit(bpy.types.Panel):
 
         has_selection = bool(context.selected_objects)
         has_alembic = any(at_utils.is_alembic_object(obj) for obj in context.selected_objects)
-        
+
         col = box.column()
-        col.enabled = not has_alembic 
+        col.enabled = not has_alembic
         col.prop(props, "anim_split_separate_static")
-        
+
         if has_alembic:
             box.label(text="提示: Alembic物体不支持静态分离", icon='INFO')
         elif props.anim_split_separate_static:
@@ -331,7 +331,7 @@ class ATP_PT_AnimationFrameSplit(bpy.types.Panel):
 
         box.separator()
         box.prop(props, "anim_split_set_linear")
-        
+
         op_row = box.row()
         op_row.enabled = has_selection
         op_row.operator(at_alembic_tools.ATP_OT_SplitAnimation.bl_idname, icon='PLAY', text="执行拆分")
@@ -353,10 +353,10 @@ class ATP_PT_Automation(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="共享设置:", icon='SETTINGS')
-        
+
         col = box.column(align=True)
         col.prop(props, "auto_export_base_path")
-        
+
         col.separator()
         col.label(text="执行延时 (用于观察/IO等待):", icon='TIME')
         row = col.row(align=True)
@@ -376,18 +376,18 @@ class ATP_PT_AutomationShapeKeyExport(bpy.types.Panel):
 
     def draw(self, context):
         from . import at_shape_key_export
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
-        
+
         col = box.column(align=True)
-        
+
         col.separator()
         col.label(text="SSMT导出设置:", icon='SETTINGS')
         col.prop(props, "ske_node_tree_name")
-        
+
         col.separator()
         if props.show_ske_instructions:
             col.prop(props, "show_ske_instructions", text="隐藏流程说明", icon='TRIA_DOWN')
@@ -401,7 +401,7 @@ class ATP_PT_AutomationShapeKeyExport(bpy.types.Panel):
             box_flow.label(text="6. 结束后将所有形态键值归零")
         else:
             col.prop(props, "show_ske_instructions", text="显示流程说明", icon='TRIA_RIGHT')
-        
+
         box.separator()
         box.label(text="点击后请留意弹出的系统控制台", icon='INFO')
         box.operator(at_shape_key_export.ATP_OT_ShapeKeyExport.bl_idname, icon='PLAY', text="启动自动化形态键导出")
@@ -420,12 +420,12 @@ class ATP_PT_AutomationBufferMerge(bpy.types.Panel):
     def draw(self, context):
         from . import at_animation_export
         from . import at_buffer_merge
-        
+
         layout = self.layout
         props = context.scene.atp_props
-        
+
         box = layout.box()
-        
+
         col = box.column(align=True)
 
         col.label(text="动画导出（ZZZ）:", icon='SEQUENCE')
@@ -444,7 +444,7 @@ class ATP_PT_AutomationBufferMerge(bpy.types.Panel):
 
         col.label(text="顶点缓冲合并 (.buf):", icon='FILE_SCRIPT')
         col.prop(props, "merge_buf_path")
-        
+
         row = col.row()
         row.scale_y = 1.5
         row.enabled = bool(props.merge_buf_path)

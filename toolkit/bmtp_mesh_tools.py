@@ -42,21 +42,21 @@ class BMTP_OT_DynamicBridge(bpy.types.Operator):
 
     def execute(self, context):
         props = context.scene.bmtp_props
-        
+
         obj = context.active_object
-        
+
         bm = bmesh.from_edit_mesh(obj.data)
-        
+
         selected_edges = [e for e in bm.edges if e.select]
-        
+
         if len(selected_edges) < 2:
             self.report({'ERROR'}, "请至少选择两条边")
             return {'CANCELLED'}
-            
+
         bpy.ops.mesh.select_all(action='DESELECT')
         for e in selected_edges:
             e.select = True
-            
+
         try:
             bpy.ops.mesh.bridge_edge_loops(
                 number_cuts=props.bridge_segments,
@@ -67,9 +67,9 @@ class BMTP_OT_DynamicBridge(bpy.types.Operator):
         except Exception as e:
             self.report({'ERROR'}, f"桥接失败: {str(e)}")
             return {'CANCELLED'}
-        
+
         bmesh.update_edit_mesh(obj.data)
-        
+
         return {'FINISHED'}
 
 
@@ -88,21 +88,21 @@ class BMTP_OT_SetVertexColor(bpy.types.Operator):
         if not selected_objects:
             self.report({'ERROR'}, "请选择至少一个网格物体")
             return {'CANCELLED'}
-        
+
         color_rgba_srgb = props.vc_color[:]
         color_rgba_linear = convert_color_srgb_to_linear(color_rgba_srgb)
-        
+
         for obj in selected_objects:
             mesh = obj.data
-            
+
             if not mesh.color_attributes.active_color:
                 color_attr = mesh.color_attributes.new(name="COLOR", type='BYTE_COLOR', domain='CORNER')
             else:
                 color_attr = mesh.color_attributes.active_color
-            
+
             is_byte_color = (color_attr.data_type == 'BYTE_COLOR')
             num_loops = len(mesh.loops)
-            
+
             if is_byte_color:
                 color_data = np.zeros(num_loops * 4, dtype=np.uint8)
                 if props.vc_mode == 'ALPHA_ONLY':
@@ -116,7 +116,7 @@ class BMTP_OT_SetVertexColor(bpy.types.Operator):
                     g = int(round(color_rgba_linear[1] * 255))
                     b = int(round(color_rgba_linear[2] * 255))
                     a = int(round(color_rgba_linear[3] * 255))
-                    rgba_bytes = [np.clip(r, 0, 255), np.clip(g, 0, 255), 
+                    rgba_bytes = [np.clip(r, 0, 255), np.clip(g, 0, 255),
                                  np.clip(b, 0, 255), np.clip(a, 0, 255)]
                     color_data = np.tile(rgba_bytes, num_loops).astype(np.uint8)
             else:
@@ -126,10 +126,10 @@ class BMTP_OT_SetVertexColor(bpy.types.Operator):
                     color_data[3::4] = color_rgba_linear[3]
                 else:
                     color_data = np.tile(color_rgba_linear, num_loops)
-            
+
             color_attr.data.foreach_set("color", color_data)
             mesh.update()
-        
+
         self.report({'INFO'}, f"顶点色操作完成，处理了 {len(selected_objects)} 个对象")
         return {'FINISHED'}
 
@@ -145,7 +145,7 @@ class BMTP_OT_DeleteEmptyMeshes(bpy.types.Operator):
 
     def execute(self, context):
         objects_to_delete = [obj for obj in context.selected_objects if obj.type == 'MESH' and (not obj.data or not obj.data.polygons)]
-        
+
         if objects_to_delete:
             count = len(objects_to_delete)
             for obj in objects_to_delete:
@@ -160,11 +160,11 @@ class BMTP_OT_SyncDataNames(bpy.types.Operator):
     bl_idname = "toolkit.bmtp_sync_data_names"
     bl_label = "同步选中物体数据块名称"
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     @classmethod
     def poll(cls, context):
         return True
-    
+
     def execute(self, context):
         renamed_count = 0
         for obj in context.selected_objects:
@@ -182,53 +182,53 @@ class BMTP_OT_CleanUselessShapeKeys(bpy.types.Operator):
     bl_label = "清理选中物体的无效形态键"
     bl_description = "清理选中物体中没有效果的形态键（所有顶点位置与基础形态键相同的形态键）"
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     @classmethod
     def poll(cls, context):
         return True
-    
+
     def execute(self, context):
         total_removed = 0
         processed_objects = 0
-        
+
         for obj in context.selected_objects:
             if obj.type != 'MESH':
                 continue
-                
+
             if not obj.data.shape_keys:
                 continue
-                
+
             shape_keys = obj.data.shape_keys.key_blocks
             if len(shape_keys) <= 1:
                 continue
-                
+
             basis_key = shape_keys[0]
             keys_to_remove = []
-            
+
             for i, shape_key in enumerate(shape_keys):
                 if i == 0:
                     continue
-                    
+
                 has_effect = False
                 threshold = 1e-6
-                
+
                 for j in range(len(shape_key.data)):
                     if (shape_key.data[j].co - basis_key.data[j].co).length > threshold:
                         has_effect = True
                         break
-                
+
                 if not has_effect:
                     keys_to_remove.append(shape_key)
-            
+
             for shape_key in keys_to_remove:
                 obj.shape_key_remove(shape_key)
                 total_removed += 1
-                
+
             if keys_to_remove:
                 processed_objects += 1
-        
+
         bpy.ops.outliner.orphans_purge(do_local_ids=True, do_linked_ids=True, do_recursive=True)
-        
+
         if total_removed > 0:
             self.report({'INFO'}, f"已从 {processed_objects} 个选中物体中删除了 {total_removed} 个无效的形态键")
         else:

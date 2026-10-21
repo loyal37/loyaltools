@@ -30,7 +30,7 @@ class MigotoMesh:
             return self.index_buffer.get_field(semantic)
         else:
             return self.vertex_buffer.get_field(semantic)
-        
+
     def get_weighting_type(self) -> WeightingType | None:
         if self.vertex_buffer is None:
             return None

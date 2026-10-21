@@ -115,14 +115,14 @@ class TexturesDescriptor:
             component_name = f"Component {component_id}"
 
             for slot, textures in component.textures.items():
-                
+
                 slot_str = slot.__str__()
 
                 for texture in textures:
 
                     if not texture_filter.is_valid_texture(texture):
                         continue
-                    
+
                     # Dedupe textures by hash.
                     cached_texture = descriptor.textures.get(texture.hash, None)
                     if cached_texture is not None:
@@ -156,7 +156,7 @@ class TexturesDescriptor:
         descriptor.slot_usage = {component_name: dict(slots) for component_name, slots in slot_usage.items()}
 
         return descriptor
-    
+
     # def label_textures(self, migoto_object: MigotoObject):
 
     #     texture_labels = defaultdict(lambda: defaultdict(list))
@@ -173,7 +173,7 @@ class TexturesDescriptor:
     #                 reverse=True,
     #             )
     #         return filtered_textures
-        
+
     #     def get_texture_slots(texture_hash: str, migoto_component: MigotoComponent):
     #         slots = set()
     #         for slot, textures in migoto_component.textures.items():
@@ -218,7 +218,7 @@ class TexturesDescriptor:
 
     #             if component_id not in components_usage:
     #                 continue
-                
+
     #             # Blender
     #             img = bpy.data.images.load(str(texture.bin_path))
     #             pixels = list(img.pixels)
@@ -228,5 +228,5 @@ class TexturesDescriptor:
     #             # # Standalone
     #             # img = iio.imread(str(texture.bin_path))
     #             # mean = img.mean(axis=(0, 1))
-                
+
     #             print(texture.bin_path.name, list(mean * 255))

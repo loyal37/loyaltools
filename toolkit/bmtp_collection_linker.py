@@ -22,7 +22,7 @@ class BMTP_OT_LinkListAdd(bpy.types.Operator):
                 new_item = source_list.add()
                 new_item.item = obj
                 added_count += 1
-        
+
         if context.view_layer.active_layer_collection:
             active_collection = context.view_layer.active_layer_collection.collection
             if active_collection and active_collection not in existing_items:
@@ -87,7 +87,7 @@ class BMTP_OT_ExecuteLink(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.bmtp_props
         target_collection = props.link_target_collection
-        
+
         linked_collections, linked_objects, skipped_items = 0, 0, 0
 
         for item_wrapper in props.link_source_list:
@@ -103,7 +103,7 @@ class BMTP_OT_ExecuteLink(bpy.types.Operator):
                     target_collection.children.link(source_item)
                     linked_collections += 1
                 else: skipped_items += 1
-            
+
             elif isinstance(source_item, bpy.types.Object):
                 if source_item.name not in target_collection.objects:
                     target_collection.objects.link(source_item)
@@ -130,7 +130,7 @@ class BMTP_OT_ExecuteUnlink(bpy.types.Operator):
     def execute(self, context):
         props = context.scene.bmtp_props
         target_collection = props.link_target_collection
-        
+
         unlinked_collections, unlinked_objects, skipped_items = 0, 0, 0
 
         for item_wrapper in props.link_source_list:
@@ -142,7 +142,7 @@ class BMTP_OT_ExecuteUnlink(bpy.types.Operator):
                     target_collection.children.unlink(source_item)
                     unlinked_collections += 1
                 else: skipped_items += 1
-            
+
             elif isinstance(source_item, bpy.types.Object):
                 if source_item.name in target_collection.objects:
                     target_collection.objects.unlink(source_item)

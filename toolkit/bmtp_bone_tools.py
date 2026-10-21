@@ -8,14 +8,14 @@ class BMTP_OT_ShowUsedBones(bpy.types.Operator):
     bl_label = "显示使用的骨骼"
     bl_description = "隐藏未使用的骨骼，只显示当前选中物体实际使用的骨骼"
     bl_options = {'REGISTER', 'UNDO'}
-    
+
     def execute(self, context):
         selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        
+
         if not selected_objects:
             self.report({'WARNING'}, "请先选择至少一个网格物体")
             return {'CANCELLED'}
-        
+
         armature_obj = None
         for obj in selected_objects:
             for modifier in obj.modifiers:
@@ -24,26 +24,26 @@ class BMTP_OT_ShowUsedBones(bpy.types.Operator):
                     break
             if armature_obj:
                 break
-        
+
         if not armature_obj:
             self.report({'WARNING'}, "未找到骨架修改器，请确保选中的物体有骨架修改器")
             return {'CANCELLED'}
-        
+
         all_used_bones = set()
         for obj in selected_objects:
             used_bones = bmtp_utils.get_object_used_bones(obj, armature_obj)
             all_used_bones.update(used_bones)
-        
+
         if not all_used_bones:
             self.report({'WARNING'}, "当前选中物体没有使用任何骨骼")
             return {'CANCELLED'}
-        
+
         bpy.ops.object.select_all(action='DESELECT')
         armature_obj.select_set(True)
         context.view_layer.objects.active = armature_obj
-        
+
         bmtp_utils.hide_unused_bones(armature_obj, all_used_bones)
-        
+
         self.report({'INFO'}, f"已显示 {len(all_used_bones)} 个使用的骨骼")
         return {'FINISHED'}
 
@@ -61,7 +61,7 @@ class BMTP_OT_ShowAllBones(bpy.types.Operator):
     def execute(self, context):
         armature_obj = context.active_object
         bmtp_utils.show_all_bones(armature_obj)
-        
+
         self.report({'INFO'}, f"已显示 '{armature_obj.name}' 的所有骨骼")
         return {'FINISHED'}
 
@@ -111,9 +111,9 @@ class BMTP_OT_AlignBones(bpy.types.Operator):
         armature = context.active_object
         props = context.scene.bmtp_props
         align_axis_str = props.align_axis
-        
+
         bpy.ops.object.mode_set(mode='EDIT')
-        
+
         for b in armature.data.edit_bones:
             original_length = b.length
             if original_length < 0.0001:
@@ -129,7 +129,7 @@ class BMTP_OT_AlignBones(bpy.types.Operator):
 
             b.tail = b.head + direction_vector.normalized() * original_length
             b.roll = 0.0
-            
+
         bpy.ops.object.mode_set(mode='OBJECT')
         self.report({'INFO'}, f"已将 '{armature.name}' 的所有骨骼沿其局部坐标轴 {props.align_axis} 重新对齐")
         return {'FINISHED'}
@@ -186,11 +186,11 @@ class BMTP_OT_RestoreBoneNames(bpy.types.Operator):
     def execute(self, context):
         armature = context.active_object
         props = context.scene.bmtp_props
-        
+
         if not props.restore_map_text:
             self.report({'ERROR'}, "请在UI面板中选择一个映射表文本块")
             return {'CANCELLED'}
-        
+
         try:
             remap_dict = json.loads(props.restore_map_text.as_string())
         except json.JSONDecodeError:
@@ -212,7 +212,7 @@ class BMTP_OT_RestoreBoneNames(bpy.types.Operator):
                     if modifier.type == 'ARMATURE' and modifier.object == armature:
                         mesh_objects_to_process.append(obj)
                         break
-        
+
         for obj in mesh_objects_to_process:
             for index_name, original_name in remap_dict.items():
                 vg = obj.vertex_groups.get(index_name)

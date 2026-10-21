@@ -54,10 +54,24 @@ def validate_archive(output: Path) -> tuple[int, str]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--repository", type=Path, default=Path.cwd())
-    parser.add_argument("--git-ref", default="HEAD")
-    parser.add_argument("--output", type=Path, required=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repository",
+        type=Path,
+        default=Path.cwd(),
+        help="Git repository to package (default: current directory)",
+    )
+    parser.add_argument(
+        "--git-ref",
+        default="HEAD",
+        help="commit, branch or tag to package (default: HEAD)",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="path of the ZIP archive to write",
+    )
     return parser.parse_args()
 
 

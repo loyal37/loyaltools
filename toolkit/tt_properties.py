@@ -15,7 +15,7 @@ class TT_BakeResolutionRule(bpy.types.PropertyGroup):
 
 class TT_ChannelSource(bpy.types.PropertyGroup):
     """定义单个通道的数据来源"""
-    
+
     source_type: bpy.props.EnumProperty(
         name="来源类型",
         description="选择此通道的数据来源",
@@ -36,9 +36,9 @@ class TT_ChannelSource(bpy.types.PropertyGroup):
         ],
         default='IMAGE_CHANNEL'
     )
-    
+
     source_image_name: bpy.props.StringProperty(name="源图像名称", description="来源图像的名称", default="")
-    
+
     source_channel: bpy.props.EnumProperty(
         name="源通道",
         description="从源图像中提取的通道",
@@ -51,7 +51,7 @@ class TT_ChannelSource(bpy.types.PropertyGroup):
         ],
         default='R'
     )
-    
+
     constant_value: bpy.props.FloatProperty(
         name="常量值",
         description="当来源为固定值时使用的数值",
@@ -59,7 +59,7 @@ class TT_ChannelSource(bpy.types.PropertyGroup):
         min=0.0,
         max=1.0
     )
-    
+
     invert: bpy.props.BoolProperty(
         name="反转",
         description="反转此通道的值",
@@ -69,23 +69,23 @@ class TT_ChannelSource(bpy.types.PropertyGroup):
 
 class TT_CompositeRule(bpy.types.PropertyGroup):
     """合成规则：定义如何将多个通道组合成一张输出贴图"""
-    
+
     rule_name: bpy.props.StringProperty(name="规则名称", description="此规则的名称", default="新规则")
-    
+
     output_name_prefix: bpy.props.StringProperty(
         name="输出前缀",
         description="输出贴图的文件名前缀",
         default="Composite_"
     )
-    
+
     output_channels: bpy.props.CollectionProperty(
         type=TT_ChannelSource,
         name="输出通道配置",
         description="R/G/B/A 四个通道的来源"
     )
-    
+
     enabled: bpy.props.BoolProperty(name="启用", description="是否启用此规则", default=True)
-    
+
     normal_strength: bpy.props.FloatProperty(
         name="法线强度",
         description="法线计算的强度参数",
@@ -93,7 +93,7 @@ class TT_CompositeRule(bpy.types.PropertyGroup):
         min=0.1,
         max=50.0
     )
-    
+
     normal_blur_radius: bpy.props.FloatProperty(
         name="高斯模糊半径",
         description="法线计算时的高斯模糊半径",
@@ -101,7 +101,7 @@ class TT_CompositeRule(bpy.types.PropertyGroup):
         min=0.0,
         max=10.0
     )
-    
+
     normal_invert_height: bpy.props.BoolProperty(
         name="反转高度",
         description="反转高度图",
@@ -133,11 +133,11 @@ class TT_TextureToolsProperties(bpy.types.PropertyGroup):
     dds_rules_file_path: bpy.props.StringProperty(name="规则配置文件", description="DDS转换规则的配置文件路径", subtype='FILE_PATH')
     dds_show_advanced: bpy.props.BoolProperty(name="显示高级选项", description="显示DDS转换的高级选项", default=False)
     dds_rules: bpy.props.CollectionProperty(type=TT_DDSConversionRule, name="DDS转换规则", description="DDS转换规则列表")
-    
+
     bake_resolution_use_rules: bpy.props.BoolProperty(name="使用分辨率规则", description="启用材质名称匹配分辨率规则，覆盖默认设置", default=False)
     bake_resolution_show_advanced: bpy.props.BoolProperty(name="显示高级选项", description="显示烘焙分辨率规则的高级选项", default=False)
     bake_resolution_rules: bpy.props.CollectionProperty(type=TT_BakeResolutionRule, name="烘焙分辨率规则", description="烘焙分辨率规则列表")
-    
+
     lightmap_mode: bpy.props.EnumProperty(
         name="模式",
         description="光照模板生成模式",
@@ -147,23 +147,23 @@ class TT_TextureToolsProperties(bpy.types.PropertyGroup):
         ],
         default='APPEND'
     )
-    
+
     lightmap_generate_lightmap: bpy.props.BoolProperty(
         name="生成LightMap",
         description="生成LightMap材质模板",
         default=True
     )
-    
+
     lightmap_generate_materialmap: bpy.props.BoolProperty(
-        name="生成MaterialMap", 
+        name="生成MaterialMap",
         description="生成MaterialMap材质模板",
         default=True
     )
-    
+
     material_preview_pattern: bpy.props.StringProperty(name="材质名称模式", description="用于匹配材质名称的正则表达式", default=".*")
     material_preview_base_resolution: bpy.props.IntProperty(name="基础分辨率", description="基础分辨率参数（仅存储）", default=1024, min=256, max=8192)
     material_preview_active_index: bpy.props.IntProperty(name="活动索引", description="当前选中的材质预览项索引", default=0)
-    
+
     composite_rules: bpy.props.CollectionProperty(type=TT_CompositeRule, name="通道合成规则", description="通道合成规则列表")
     composite_active_rule_index: bpy.props.IntProperty(name="活动规则索引", description="当前选中的合成规则索引", default=-1)
 

@@ -45,7 +45,7 @@ class MigotoComponent:
         vg_map: dict[int, int] | None,
         allow_overwrite: bool = False,
     ):
-        
+
         full_layout = self.mesh.vertex_buffer.layout
         lod_layout = lod_component.mesh.vertex_buffer.layout
 

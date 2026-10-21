@@ -5,7 +5,7 @@
 // Version: 3.0 (Correct Hybrid Buffer Handling)
 // Description: Reads position deltas (stride=12) and applies them to a full vertex buffer (stride=40).
 
-#define MAX_SLOTS 24 
+#define MAX_SLOTS 24
 
 struct VertexAttributes {
     float3 position;
@@ -27,10 +27,10 @@ Texture1D<float4> IniParams : register(t120);
 void main(uint3 threadID : SV_DispatchThreadID)
 {
     uint i = threadID.x;
-    
+
     // Start with the base mesh attributes (copied to rw_buffer beforehand)
     VertexAttributes output = rw_buffer[i];
-    
+
     float3 total_diff_position = float3(0.0, 0.0, 0.0);
 
     // --- [PYTHON-MANAGED LOGIC START] ---
@@ -40,7 +40,7 @@ void main(uint3 threadID : SV_DispatchThreadID)
 
     // Apply ONLY the position difference. Normal and Tangent remain from the base mesh.
     output.position += total_diff_position;
-    
+
     rw_buffer[i] = output;
 }
 // --- END OF FILE shapekey_anim_standard_delta_v3.hlsl ---

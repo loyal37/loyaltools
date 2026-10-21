@@ -43,7 +43,7 @@ class SKE_AutomationPipeline:
                     obj = bpy.data.objects.get(obj_name)
                     if obj and obj.type == 'MESH' and obj.data and obj not in self.target_objects:
                         self.target_objects.append(obj)
-            
+
             elif node.bl_idname == 'SSMTNode_Blueprint_Nest':
                 nested_tree_name = getattr(node, 'blueprint_name', '')
                 if nested_tree_name and nested_tree_name != 'NONE':
@@ -109,14 +109,14 @@ class SKE_AutomationPipeline:
             return
 
         original_buffer_path = os.path.join(export_path, "Buffer")
-        
+
         if os.path.isdir(original_buffer_path):
             new_buffer_path = os.path.join(export_path, new_buffer_name)
-            
+
             if os.path.exists(new_buffer_path):
                 print(f"    [Warning] 目标文件夹 '{new_buffer_name}' 已存在，正在覆盖。")
                 shutil.rmtree(new_buffer_path)
-            
+
             try:
                 os.rename(original_buffer_path, new_buffer_path)
                 print(f"    [File Ops] 成功重命名: 'Buffer' -> '{new_buffer_name}'")
@@ -135,7 +135,7 @@ class SKE_AutomationPipeline:
                             kb.value = value
                         except Exception:
                             pass
-    
+
     def _clean_corrupted_shape_keys(self):
         """主动检测并清理所有物体上损坏的形态键数据块
         
@@ -254,14 +254,14 @@ class SKE_AutomationPipeline:
         for obj in self.target_objects:
             if obj.hide_viewport or obj.hide_render or obj.hide_get():
                 continue
-            
+
             if obj.data and obj.data.shape_keys:
                 for i, kb in enumerate(obj.data.shape_keys.key_blocks):
                     if i == 0: continue
                     slot_index = i
                     shape_key_name = kb.name
                     classification_data[slot_index][shape_key_name].append(obj.name)
-        
+
         if not classification_data:
             print("  [Classify] 未在任何物体上找到可分类的形态键。")
             return
@@ -273,7 +273,7 @@ class SKE_AutomationPipeline:
             output_lines.append(f"槽位 {slot}:")
             sk_data = classification_data[slot]
             sorted_sk_names = sorted(sk_data.keys())
-            
+
             for sk_name in sorted_sk_names:
                 output_lines.append(f"  - 名称: {sk_name}")
                 object_list = sk_data[sk_name]
@@ -301,15 +301,15 @@ class SKE_AutomationPipeline:
 
         try:
             print("--- [步骤 1] 初始化并准备物体 ---")
-            
+
             self.target_objects.clear()
             self._collect_objects_from_node_tree(self.props.ske_node_tree_name)
-            
+
             print("  [Init] 检查并清理损坏的形态键数据块...")
             removed = self._clean_corrupted_shape_keys()
             if removed > 0:
                 print(f"  [Init] 已清理 {removed} 个损坏形态键，将重新统计槽位数。")
-            
+
             for obj in self.target_objects:
                 if obj.data and obj.data.shape_keys:
                     num_keys = len(obj.data.shape_keys.key_blocks)
@@ -343,7 +343,7 @@ class SKE_AutomationPipeline:
             print(f"\n--- [步骤 3] 循环导出 {self.max_shape_key_slots} 个变形形态 ---")
             if self.max_shape_key_slots == 0:
                 print("  [Info] 未找到任何可导出的形态键，流程提前结束。")
-            
+
             for i in range(self.max_shape_key_slots):
                 slot_index = i + 1
                 loop_start_time = time.time()
@@ -393,7 +393,7 @@ class SKE_AutomationPipeline:
         except Exception as e:
             print(f"\n!!! 自动化流程发生严重错误 !!!")
             traceback.print_exc()
-            raise e 
+            raise e
         finally:
             print("\n--- [Final Cleanup] 执行最终清理 ---")
             if self.target_objects:

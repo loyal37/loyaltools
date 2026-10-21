@@ -76,9 +76,17 @@ def check_remote_metadata(release_tag: str) -> list[str]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--repository", type=Path, default=Path.cwd())
-    parser.add_argument("--release-tag")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repository",
+        type=Path,
+        default=Path.cwd(),
+        help="repository checkout to check (default: current directory)",
+    )
+    parser.add_argument(
+        "--release-tag",
+        help="also check the repository description and this release's metadata",
+    )
     return parser.parse_args()
 
 

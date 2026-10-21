@@ -23,20 +23,20 @@ class BlenderDataExtractor:
     semantic_converters: Dict[AbstractSemantic, List[callable]] = {}
 
     def get_data(
-        self, 
-        mesh: bpy.types.Mesh, 
-        layout: BufferLayout, 
+        self,
+        mesh: bpy.types.Mesh,
+        layout: BufferLayout,
         blender_data_formats: Dict[Semantic, DXGIFormat],
-        semantic_converters: Dict[AbstractSemantic, List[callable]], 
+        semantic_converters: Dict[AbstractSemantic, List[callable]],
         format_converters: Dict[AbstractSemantic, List[callable]],
         vertex_ids_cache: Optional[numpy.ndarray] = None,
         flip_winding: bool = False,
         output_with_proxy_layout: bool = False,
     ) -> Tuple[numpy.ndarray, NumpyBuffer]:
-        
+
         self.blender_data_formats = blender_data_formats
-        
-        # Initialize converters 
+
+        # Initialize converters
         for semantic, converter in self.semantic_converters.items():
             if semantic not in semantic_converters:
                 semantic_converters[semantic] = converter
@@ -84,7 +84,7 @@ class BlenderDataExtractor:
 
         return index_data, vertex_buffer
 
-    def make_proxy_layout(self, 
+    def make_proxy_layout(self,
                           export_layout: BufferLayout,
                           semantic_converters: Dict[AbstractSemantic, List[callable]]) -> BufferLayout:
         # VertexId is required for export process, we should ensure its availability
@@ -146,24 +146,24 @@ class BlenderDataExtractor:
 
         return proxy_layout
 
-    def fetch_data(self, 
-                   data_source, 
-                   data_name: str, 
-                   data_type: numpy.dtype, 
+    def fetch_data(self,
+                   data_source,
+                   data_name: str,
+                   data_type: numpy.dtype,
                    size: int = 0) -> numpy.ndarray:
-        
+
         if size == 0:
             size = len(data_source)
         result = numpy.empty(size, dtype=data_type)
         data_source.foreach_get(data_name, result.ravel())
         return result
 
-    def get_loop_data(self, 
-                      mesh: bpy.types.Mesh, 
-                      proxy_layout: BufferLayout, 
-                      flip_winding = False, 
+    def get_loop_data(self,
+                      mesh: bpy.types.Mesh,
+                      proxy_layout: BufferLayout,
+                      flip_winding = False,
                       dedupe = False) -> Tuple[NumpyBuffer, numpy.ndarray]:
-        
+
         start_time = time.time()
 
         # Make loop data layout
@@ -241,7 +241,7 @@ class BlenderDataExtractor:
             # Note: foreach_get provides loop data in the same order as iteration over polygons
             index_data = [indexed_vertices.setdefault(data.tobytes(), len(indexed_vertices)) for data in loop_data.data]
             index_data = numpy.array(index_data, dtype=index_semantic.get_numpy_type())
-                
+
         # Remove vertices with the exactly same attributes
         if dedupe:
             loop_data.remove_duplicates()
@@ -250,10 +250,10 @@ class BlenderDataExtractor:
 
         return loop_data, index_data
 
-    def get_vertex_data(self, 
-                        mesh: bpy.types.Mesh, 
+    def get_vertex_data(self,
+                        mesh: bpy.types.Mesh,
                         proxy_layout: BufferLayout) -> NumpyBuffer:
-        
+
         start_time = time.time()
 
         # Make vertex data layout
@@ -298,20 +298,20 @@ class BlenderDataExtractor:
                 data = self.fetch_data(mesh.attributes[semantic_name].data, 'color', numpy_type, size)
             else:
                 continue
-            
+
             self.sanitize_blender_data(data)
-            
+
             vertex_data.set_field(buffer_semantic.get_name(), data)
 
         print(f'Vertex data fetch time: {time.time() - start_time :.3f}s ({len(vertex_data.get_data())} vertices)')
 
         return vertex_data
 
-    def get_shapekey_data(self, 
-                          obj: bpy.types.Object, 
-                          names_filter: Optional[List[str]] = None, 
+    def get_shapekey_data(self,
+                          obj: bpy.types.Object,
+                          names_filter: Optional[List[str]] = None,
                           deduct_basis = False) -> Dict[str, numpy.ndarray]:
-        
+
         start_time = time.time()
 
         numpy_type = self.blender_data_formats[Semantic.ShapeKey].get_numpy_type()

@@ -42,7 +42,7 @@ class DXGIType(Enum):
 
 class DXGIFormat(Enum):
     def __new__(cls, fmt, dxgi_type):
-        
+
         (numpy_type, list_encoder, list_decoder, type_encoder, type_decoder) = dxgi_type.value
 
         obj = object.__new__(cls)
@@ -85,7 +85,7 @@ class DXGIFormat(Enum):
                 obj.value_bit_width = value_bit_width
                 obj.value_byte_width = value_byte_width
                 break
-    
+
         if obj.byte_width <= 0:
             raise ValueError(f'Invalid byte width {obj.byte_width} for {obj.format}!')
 
@@ -93,7 +93,7 @@ class DXGIFormat(Enum):
 
     def get_format(self) -> str:
         return 'DXGI_FORMAT_' + self.format
-    
+
     def get_num_values(self, data_stride = 0) -> int:
         if data_stride > 0:
             # Caller specified data_stride, number of values may differ from the base dtype
@@ -108,7 +108,7 @@ class DXGIFormat(Enum):
             return self.numpy_base_type
         else:
             return (self.numpy_base_type, num_values)
-            
+
     # Float 32
     R32G32B32A32_FLOAT = 'R32G32B32A32_FLOAT', DXGIType.FLOAT32
     R32G32B32_FLOAT = 'R32G32B32_FLOAT', DXGIType.FLOAT32

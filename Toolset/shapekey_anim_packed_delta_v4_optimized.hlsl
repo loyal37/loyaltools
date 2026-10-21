@@ -30,7 +30,7 @@ struct VertexAttributes {
 };
 
 RWStructuredBuffer<VertexAttributes> rw_buffer : register(u5);
-StructuredBuffer<float3> shapekey_pos_deltas[MAX_SLOTS] : register(t51); 
+StructuredBuffer<float3> shapekey_pos_deltas[MAX_SLOTS] : register(t51);
 StructuredBuffer<int> shapekey_maps[MAX_SLOTS] : register(t75);
 
 // Per-vertex FREQ index buffer (packed: vertex * MAX_SLOTS + slot)
@@ -48,9 +48,9 @@ Texture1D<float4> IniParams : register(t120);
 void main(uint3 threadID : SV_DispatchThreadID)
 {
     uint i = threadID.x;
-    
+
     VertexAttributes output = rw_buffer[i];
-    
+
     float3 total_diff_position = float3(0.0, 0.0, 0.0);
 
     // --- [PYTHON-MANAGED LOGIC START] ---
@@ -59,7 +59,7 @@ void main(uint3 threadID : SV_DispatchThreadID)
     // --- [PYTHON-MANAGED LOGIC END] ---
 
     output.position += total_diff_position;
-    
+
     rw_buffer[i] = output;
 }
 // --- END OF FILE shapekey_anim_packed_delta_v4_optimized.hlsl ---

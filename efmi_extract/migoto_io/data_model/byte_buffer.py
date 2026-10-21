@@ -80,7 +80,7 @@ class AbstractSemantic:
 
     def __repr__(self):
         return f'{self.enum}_{self.index}'
-    
+
     def get_name(self):
         name = self.enum.value
         if self.index > 0:
@@ -107,7 +107,7 @@ class BufferSemantic:
         # Calculate byte stride
         if self.stride == 0:
             self.stride = self.format.byte_width
-        
+
     def __hash__(self):
         return hash((self.abstract, self.input_slot, self.format.format, self.stride, self.offset))
 
@@ -136,7 +136,7 @@ class BufferSemantic:
 
     def get_numpy_type(self) -> Union[int, Tuple[Union[numpy.integer, numpy.floating], int]]:
         return self.format.get_numpy_type(self.stride)
-    
+
 
 @dataclass
 class BufferLayout:
@@ -178,7 +178,7 @@ class BufferLayout:
             offset += element.stride
 
     def get_element(self, element: Union[AbstractSemantic, Semantic, int]) -> BufferSemantic | None:
-        
+
         if isinstance(element, str):
             for layout_element in self.semantics:
                 if element == layout_element.get_name():
@@ -191,17 +191,17 @@ class BufferLayout:
                 # raise ValueError(f'Layout element with id {element} is out of 0-{len(self.semantics)} bounds!')
                 return None
             return self.semantics[element]
-        
+
         if isinstance(element, Semantic):
             element = AbstractSemantic(element)
 
         if not isinstance(element, AbstractSemantic):
             raise ValueError(f'Layout element search by type {type(element)} of value {element} is not supported!')
-        
+
         for layout_element in self.semantics:
             if element == layout_element.abstract:
                 return layout_element
-            
+
         return None
 
     def set_element(self, abstract: AbstractSemantic, semantic: BufferSemantic):
@@ -244,27 +244,27 @@ class BufferLayout:
         for semantic in self.semantics:
             dtype = numpy.dtype(dtype.descr + [(semantic.abstract.get_name(), (semantic.get_numpy_type()))])
         return dtype
-    
+
     def get_max_input_slot(self) -> int:
         return max([semantic.input_slot for semantic in self.semantics])
 
     def get_input_slots(self) -> set[int]:
         return {semantic.input_slot for semantic in self.semantics}
-    
+
     def get_elements_in_slot(self, input_slot: int) -> list[BufferSemantic]:
         return [semantic for semantic in self.semantics if semantic.input_slot == input_slot]
-    
+
     @classmethod
     def from_buffer_semantics(cls, buffer_semantics: list[BufferSemantic]) -> "BufferLayout":
         layout = cls([])
         for buffer_semantic in buffer_semantics:
             layout.add_element(buffer_semantic)
         return layout
-    
+
     def get_input_slot_layout(self, input_slot: int) -> "BufferLayout":
         semantics = self.get_elements_in_slot(input_slot)
         return BufferLayout.from_buffer_semantics(semantics)
-    
+
     def sort(self):
         self.semantics.sort(key=attrgetter('input_slot', 'offset'))
 
@@ -346,7 +346,7 @@ class BufferLayout:
         if byte_width >= 12:
             formats.append(DXGIFormat.R32G32B32_UINT)
             byte_width -= 12
-            
+
         # Consume 8-byte block as R32G32_UINT
         if byte_width >= 8:
             formats.append(DXGIFormat.R32G32_UINT)
@@ -356,7 +356,7 @@ class BufferLayout:
         if byte_width >= 4:
             formats.append(DXGIFormat.R8G8B8A8_UINT)
             byte_width -= 4
-            
+
         # Consume remainder as composed 8-bit UINT
         if byte_width == 3:
             formats.append(DXGIFormat.R8G8B8_UINT)
@@ -442,7 +442,7 @@ class NumpyBuffer:
         semantic = self.layout.get_element(field)
         if semantic is None:
             raise ValueError(f'Semantic {field} not found in the layout of NumpyBuffer!')
-        # Ensure that NumpyBuffer data is initialized with target field 
+        # Ensure that NumpyBuffer data is initialized with target field
         target_field = self.get_field(semantic.get_name())
         if target_field is None:
             raise ValueError(f'Field {field} not found in the data of NumpyBuffer!')
@@ -478,12 +478,12 @@ class NumpyBuffer:
 
     def import_semantic_data(
         self,
-        data: numpy.ndarray, 
-        semantic: Union[BufferSemantic, int], 
+        data: numpy.ndarray,
+        semantic: Union[BufferSemantic, int],
         semantic_converters: list[Callable] | None = None,
         format_converters: list[Callable] | None = None,
     ):
-        
+
         if isinstance(semantic, int):
             semantic = self.layout.semantics[semantic]
         current_semantic = self.layout.get_element(semantic.abstract)
@@ -501,12 +501,12 @@ class NumpyBuffer:
             self.set_field(current_semantic.get_name(), data)
         except Exception as e:
             raise ValueError(f'Failed to import semantic {semantic} to buffer layout {self.layout}: {str(e)}') from e
-        
+
     def import_data(self,
                     data: 'NumpyBuffer',
                     semantic_converters: dict[AbstractSemantic, list[Callable]],
                     format_converters: dict[AbstractSemantic, list[Callable]]):
-        
+
         for buffer_semantic in self.layout.semantics:
 
             data_semantic = data.layout.get_element(buffer_semantic.abstract)
@@ -516,12 +516,12 @@ class NumpyBuffer:
             field_data = data.get_field(buffer_semantic.get_name())
 
             self.import_semantic_data(
-                field_data, 
+                field_data,
                 data_semantic,
                 semantic_converters.get(buffer_semantic.abstract, []),
                 format_converters.get(buffer_semantic.abstract, []),
             )
-            
+
     def import_raw_data(self, data: numpy.ndarray | bytes):
         self.data = numpy.frombuffer(data, dtype=self.layout.get_numpy_type())
 
@@ -576,7 +576,7 @@ class NumpyBuffer:
         matches = pattern.findall(data)
         if not matches:
             raise ValueError(f'Faield to import txt data: no matches for {data}')
-        
+
         data = numpy.array(matches, dtype=dtype)  # parse floats first
 
         # Fill fields
@@ -722,7 +722,7 @@ class ByteBuffer:
         if src_byte_buffer.num_elements != self.num_elements:
             raise ValueError('source buffer len %d differs from destination buffer len %d' % (
                     src_byte_buffer.num_elements, self.num_elements))
-        
+
         # Calculate semantic map
         semantic_map = self.map_semantics(src_byte_buffer, self, semantic_map=semantic_map, skip_missing=skip_missing)
 
@@ -879,7 +879,7 @@ class IndexBuffer(ByteBuffer):
             self.faces_to_bytes()
         assert (self.num_elements * 3 == self.index_count)
         return super().get_bytes(semantic)
-    
+
     def get_numpy_array(self):
         return numpy.frombuffer(self.get_bytes(), dtype=self.layout.semantics[0].get_numpy_type())
 

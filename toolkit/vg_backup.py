@@ -29,7 +29,7 @@ class BackupVGWeights(bpy.types.Operator):
 
     def execute(self, context):
         obj = context.active_object
-        
+
         group_map = {vg.index: vg.name for vg in obj.vertex_groups}
         vertex_weights = defaultdict(list)
 
@@ -37,21 +37,21 @@ class BackupVGWeights(bpy.types.Operator):
             for g in v.groups:
                 if g.weight > 1e-6:
                     vertex_weights[v.index].append([g.group, g.weight])
-        
+
         backup_data = {
             "group_map": group_map,
             "vertex_weights": vertex_weights
         }
-        
+
         json_data_str = json.dumps(backup_data)
-        
+
         new_item = obj.vg_backups.add()
         new_item.name = f"备份 {time.strftime('%Y-%m-%d %H:%M:%S')}"
         new_item.timestamp = time.time()
         new_item.data = json_data_str.encode('utf-8')
-        
+
         obj.vg_backups_index = len(obj.vg_backups) - 1
-        
+
         self.report({'INFO'}, f"已为 '{obj.name}' 创建新的权重备份。")
         return {'FINISHED'}
 
@@ -82,11 +82,11 @@ class RestoreVGWeights(bpy.types.Operator):
         vg_names_to_remove = [vg.name for vg in obj.vertex_groups]
         for vg_name in vg_names_to_remove:
             obj.vertex_groups.remove(obj.vertex_groups[vg_name])
-        
+
         backup_group_names = set(backup_group_map.values())
         for name in backup_group_names:
             obj.vertex_groups.new(name=name)
-        
+
         current_vg_map = {vg.name: vg for vg in obj.vertex_groups}
 
         for vert_idx_str, weights in vertex_weights.items():
@@ -116,7 +116,7 @@ class RemoveVGBackup(bpy.types.Operator):
     def execute(self, context):
         obj = context.active_object
         index = obj.vg_backups_index
-        
+
         if len(obj.vg_backups) > 0 and index < len(obj.vg_backups):
             obj.vg_backups.remove(index)
             obj.vg_backups_index = min(max(0, index - 1), len(obj.vg_backups) - 1)
@@ -138,20 +138,20 @@ class BatchBackupVGWeights(bpy.types.Operator):
 
     def execute(self, context):
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        
+
         if not selected_meshes:
             self.report({'WARNING'}, "没有选中的网格物体")
             return {'CANCELLED'}
-        
+
         success_count = 0
         failed_objects = []
-        
+
         for obj in selected_meshes:
             try:
                 if not obj.vertex_groups:
                     failed_objects.append(f"{obj.name} (无顶点组)")
                     continue
-                
+
                 group_map = {vg.index: vg.name for vg in obj.vertex_groups}
                 vertex_weights = defaultdict(list)
 
@@ -159,28 +159,28 @@ class BatchBackupVGWeights(bpy.types.Operator):
                     for g in v.groups:
                         if g.weight > 1e-6:
                             vertex_weights[v.index].append([g.group, g.weight])
-                
+
                 backup_data = {
                     "group_map": group_map,
                     "vertex_weights": vertex_weights
                 }
-                
+
                 json_data_str = json.dumps(backup_data)
-                
+
                 new_item = obj.vg_backups.add()
                 new_item.name = f"批量备份 {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 new_item.timestamp = time.time()
                 new_item.data = json_data_str.encode('utf-8')
-                
+
                 success_count += 1
             except Exception as e:
                 failed_objects.append(f"{obj.name} (错误: {str(e)})")
-        
+
         if success_count > 0:
             self.report({'INFO'}, f"已成功为 {success_count} 个物体创建权重备份")
         if failed_objects:
             self.report({'WARNING'}, f"以下物体备份失败: {', '.join(failed_objects)}")
-        
+
         return {'FINISHED'}
 
 
@@ -196,35 +196,35 @@ class BatchRestoreVGWeights(bpy.types.Operator):
 
     def execute(self, context):
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
-        
+
         if not selected_meshes:
             self.report({'WARNING'}, "请选择至少一个网格物体")
             return {'CANCELLED'}
-        
+
         success_count = 0
         failed_objects = []
-        
+
         for obj in selected_meshes:
             try:
                 if not obj.vg_backups or len(obj.vg_backups) == 0:
                     failed_objects.append(f"{obj.name} (无备份)")
                     continue
-                
+
                 backup_item = obj.vg_backups[0]
-                
+
                 json_data_str = backup_item.data.decode('utf-8')
                 backup_data = json.loads(json_data_str)
                 backup_group_map = backup_data['group_map']
                 vertex_weights = backup_data['vertex_weights']
-                
+
                 vg_names_to_remove = [vg.name for vg in obj.vertex_groups]
                 for vg_name in vg_names_to_remove:
                     obj.vertex_groups.remove(obj.vertex_groups[vg_name])
-                
+
                 backup_group_names = set(backup_group_map.values())
                 for name in backup_group_names:
                     obj.vertex_groups.new(name=name)
-                
+
                 current_vg_map = {vg.name: vg for vg in obj.vertex_groups}
 
                 for vert_idx_str, weights in vertex_weights.items():
@@ -236,16 +236,16 @@ class BatchRestoreVGWeights(bpy.types.Operator):
                         if backup_group_name and backup_group_name in current_vg_map:
                             vg = current_vg_map[backup_group_name]
                             vg.add([vert_idx], weight, 'ADD')
-                
+
                 success_count += 1
             except Exception as e:
                 failed_objects.append(f"{obj.name} (错误: {str(e)})")
-        
+
         if success_count > 0:
             self.report({'INFO'}, f"已成功为 {success_count} 个物体恢复权重")
         if failed_objects:
             self.report({'WARNING'}, f"以下物体恢复失败: {', '.join(failed_objects)}")
-        
+
         return {'FINISHED'}
 
 

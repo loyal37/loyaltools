@@ -97,7 +97,7 @@ class ATP_OT_BakeAndImportAlembic(bpy.types.Operator):
 
                 if source_obj.type == 'MESH' and target_obj.type == 'MESH':
                     self.report({'INFO'}, f"开始从 '{source_obj.name}' 传递顶点组到 '{target_obj.name}'")
-                    
+
                     pre_transfer_active = context.view_layer.objects.active
                     pre_transfer_selection = context.selected_objects[:]
 
@@ -246,7 +246,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
                 return static_verts_list
 
             initial_dynamic_indices = {i for i, is_static in enumerate(static_verts_list) if not is_static}
-            
+
             additional_dynamic_indices = set()
             for poly in mesh.polygons:
                 is_poly_dynamic = False
@@ -257,7 +257,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
                 if is_poly_dynamic:
                     for vert_index in poly.vertices:
                         additional_dynamic_indices.add(vert_index)
-            
+
             if not additional_dynamic_indices:
                 return static_verts_list
 
@@ -265,9 +265,9 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
             for i in additional_dynamic_indices:
                 if i < len(new_static_verts_list):
                     new_static_verts_list[i] = False
-            
+
             return new_static_verts_list
-            
+
         finally:
             eval_obj.to_mesh_clear()
 
@@ -296,7 +296,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
         vertex_map = {new_idx: old_idx for new_idx, old_idx in enumerate(sorted_verts_to_keep)}
 
         bmesh.ops.delete(bm, geom=verts_to_delete, context='VERTS')
-        
+
         part_name_suffix = "StaticBase" if is_static_part else f"{frame:03d}"
         new_mesh_name = f"{obj.name}_{part_name_suffix}"
         new_obj_name = f"{props.be_object_prefix}{obj.name}_{part_name_suffix}"
@@ -393,7 +393,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
 
         if props.anim_split_set_linear:
             self.set_linear_interpolation(original_objects)
-        
+
         coll_obj_map = defaultdict(list)
         for obj in original_objects:
             if not obj.users_collection:
@@ -405,7 +405,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
         has_alembic = any(is_alembic_object(obj) for obj in original_objects)
         if props.anim_split_separate_static and not has_alembic:
             static_vertices_map = self.analyze_static_vertices(context, original_objects, props)
-            
+
             self.report({'INFO'}, "正在根据面的完整性修正动态顶点...")
             corrected_static_map = {}
             for obj in original_objects:
@@ -420,7 +420,7 @@ class ATP_OT_SplitAnimation(bpy.types.Operator):
 
         try:
             for parent_coll, objects_in_coll in coll_obj_map.items():
-                
+
                 if props.anim_split_separate_static and static_vertices_map:
                     for obj in objects_in_coll:
                         if obj.name in static_vertices_map:

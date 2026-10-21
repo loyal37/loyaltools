@@ -23,12 +23,12 @@ class BMTP_Properties(bpy.types.PropertyGroup):
 
     uv_delete_pattern: bpy.props.StringProperty(name="匹配模式", default=r'^TEXCOORD\d*\.xy$',
                                                 description="用于匹配要删除的UV贴图名称的正则表达式")
-    
+
     uv_rename_old_pattern: bpy.props.StringProperty(name="旧名称模式", default=r'UVMap',
                                                    description="用于匹配要重命名的UV贴图名称的正则表达式")
     uv_rename_new_template: bpy.props.StringProperty(name="新名称模板", default="UVMap_{index}",
                                                      description="新UV贴图名称的模板，{index}将被替换为索引号")
-    
+
     uv_add_count: bpy.props.IntProperty(name="添加数量", default=1, min=1, max=10,
                                         description="要添加的UV贴图数量")
     uv_add_name_template: bpy.props.StringProperty(name="名称模板", default="UVMap_{index}",
@@ -36,7 +36,7 @@ class BMTP_Properties(bpy.types.PropertyGroup):
 
     mod_delete_names: bpy.props.StringProperty(name="修改器名称", default="Subdivision,Mirror,Solidify",
                                                description="要删除的修改器名称列表，用逗号分隔")
-    
+
     mod_apply_names: bpy.props.StringProperty(name="修改器名称", default="Subdivision,Mirror,Solidify",
                                              description="要应用的修改器名称列表，用逗号分隔")
 
@@ -51,7 +51,7 @@ class BMTP_Properties(bpy.types.PropertyGroup):
                                                       description="在传递权重时使用形态键位置而非基础网格位置")
     wt_use_armature_positions: bpy.props.BoolProperty(name="使用骨骼位置", default=False,
                                                        description="在传递权重时使用骨骼修改器变形后的位置（需要模型有骨骼修改器）")
-                                       
+
     wt_smooth_factor: bpy.props.FloatProperty(
         name="平滑系数",
         description="平滑操作的强度",
@@ -66,7 +66,7 @@ class BMTP_Properties(bpy.types.PropertyGroup):
         min=1,
         max=100
     )
-    
+
     wt_spread_iterations: bpy.props.IntProperty(
         name="扩散迭代次数",
         description="权重扩散操作的迭代次数",
@@ -74,7 +74,7 @@ class BMTP_Properties(bpy.types.PropertyGroup):
         min=1,
         max=50
     )
-                                       
+
     align_axis: bpy.props.EnumProperty(
         name="对齐轴向",
         items=[('POSITIVE_X', "+X", "将骨骼的'Y'轴对齐到其局部'+X'轴"),
@@ -99,7 +99,7 @@ class BMTP_Properties(bpy.types.PropertyGroup):
         type=bpy.types.Collection,
         description="要将源项目关联到的目标集合"
     )
-        
+
     bridge_segments: bpy.props.IntProperty(
         name="分段数",
         description="桥接的分段数，用于控制桥接的平滑度",

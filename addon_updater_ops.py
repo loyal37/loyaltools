@@ -241,10 +241,10 @@ class AddonUpdaterUpdateNow(bpy.types.Operator):
         if updater.manual_only:
             bpy.ops.wm.url_open(url=updater.website)
             return {'FINISHED'}
-        
+
         if updater.update_link is None:
             updater.check_for_update(now=True)
-        
+
         if updater.update_link:
             try:
                 res = updater.run_update(force=True,
@@ -925,7 +925,7 @@ def update_settings_ui(self, context, element=None):
         split.scale_y = 2
         split.operator(AddonUpdaterCheckNow.bl_idname,
                        text="", icon="FILE_REFRESH")
-        
+
         # Add version selection button
         if len(updater.tags) > 1:
             col = box.row()
@@ -1217,7 +1217,7 @@ def register(bl_info):
     # update. If a pattern file is not found in new update, no action is taken
     # NOTE: This does NOT delete anything proactively, rather only defines what
     # is allowed to be overwritten during an update execution.
-    updater.overwrite_patterns = ["*.png", "*.jpg", "*.hlsl", "*.py", "*.pyc", "README.md", "LICENSE.txt"]
+    updater.overwrite_patterns = ["*.png", "*.jpg", "*.hlsl", "*.py", "*.pyc", "README.md", "LICENSE"]
     # updater.overwrite_patterns = []
     # other examples:
     # ["*"] means ALL files/folders will be overwritten by update, was the

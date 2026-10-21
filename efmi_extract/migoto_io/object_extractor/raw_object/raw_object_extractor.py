@@ -50,7 +50,7 @@ class DrawCallFilter:
                     break
             if resource_found:
                 continue
-                
+
             buffers = shader_call.resources
 
             vb0 = buffers.get_by_slot(ResourceSlot(ShaderType.Any, SlotType.VertexBuffer, 0))
@@ -154,7 +154,7 @@ class RawObjectFilter:
                             break
             if not resource_found:
                 return False
-            
+
         return True
 
 
@@ -214,12 +214,12 @@ class RawObjectExtractor:
         component.shader_calls.append(shader_call)
 
     def extract(self, model: DumpModel) -> dict[str, RawObject]:
-        
+
         shader_calls = self.draw_call_filter.collect(model)
 
         raw_objects: dict[str, RawObject] = {}
         for shader_call in shader_calls:
-                
+
             object_id, gpu_posed = self.identifier.get_object_id(shader_call)
 
             if object_id is None:

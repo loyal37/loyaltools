@@ -1,7 +1,7 @@
 struct V2P {
     float4 pos : SV_Position;
-    nointerpolation uint id : TEXCOORD0; 
-    nointerpolation uint4 raw_bits : TEXCOORD1; 
+    nointerpolation uint id : TEXCOORD0;
+    nointerpolation uint4 raw_bits : TEXCOORD1;
 };
 
 cbuffer CB2 : register(b2) { float4 cb2_data[4096]; };
@@ -13,7 +13,7 @@ V2P main(uint id : SV_VertexID) {
     float y = -0.98 + (id / 64) * 0.03;
     o.pos = float4(x, y, 0.5, 1.0);
     o.id = id;
-    
-    o.raw_bits = asuint(cb2_data[id]); 
+
+    o.raw_bits = asuint(cb2_data[id]);
     return o;
 }

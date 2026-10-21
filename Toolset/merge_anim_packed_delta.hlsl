@@ -16,7 +16,7 @@ struct VertexAttributes {
 RWStructuredBuffer<VertexAttributes> rw_buffer : register(u5);
 
 // t51: The packed position-only delta buffer for this specific model variant.
-StructuredBuffer<float3> delta_positions : register(t51); 
+StructuredBuffer<float3> delta_positions : register(t51);
 
 // t75: The index map corresponding to the packed delta buffer.
 StructuredBuffer<int> delta_map : register(t75);
@@ -25,19 +25,19 @@ StructuredBuffer<int> delta_map : register(t75);
 void main(uint3 threadID : SV_DispatchThreadID)
 {
     uint i = threadID.x;
-    
+
     // Find the index into the packed delta buffer.
     // If there's no change for this vertex, the index will be -1.
     int packed_index = delta_map[i];
-    
+
     if (packed_index != -1)
     {
         // Read the base vertex data.
         VertexAttributes output = rw_buffer[i];
-        
+
         // Read the delta and apply it ONLY to the position.
         output.position += delta_positions[packed_index];
-        
+
         // Write the modified result back.
         rw_buffer[i] = output;
     }

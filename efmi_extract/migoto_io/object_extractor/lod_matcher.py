@@ -201,7 +201,7 @@ class LODMatcher:
         matched_components: dict[MigotoComponent, MigotoComponent] = (
             hash_matched_components | geo_matched_components
         )
-            
+
         for lod_component in lod_object.components:
             if lod_component.metadata.mesh_name.startswith("Skipped"):
                 continue
@@ -258,7 +258,7 @@ class LODMatcher:
                     continue
 
             candidates.append(lod_object)
-            
+
         return candidates
 
     def remap_vertex_groups(
@@ -427,7 +427,7 @@ class LODMatcher:
         similarity_graph = self.calculate_similarity_graph(full_components, lod_components)
 
         return similarity_graph
-    
+
     def make_matched_mesh_name(self, full_component: MigotoComponent, lod_component: MigotoComponent, similarity: float | str) -> str:
         match_type = f"{similarity:.2f}%" if isinstance(similarity, float) else similarity
         mesh_name = f"{full_component.metadata.mesh_name} full={full_component.metadata.ib_hash} lod={lod_component.metadata.ib_hash} match={match_type}"
@@ -461,9 +461,9 @@ class LODMatcher:
                     lod_component.metadata.mesh_name = f"Skipped Component ib={lod_component.metadata.ib_hash} (mesh similarity {similarity:.2f}% is below configured {self.component_similarity_threshold:.2f}% threshold)"
                     continue
                 raise ComponentLowSimilarityError(f"Best matching LoD for {full_component.metadata.mesh_name} has {similarity:.2f}% similarity!")
-            
+
             lod_component.metadata.mesh_name = self.make_matched_mesh_name(full_component, lod_component, similarity)
-            
+
             result[lod_component] = full_component
 
             print(f"Match by geometry (mesh similarity: {similarity:.2f}%): {full_component.__repr__()} == {lod_component.__repr__()} ")

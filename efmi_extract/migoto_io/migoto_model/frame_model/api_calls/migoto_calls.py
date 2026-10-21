@@ -70,7 +70,7 @@ class MigotoDumpFile(CommandCall):
             resource = dump_model.current_resources.get_by_slot(slot)
 
         # Current implementation is still missing some D3D11 calls processing, so resource may seemingly appear "out from nowhere".
-        # When that happens, lets show warning along with the entire commands stack (but it will contain only explicitly set resources). 
+        # When that happens, lets show warning along with the entire commands stack (but it will contain only explicitly set resources).
         if resource is None:
             print(f"WARNING [{shader_call.id:06d}]: Skipped {slot} resource processing due to missing registration (related D3D11 API command processing not implemented?)!")
             print(f"    Command: [line={self.raw_command.line_id}]: {self.raw_command.line}")
@@ -118,7 +118,7 @@ class MigotoDumpFile(CommandCall):
 
         if resource.hash is None or resource.hash == "None":
             return
-        
+
         if isinstance(resource, MigotoBuffer) and resource.data_descriptor is not None:
 
             resource.load_format()

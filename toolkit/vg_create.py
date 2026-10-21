@@ -55,11 +55,11 @@ class CleanVertexGroups(bpy.types.Operator):
                 for vg in obj.vertex_groups:
                     if vg.name in names_to_remove:
                         vgs_to_remove.add(vg)
-                    
+
                     total_weight = sum(g.weight for v in obj.data.vertices for g in v.groups if g.group == vg.index)
                     if total_weight < 1e-6:
                         vgs_to_remove.add(vg)
-                
+
                 if vgs_to_remove:
                     for vg in [v for v in vgs_to_remove if v.name in obj.vertex_groups]:
                         obj.vertex_groups.remove(vg)
@@ -98,14 +98,14 @@ class BatchDeleteVG(bpy.types.Operator):
                 processed_objects += 1
                 if not obj.vertex_groups:
                     continue
-                
+
                 deleted_count = 0
                 for vg in list(obj.vertex_groups):
                     if vg.name in names_to_delete:
                         obj.vertex_groups.remove(vg)
                         deleted_count += 1
                         total_deleted += 1
-        
+
         self.report({'INFO'}, f"操作完成！处理了 {processed_objects} 个物体，删除了 {total_deleted} 个顶点组。")
         return {'FINISHED'}
 
@@ -127,7 +127,7 @@ class BatchRenameVG(bpy.types.Operator):
         if not old_name:
             self.report({'ERROR'}, "旧名称不能为空")
             return {'CANCELLED'}
-        
+
         if not new_name:
             self.report({'ERROR'}, "新名称不能为空")
             return {'CANCELLED'}
@@ -145,7 +145,7 @@ class BatchRenameVG(bpy.types.Operator):
                 processed_objects += 1
                 if not obj.vertex_groups:
                     continue
-                
+
                 if new_name in obj.vertex_groups and old_name in obj.vertex_groups:
                      self.report({'WARNING'}, f"物体 '{obj.name}' 中已同时存在 '{old_name}' 和 '{new_name}'，为避免冲突已跳过")
                      continue
@@ -154,7 +154,7 @@ class BatchRenameVG(bpy.types.Operator):
                 if vg_to_rename:
                     vg_to_rename.name = new_name
                     renamed_count += 1
-        
+
         self.report({'INFO'}, f"操作完成！处理了 {processed_objects} 个物体，重命名了 {renamed_count} 个顶点组。")
         return {'FINISHED'}
 

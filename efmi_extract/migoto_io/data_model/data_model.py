@@ -144,7 +144,7 @@ class DataModel:
         )
 
         buffers = self.build_buffers(index_data, vertex_buffer, excluded_buffers, buffers_format)
-        
+
         vertex_ids = vertex_buffer.get_field(AbstractSemantic(Semantic.VertexId))
 
         return buffers, vertex_ids
@@ -157,7 +157,7 @@ class DataModel:
         buffers_format: dict[str, BufferLayout],
         extend_ib_width: bool = True,
     ) -> dict[str, NumpyBuffer]:
-        
+
         start_time = time.time()
 
         # Reshape flat array [0,1,2,3,4,5] to [[0,1,2],[3,4,5]]
@@ -209,11 +209,11 @@ class DataModel:
         return result
 
     def export_data(
-            self, 
-            context: bpy.types.Context, 
-            collection: bpy.types.Collection, 
-            mesh: bpy.types.Mesh, 
-            excluded_buffers: list[str], 
+            self,
+            context: bpy.types.Context,
+            collection: bpy.types.Collection,
+            mesh: bpy.types.Mesh,
+            excluded_buffers: list[str],
             buffers_format: dict[str, BufferLayout],
             mirror_mesh: bool = False,
             mesh_scale: float = 1.0,
@@ -238,7 +238,7 @@ class DataModel:
         return index_data, vertex_buffer
 
     def make_export_layout(
-            self, 
+            self,
             buffers_format: dict[str, BufferLayout],
             excluded_buffers: list[str]
         ):
@@ -267,18 +267,18 @@ class DataModel:
         return export_layout, fetch_loop_data
 
     def get_mesh_data(
-            self, 
-            context: bpy.types.Context, 
+            self,
+            context: bpy.types.Context,
             collection: bpy.types.Collection,
-            mesh: bpy.types.Mesh, 
-            export_layout: BufferLayout, 
-            fetch_loop_data: bool, 
+            mesh: bpy.types.Mesh,
+            export_layout: BufferLayout,
+            fetch_loop_data: bool,
             mirror_mesh: bool = False,
             mesh_scale: float = 1.0,
             mesh_rotation: tuple[float] = (0.0, 0.0, 0.0),
             cache_index_data: bool = False,
         ):
-        
+
         vertex_ids_cache, cache_vertex_ids = None, False
 
         flip_winding = self.flip_winding if not mirror_mesh else not self.flip_winding
@@ -296,7 +296,7 @@ class DataModel:
                     # Valid vertex ids cache exists, lets load it
                     vertex_ids_cache = numpy.array(json.loads(context.scene.efmi_tools_settings.vertex_ids_cache))
                 else:
-                    # Cache is clear, we'll have to fetch loop data once 
+                    # Cache is clear, we'll have to fetch loop data once
                     fetch_loop_data = True
                     cache_vertex_ids = True
         elif context.scene.efmi_tools_settings.vertex_ids_cache:
@@ -360,31 +360,31 @@ class DataModel:
     @staticmethod
     def converter_flip_vector(data: numpy.ndarray) -> numpy.ndarray:
         return -data
-    
+
     @staticmethod
     def converter_mirror_vector(data: numpy.ndarray) -> numpy.ndarray:
         data[:, 0] *= -1
         return data
-    
+
     @staticmethod
     def converter_rotate_vector(data: numpy.ndarray, rotation: tuple[float]) -> numpy.ndarray:
         rotation_matrix = mathutils.Euler(tuple(map(math.radians, rotation)), 'XYZ').to_matrix().to_4x4()
         rotation_matrix_array = numpy.array(rotation_matrix)[:3, :3]
         data = data @ rotation_matrix_array.T
         return data
-        
+
     @staticmethod
     def converter_scale_vector(data: numpy.ndarray, scale: float) -> numpy.ndarray:
         data *= scale
         return data
-    
+
     @staticmethod
     def converter_flip_texcoord_v(data: numpy.ndarray) -> numpy.ndarray:
         if data.dtype != numpy.float32:
             data = data.astype(numpy.float32)
         data[:, 1] = 1.0 - data[:, 1]
         return data
-    
+
     @staticmethod
     def converter_reshape_second_dim(data: numpy.ndarray, width: int) -> numpy.ndarray:
         """
@@ -393,7 +393,7 @@ class DataModel:
         """
         data = numpy.reshape(data, (-1, width))
         return data
-    
+
     @staticmethod
     def converter_resize_second_dim(data: numpy.ndarray, width: int, fill: int | float = 0) -> numpy.ndarray:
         """
@@ -545,8 +545,8 @@ class DataModel:
         data = numpy.rint(data * 511).astype(numpy.int32)
 
         # Clamp to signed 10-bit range
-        data = numpy.clip(data, -511, 511) 
-        
+        data = numpy.clip(data, -511, 511)
+
         # Convert to unsigned 10-bit
         data &= 0x3FF
 
@@ -560,7 +560,7 @@ class DataModel:
         if abstract_semantic not in converters.keys():
             converters[abstract_semantic] = []
         converters[abstract_semantic].insert(0, converter)
-            
+
     @staticmethod
     def converter_normalize_weights(weights: numpy.ndarray, sanitize=True, dtype=numpy.dtype):
         """
@@ -648,7 +648,7 @@ class DataModel:
         Precision loss factor is calculated as (weight_float_part / weight_integer_part)
         Weights with bigger precision loss factors are getting 1's from total precision error value
         """
-        
+
         # Step 1: Normalize weights with 32-bit precision
 
         # Replace any non-float weight values with zeroes
@@ -680,7 +680,7 @@ class DataModel:
         precision_error = 255 - normalized_weights_integer.sum(axis=1)
 
         if max(precision_error) > 0:
-            
+
             # Step 4: Calculate precision loss factor
 
             # Make array of weights with stripped integer part
@@ -707,12 +707,12 @@ class DataModel:
                 target_idx = numpy.arange(normalized_weights_integer.shape[0])[non_zero_error_idx][:, None]
                 # Get per-vertex index of descending-sorted precision loss factor
                 # So precision loss factor [[0.2, 0.4, 0,3, 0.1], [0.3, 0.0, 0,5, 0.1]] will result in [[1, 2, 0, 3], [2, 0, 3, 1]]
-                loss_factor_dsc_idx = numpy.argsort(precision_loss_factor[non_zero_error_idx], axis=1)[:, -max_precision_error:][:, ::-1] 
+                loss_factor_dsc_idx = numpy.argsort(precision_loss_factor[non_zero_error_idx], axis=1)[:, -max_precision_error:][:, ::-1]
                 # Convert precision error to 2-dim array used to distribute error to integer weights
                 # So precision_error of [2, 1, 3] will result in [[1, 1, 0], [1, 0, 0], [1, 1, 1]]
                 distributed_precision_error = numpy.arange(max_precision_error) < precision_error[non_zero_error_idx][:, None]
                 distributed_precision_error = distributed_precision_error.astype(int)
-                # Add ones from distributed_precision_error to normalized_weights_integer according to loss_factor_dsc_idx 
+                # Add ones from distributed_precision_error to normalized_weights_integer according to loss_factor_dsc_idx
                 # So, for each vertex with non-zero error:
                 # [[3, 2, 1]] - loss_factor_dsc_idx
                 # [[1, 1, 0]] - distributed_precision_error
@@ -735,31 +735,31 @@ class DataModel:
         obj_mesh = a_obj.data
         # Build new mesh data
         if vertex_ids is not None:
-            # Use vertex_ids as proxy IDs map to set data 
+            # Use vertex_ids as proxy IDs map to set data
             # Must be used whenever any blender vertex has more than one corner with unique data
             mesh_data = numpy.zeros(len(obj_mesh.vertices), dtype=(numpy.float32, 4))
             mesh_data[vertex_ids] = attribute_data
         else:
             mesh_data = attribute_data
         # Create new vertex attribute FLOAT_COLOR with provided data
-        vertex_attribute = obj_mesh.attributes.new(name=attr_name, type="FLOAT_COLOR", domain="POINT")   
+        vertex_attribute = obj_mesh.attributes.new(name=attr_name, type="FLOAT_COLOR", domain="POINT")
         vertex_attribute.data.foreach_set('color', mesh_data.flatten())
         obj_mesh.update()
 
     def get_shapekeys(
-            self, 
-            obj: bpy.types.Object,  
-            vertex_ids: numpy.ndarray, 
+            self,
+            obj: bpy.types.Object,
+            vertex_ids: numpy.ndarray,
             mirror_mesh: bool = False,
             mesh_scale: float = 1.0,
             mesh_rotation: tuple[float] = (0.0, 0.0, 0.0),
         ) -> tuple[list[ShapeKeyBatch] | None, ShapeKeyData | None, dict[str, numpy.ndarray] | None]:
-        
+
         start_time = time.time()
 
         if len(vertex_ids) == 0:
             return None, None, None
-        
+
         batch_builder = ShapeKeyBatchBuilder(self.data_extractor)
 
         batches = batch_builder.get_shapekey_batches(obj, vertex_ids)
@@ -768,7 +768,7 @@ class DataModel:
             return None, None, None
 
         shapekey_data = ShapeKeyData.from_batches(batches)
-            
+
         if mirror_mesh:
             shapekey_data.position_deltas[:, 0] *= -1
 

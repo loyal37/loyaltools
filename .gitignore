@@ -1,3 +1,8 @@
 __pycache__/
 *.pyc
 loyaltools_updater/
+
+# Blender backups and OS metadata
+*.blend1
+.DS_Store
+Thumbs.db

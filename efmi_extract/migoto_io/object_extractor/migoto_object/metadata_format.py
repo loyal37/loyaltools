@@ -144,7 +144,7 @@ class ExtractedObject:
 
     def as_json(self):
         return json.dumps(asdict(self), indent=4, cls=EnumEncoder)
-    
+
 
 def from_dict(cls, data):
     if not is_dataclass(cls):

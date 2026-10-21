@@ -16,7 +16,7 @@ class ModelSplitByLoosePart(bpy.types.Operator):
     bl_description = "功能与Edit界面的Split => Split by Loose Parts相似，但是分割模型为松散块儿并放入新集合。"
 
     def execute(self, context):
-        
+
         if len(bpy.context.selected_objects) == 0:
             self.report({'ERROR'}, "没有选中的对象！")
             return {'CANCELLED'}
@@ -40,7 +40,7 @@ class ModelSplitByVertexGroup(bpy.types.Operator):
         obj = bpy.context.selected_objects[0]
         collection_name = f"{obj.name}_Splits"
         ObjUtils.split_obj_by_loose_parts_to_collection(obj=obj,collection_name=collection_name)
-        
+
         collection = CollectionUtils.get_collection_by_name(collection_name=collection_name)
         CollectionUtils.select_collection_objects(collection)
         selected_objects = bpy.context.selected_objects
@@ -67,7 +67,7 @@ class ModelSplitByVertexGroup(bpy.types.Operator):
                         number_vgnameset_dict[number] = vgname_quanji
                         exists = True
                         break
-                
+
                 if not exists:
                     number_objlist_dict[len(number_objlist_dict) + 1] = [obj]
                     number_vgnameset_dict[len(number_vgnameset_dict) + 1] = vgname_set
@@ -78,7 +78,7 @@ class ModelSplitByVertexGroup(bpy.types.Operator):
             ObjUtils.merge_objects(obj_list=objlist,target_collection=collection)
         self.report({'INFO'}, "根据顶点组分割模型成功!")
         return {'FINISHED'}
-    
+
 
 class ModelDeleteLoosePoint(bpy.types.Operator):
     bl_idname = "toolkit.delete_loose_point"
@@ -86,16 +86,16 @@ class ModelDeleteLoosePoint(bpy.types.Operator):
     bl_description = "删除模型中的松散点，避免影响后续的模型处理。"
 
     def execute(self, context):
-        
+
         if len(bpy.context.selected_objects) == 0:
             self.report({'ERROR'}, "没有选中的对象！")
             return {'CANCELLED'}
-        
+
         ObjUtils.selected_obj_delete_loose()
 
         self.report({'INFO'}, "删除松散点成功!")
         return {'FINISHED'}
-    
+
 class ModelClearCustomSplitNormals(bpy.types.Operator):
     bl_idname = "toolkit.clear_custom_split_normals"
     bl_label = "清除自定义拆分法向"
@@ -111,18 +111,18 @@ class ModelClearCustomSplitNormals(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
                 bpy.ops.mesh.customdata_custom_splitnormals_clear()
         return {'FINISHED'}
-    
+
 class ModelRenameVertexGroupNameWithTheirSuffix(bpy.types.Operator):
     bl_idname = "toolkit.rename_vertex_group_name_with_their_suffix"
     bl_label = "用模型名称作为前缀重命名顶点组"
     bl_description = "用模型名称作为前缀重命名顶点组，方便后续合并到一个物体后同名称的顶点组不会合在一起冲突，便于后续一键绑定骨骼。"
 
     def execute(self, context):
-        
+
         if len(bpy.context.selected_objects) == 0:
             self.report({'ERROR'}, "没有选中的对象！")
             return {'CANCELLED'}
-        
+
         for obj in context.selected_objects:
             if obj.type == 'MESH':
                 model_name = obj.name
@@ -152,29 +152,29 @@ class SplitMeshByCommonVertexGroup(bpy.types.Operator):
     bl_idname = "toolkit.split_mesh_by_common_vertex_group"
     bl_label = "根据顶点组将模型打碎为松散块儿"
     bl_description = "把当前选中的obj按顶点组进行分割，适用于部分精细刷权重并重新组合模型的场景"
-    
+
     def execute(self, context):
         for obj in bpy.context.selected_objects:
             VertexGroupUtils.split_mesh_by_vertex_group(obj)
         self.report({'INFO'}, self.bl_label + " 成功!")
         return {'FINISHED'}
-    
+
 
 class SmoothNormalSaveToUV(bpy.types.Operator):
     bl_idname = "toolkit.smooth_normal_save_to_uv"
     bl_label = "平滑法线存UV(近似)"
-    bl_description = "平滑法线存UV算法，可用于修复ZZZ,WuWa的某些UV(只是近似实现60%的效果)" 
+    bl_description = "平滑法线存UV算法，可用于修复ZZZ,WuWa的某些UV(只是近似实现60%的效果)"
 
     def execute(self, context):
         AlgorithmUtils.smooth_normal_save_to_uv()
         return {'FINISHED'}
-    
 
 
-        
+
+
 class PropertyCollectionModifierItem(bpy.types.PropertyGroup):
     checked: BoolProperty(
-        name="", 
+        name="",
         default=False
     ) # type: ignore
 
@@ -182,38 +182,38 @@ class WWMI_ApplyModifierForObjectWithShapeKeysOperator(bpy.types.Operator):
     bl_idname = "toolkit.apply_modifier_for_object_with_shape_keys"
     bl_label = "在有形态键的模型上应用修改器"
     bl_description = "Apply selected modifiers and remove from the stack for object with shape keys (Solves 'Modifier cannot be applied to a mesh with shape keys' error when pushing 'Apply' button in 'Object modifiers'). Sourced by Przemysław Bągard"
- 
+
     def item_list(self, context):
         return [(modifier.name, modifier.name, modifier.name) for modifier in bpy.context.object.modifiers]
-    
+
     my_collection: CollectionProperty(
         type=PropertyCollectionModifierItem
     ) # type: ignore
-    
+
     disable_armatures: BoolProperty(
         name="Don't include armature deformations",
         default=True,
     ) # type: ignore
- 
+
     def execute(self, context):
         ob = bpy.context.object
         bpy.ops.object.select_all(action='DESELECT')
         context.view_layer.objects.active = ob
         ob.select_set(True)
-        
+
         selectedModifiers = [o.name for o in self.my_collection if o.checked]
-        
+
         if not selectedModifiers:
             self.report({'ERROR'}, 'No modifier selected!')
             return {'FINISHED'}
-        
+
         success, errorInfo = ShapeKeyUtils.apply_modifiers_for_object_with_shape_keys(context, selectedModifiers, self.disable_armatures)
-        
+
         if not success:
             self.report({'ERROR'}, errorInfo)
-        
+
         return {'FINISHED'}
-        
+
     def draw(self, context):
         if context.object.data.shape_keys and context.object.data.shape_keys.animation_data:
             self.layout.separator()
@@ -227,7 +227,7 @@ class WWMI_ApplyModifierForObjectWithShapeKeysOperator(bpy.types.Operator):
         for prop in self.my_collection:
             box.prop(prop, "checked", text=prop["name"])
         self.layout.prop(self, "disable_armatures")
- 
+
     def invoke(self, context, event):
         self.my_collection.clear()
         for i in range(len(bpy.context.object.modifiers)):
@@ -235,12 +235,12 @@ class WWMI_ApplyModifierForObjectWithShapeKeysOperator(bpy.types.Operator):
             item.name = bpy.context.object.modifiers[i].name
             item.checked = False
         return context.window_manager.invoke_props_dialog(self)
-    
+
 
 class RecalculateTANGENTWithVectorNormalizedNormal(bpy.types.Operator):
     bl_idname = "toolkit.recalculate_tangent_arithmetic_average_normal"
     bl_label = "使用向量相加归一化算法重计算TANGENT"
-    bl_description = "近似修复轮廓线算法，可以达到99%的轮廓线相似度，适用于GI,HSR,ZZZ,HI3 2.0之前的老角色" 
+    bl_description = "近似修复轮廓线算法，可以达到99%的轮廓线相似度，适用于GI,HSR,ZZZ,HI3 2.0之前的老角色"
     def execute(self, context):
         for obj in bpy.context.selected_objects:
             if obj.type == "MESH":
@@ -255,7 +255,7 @@ class RecalculateTANGENTWithVectorNormalizedNormal(bpy.types.Operator):
 class RecalculateCOLORWithVectorNormalizedNormal(bpy.types.Operator):
     bl_idname = "toolkit.recalculate_color_arithmetic_average_normal"
     bl_label = "使用算术平均归一化算法重计算COLOR"
-    bl_description = "近似修复轮廓线算法，可以达到99%的轮廓线相似度，仅适用于HI3 2.0新角色" 
+    bl_description = "近似修复轮廓线算法，可以达到99%的轮廓线相似度，仅适用于HI3 2.0新角色"
 
     def execute(self, context):
         for obj in bpy.context.selected_objects:
@@ -266,7 +266,7 @@ class RecalculateCOLORWithVectorNormalizedNormal(bpy.types.Operator):
                     obj["3DMigoto:RecalculateCOLOR"] = True
                 self.report({'INFO'},"重计算COLOR设为:" + str(obj["3DMigoto:RecalculateCOLOR"]))
         return {'FINISHED'}
-    
+
 
 
 class RenameAmatureFromGame(bpy.types.Operator):
