@@ -4,6 +4,7 @@ import shutil
 import bpy
 
 from ..common.global_config import GlobalConfig
+from ..common.global_key_count_helper import GlobalKeyCountHelper
 from ..common.global_properties import GlobalProterties
 from ..utils.log_utils import LOG
 from ..utils.timer_utils import TimerUtils
@@ -296,6 +297,8 @@ class DirectExportSession:
     def _export_full(self, exporter, folder_name: str):
         BlueprintExportHelper.set_current_buffer_folder_name(folder_name)
         _reset_buffer_folder(folder_name)
+        # 每个 INI 的 $active0..N 都从 0 编号 (见 ExportRoundExecutor.export_with_ini)
+        GlobalKeyCountHelper.initialize()
         exporter.export()
 
     def _export_buffers_only(self, exporter, folder_name: str):

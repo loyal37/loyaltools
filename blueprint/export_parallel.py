@@ -9,6 +9,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..common.global_config import GlobalConfig
+from ..common.global_key_count_helper import GlobalKeyCountHelper
 from ..common.global_properties import GlobalProterties
 from ..common.logic_name import LogicName
 from ..utils.log_utils import LOG
@@ -125,6 +126,9 @@ class ExportRoundExecutor:
 
     @staticmethod
     def export_with_ini(blueprint_model):
+        # $active0..N 按本次 INI 里的 Mod 数编号；计数器是全局的，每个 INI 都要从 0 开始，
+        # 否则同一个 Blender 会话里每导出一次就累加一次
+        GlobalKeyCountHelper.initialize()
         if GlobalConfig.logic_name == LogicName.EFMI:
             ExportEFMI(blueprint_model=blueprint_model).export()
         elif GlobalConfig.logic_name == LogicName.GIMI:

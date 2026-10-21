@@ -111,6 +111,7 @@ def main():
     from LoyalTools.common.global_config import GlobalConfig
     from LoyalTools.common.logic_name import LogicName
     from LoyalTools.common import zzmi_merged_skeleton as zms
+    from LoyalTools.common.global_key_count_helper import GlobalKeyCountHelper
 
     with tempfile.TemporaryDirectory(prefix="loyal_zzmi_merged_export_") as temp_folder:
         dump_folder = os.path.join(temp_folder, "FrameAnalysis-merged")
@@ -164,6 +165,8 @@ def main():
         # 2. unchanged export
         mod_a = os.path.join(temp_folder, "mod_unchanged")
         ini_a = _export(tree_name, mod_a)
+        # $active0..N are numbered per ini: body, hair, accessory and the face
+        assert GlobalKeyCountHelper.generated_mod_number == 4, GlobalKeyCountHelper.generated_mod_number
         assert "ZZMS" not in ini_a, "an unchanged export needs no runtime and hides nothing"
         assert not os.path.isdir(os.path.join(mod_a, "Shaders"))
         body_blend_lines = _section(ini_a, "[TextureOverride_VB_" + ib["body"] + "_" + ib["body"] + "_Blend]")
@@ -195,6 +198,7 @@ def main():
         bpy.ops.object.join()
         mod_b = os.path.join(temp_folder, "mod_hair_in_body")
         ini_b = _export(tree_name, mod_b)
+        assert GlobalKeyCountHelper.generated_mod_number == 4, "the counter must restart for every export"
         body, hair = ib["body"], ib["hair"]
         body_vertices = len(parts["body"]["position"])
         hair_vertices = len(parts["hair"]["position"])
@@ -245,6 +249,7 @@ def main():
                 tree.nodes.remove(node)
         mod_c = os.path.join(temp_folder, "mod_hair_provider")
         ini_c = _export(tree_name, mod_c)
+        assert GlobalKeyCountHelper.generated_mod_number == 2, GlobalKeyCountHelper.generated_mod_number
         accessory = ib["accessory"]
         assert "[TextureOverride_VB_" + hair + "_" + hair + "_Blend]" not in ini_c
         assert _section(ini_c, "[TextureOverride_ZZMS_Hidden_" + hair + "]") == [
