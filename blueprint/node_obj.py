@@ -7,6 +7,7 @@ from ..common.logic_name import LogicName
 from ..common.global_config import GlobalConfig
 from ..common.global_properties import GlobalProterties
 from ..common.object_prefix_helper import ObjectPrefixHelper
+from ..common import zzmi_merged_skeleton as zzmi_merged
 from .node_base import SSMTBlueprintTree, SSMTNodeBase
 
 BLENDER_VERSION = bpy.app.version[:2]
@@ -390,6 +391,21 @@ class SSMTNode_Object_Group(SSMTNodeBase):
              self.inputs.remove(self.inputs[-1])
 
 
+def _is_zzmi_merged_tree(tree) -> bool:
+    '''绝区零骨骼合并的蓝图: 蓝图或其中任一物体带骨骼合并标记 (与导出时的判断相同)'''
+    if tree is None:
+        return False
+    if tree.get(zzmi_merged.TREE_MARKER_MERGED_SKELETON, False):
+        return True
+    for node in tree.nodes:
+        if getattr(node, "bl_idname", "") != 'SSMTNode_Object_Info':
+            continue
+        obj = bpy.data.objects.get(getattr(node, "object_name", ""))
+        if obj is not None and obj.get(zzmi_merged.OBJECT_MARKER_MERGED_SKELETON, False):
+            return True
+    return False
+
+
 class SSMTNode_Result_Output(SSMTNodeBase):
     '''Result Output Node'''
     bl_idname = 'SSMTNode_Result_Output'
@@ -427,6 +443,8 @@ class SSMTNode_Result_Output(SSMTNodeBase):
 
         if GlobalConfig.logic_name == LogicName.ZZMI:
             layout.prop(context.scene.global_properties, "zzz_outline_optimization")
+            if _is_zzmi_merged_tree(self.id_data):
+                layout.prop(context.scene.global_properties, "zzz_merged_frame_delay")
 
         if GlobalConfig.logic_name == LogicName.GIMI:
             layout.prop(context.scene.global_properties, "gimi_use_orfix")

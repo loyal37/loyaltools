@@ -310,6 +310,10 @@ class ExportZZMI(ExportUnity):
             if needs_skin_texture:
                 texture_override_ib_section.append("run = CommandListSkinTexture")
 
+            # 骨骼合并统一延迟: 绘制前后换上 / 换回物体常量
+            for line in self.merged_skeleton.place_begin_lines(draw_ib):
+                texture_override_ib_section.append(line)
+
             if is_cross_ib_source:
                 non_cross_ib_drawcalls = []
                 for drawcall_model in submesh_model.drawcall_model_list:
@@ -384,6 +388,9 @@ class ExportZZMI(ExportUnity):
                     else:
                         print(f"[CrossIB ZZMI] 警告: 未找到源块 submesh for {source_ib_key}")
 
+            for line in self.merged_skeleton.place_end_lines(draw_ib):
+                texture_override_ib_section.append(line)
+
         ini_builder.append_section(texture_override_ib_section)
 
     def add_shape_keyed_texture_sections(self, ini_builder: M_IniBuilder, drawib_model):
@@ -415,6 +422,8 @@ class ExportZZMI(ExportUnity):
                 lines.append(r"run = CommandList\ZZMI\SetTextures")
             if any(texture_markup_info.mark_type == "Hash" for texture_markup_info in texture_markup_info_list):
                 lines.append("run = CommandListSkinTexture")
+            # 骨骼合并统一延迟: 贴图之后重发这次绘制并换上物体常量
+            lines += self.merged_skeleton.face_draw_lines(drawib_model.draw_ib, submesh_model.match_first_index)
             if not lines:
                 continue
             section.append("[TextureOverride_" + drawib_model.get_submesh_texture_override_suffix(submesh_model) + "]")

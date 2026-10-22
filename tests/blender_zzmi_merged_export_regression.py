@@ -19,6 +19,11 @@ Run with:
 Every skinning branch is limited to the component's own skinning draw
 (``VERTEX_COUNT``): full-screen passes keep a character's vb2 bound and must not
 trigger it.  No stream-output target is ever re-bound.
+
+Each case is also exported with the "uniform one-frame delay" option: the whole
+character, the face included, is skinned with the bones of the previous frame
+(the pool is copied at [Present]), the buffers stay byte-identical, and
+switching the option off again gives the ordinary export.
 """
 
 from __future__ import annotations
@@ -44,9 +49,10 @@ def _section(ini_text, header):
     return [line.strip() for line in lines if line.strip() and not line.startswith(";")]
 
 
-def _export(tree_name, output_dir):
+def _export(tree_name, output_dir, frame_delay=False):
     props = bpy.context.scene.global_properties
     props.generate_mod_folder_path = output_dir
+    props.zzz_merged_frame_delay = frame_delay
     os.makedirs(output_dir, exist_ok=True)
     bpy.ops.ssmt.generate_mod_blueprint(blueprint_name=tree_name)
     ini_files = [name for name in os.listdir(output_dir) if name.lower().endswith(".ini")]
@@ -66,6 +72,143 @@ def _read_body_buffers(mod_folder, ib_hash):
 
 def _draw_count(mod_folder, ib_hash):
     return os.path.getsize(os.path.join(mod_folder, "Meshes", ib_hash + "-Position.buf")) // 40
+
+
+def _same_meshes(mod_a, mod_b):
+    meshes_a, meshes_b = os.path.join(mod_a, "Meshes"), os.path.join(mod_b, "Meshes")
+    names = sorted(os.listdir(meshes_a))
+    assert names == sorted(os.listdir(meshes_b)), (names, os.listdir(meshes_b))
+    for name in names:
+        with open(os.path.join(meshes_a, name), "rb") as a, open(os.path.join(meshes_b, name), "rb") as b:
+            assert a.read() == b.read(), name
+
+
+def _check_delay_frame(ini_text, zms, profile, parts, pool_total, placed):
+    """Sections every delayed export has: the [Present] copies, the face hook and the placements.
+
+    ``placed``: ib hashes of the parts drawn through their own object matrix, which are
+    drawn with their matrix of the previous frame, moved by the frame's shared distance.
+    """
+    face = zms.get_component_by_ib(profile)[parts["face"]["spec"]["ib"]]
+    face_name = face["ib_hash"]
+    constants = _section(ini_text, "[Constants]")
+    assert "global $zzms_imported = 0" in constants and "global $zzms_ready = 0" in constants, constants
+    present = _section(ini_text, "[Present]")
+    assert present[:2] == ["if $zzms_imported", "run = CustomShaderZZMS_Advance"], present
+    assert present[2:2 + len(placed)] == ["run = CustomShaderZZMS_PlaceAdvance_" + ib for ib in placed], present
+    assert present[2 + len(placed):] == [
+        "run = CustomShaderZZMS_ShiftClear",
+        "$zzms_ready = 1", "else", "$zzms_ready = 0", "endif", "$zzms_imported = 0"], present
+    for ib in placed:
+        _check_place(ini_text, zms, ib)
+    # Every part of a frame is moved by the same distance, cleared at [Present].
+    assert _section(ini_text, "[CustomShaderZZMS_ShiftClear]") == [
+        "cs = Shaders/" + zms.PLACE_SHADER_FILENAME,
+        "cs-t1 = ref ResourceZZMS_ShiftClearParams", "cs-u2 = ref ResourceZZMS_Shift",
+        "dispatch = 1, 1, 1", "cs-u2 = null", "cs-t1 = null"]
+    assert _section(ini_text, "[ResourceZZMS_ShiftClearParams]")[-1] == "data = 2 0 0 0"
+    assert _section(ini_text, "[ResourceZZMS_Shift]") == [
+        "type = RWBuffer", "format = R32_FLOAT", "array = 4", "bind_flags = shader_resource unordered_access"]
+    assert _section(ini_text, "[CustomShaderZZMS_Advance]") == [
+        "cs = Shaders/" + zms.DELAY_SHADER_FILENAME,
+        "cs-t0 = ref ResourceZZMS_Pool", "cs-t1 = ref ResourceZZMS_AdvanceParams",
+        "cs-u0 = ref ResourceZZMS_PoolPrev",
+        "dispatch = " + str((pool_total + 63) // 64) + ", 1, 1",
+        "cs-u0 = null", "cs-t0 = null", "cs-t1 = null"]
+    assert _section(ini_text, "[ResourceZZMS_AdvanceParams]")[-1] == "data = 0 " + str(pool_total) + " 0 0"
+    for name in ("[ResourceZZMS_Pool]", "[ResourceZZMS_PoolPrev]"):
+        assert _section(ini_text, name) == [
+            "type = RWBuffer", "format = R32G32B32A32_FLOAT", "array = " + str(pool_total * 3),
+            "bind_flags = shader_resource unordered_access"], name
+    # The face keeps the game's mesh and expression; only its bone table is the previous one.
+    assert _section(ini_text, "[TextureOverride_ZZMS_Delay_" + face_name + "]") == [
+        "hash = " + parts["face"]["spec"]["blend"],
+        "if DRAW_TYPE == 1 && VERTEX_COUNT == " + str(face["pose_vertex_count"]),
+        "run = CommandListZZMS_Skin_" + face_name,
+        "endif"]
+    # The game draws the face; each face part is drawn again with the placed object constants
+    # after its textures are bound, the original draw is skipped and vs-cb1 is put back.
+    face_part = _section(ini_text, "[TextureOverride_" + parts["face"]["unique_str"].replace("-", "_") + "]")
+    assert face_part[-6:] == _face_draw_lines(face_name), face_part
+    assert face_part.index(r"run = CommandList\ZZMI\SetTextures") < len(face_part) - 6, face_part
+    assert _section(ini_text, "[CommandListZZMS_Skin_" + face_name + "]") == [
+        "ResourceZZMS_Input = ref vs-t0",
+        "run = CustomShaderZZMS_Import_" + face_name,
+        "$zzms_imported = 1",
+        "if $zzms_ready",
+        "run = CustomShaderZZMS_Delay_" + face_name,
+        "vs-t0 = ref ResourceZZMS_Delayed_" + face_name,
+        "endif"], _section(ini_text, "[CommandListZZMS_Skin_" + face_name + "]")
+    assert _section(ini_text, "[ResourceZZMS_DelayParams_" + face_name + "]")[-1] == (
+        "data = " + str(profile["bones_count"]) + " " + str(face["palette_bone_count"]) + " 0 0")
+    assert "so0" not in ini_text and "handling = skip" not in _section(
+        ini_text, "[TextureOverride_ZZMS_Delay_" + face_name + "]")
+    return face
+
+
+def _face_draw_lines(ib):
+    return [
+        "run = CommandListZZMS_PlaceBegin_" + ib,
+        "if $zzms_ready", "draw = from_caller", "handling = skip", "endif",
+        "run = CommandListZZMS_PlaceEnd_" + ib,
+    ]
+
+
+def _check_placed_draw(ini_text, part_unique_str, ib):
+    """A part we draw: its object constants are swapped in right before its drawindexed and back right after."""
+    lines = _section(ini_text, "[TextureOverride_" + part_unique_str.replace("-", "_") + "]")
+    draws = [index for index, line in enumerate(lines) if line.startswith("drawindexed")]
+    assert draws, lines
+    assert lines[draws[0] - 1] == "run = CommandListZZMS_PlaceBegin_" + ib, lines
+    assert lines[-1] == "run = CommandListZZMS_PlaceEnd_" + ib and draws[-1] == len(lines) - 2, lines
+
+
+def _check_place(ini_text, zms, ib):
+    """A placed part: its object constants are replaced when it is drawn."""
+    assert _section(ini_text, "[CommandListZZMS_PlaceBegin_" + ib + "]") == [
+        "if $zzms_ready",
+        "run = CustomShaderZZMS_Place_" + ib,
+        "ResourceZZMS_GameCb = ref vs-cb1",
+        "vs-cb1 = copy ResourceZZMS_PlaceCb_" + ib,
+        "else",
+        "run = CustomShaderZZMS_PlaceRecord_" + ib,
+        "endif"], ib
+    assert _section(ini_text, "[CommandListZZMS_PlaceEnd_" + ib + "]") == [
+        "if $zzms_ready", "vs-cb1 = ref ResourceZZMS_GameCb", "endif"], ib
+    for section, mode, shift in (("[CustomShaderZZMS_Place_", "ResourceZZMS_PlaceOn", True),
+                                 ("[CustomShaderZZMS_PlaceRecord_", "ResourceZZMS_PlaceOff", False)):
+        assert _section(ini_text, section + ib + "]") == [
+            "cs = Shaders/" + zms.PLACE_SHADER_FILENAME,
+            "cs-cb0 = ref vs-cb1",
+            "cs-t0 = ref ResourceZZMS_History_" + ib,
+            "cs-t1 = ref " + mode,
+            "cs-u0 = ref ResourceZZMS_PlaceCb_" + ib,
+            "cs-u1 = ref ResourceZZMS_Record_" + ib,
+        ] + (["cs-u2 = ref ResourceZZMS_Shift"] if shift else []) + [
+            "dispatch = 1, 1, 1",
+            "cs-u0 = null", "cs-u1 = null",
+        ] + (["cs-u2 = null"] if shift else []) + [
+            "cs-t0 = null", "cs-t1 = null", "cs-cb0 = null"], ib
+    assert _section(ini_text, "[ResourceZZMS_PlaceCb_" + ib + "]")[2] == "array = 29"
+    # The previous frame's matrices are this mod's own records: copied at [Present].
+    assert _section(ini_text, "[CustomShaderZZMS_PlaceAdvance_" + ib + "]")[1:4] == [
+        "cs-t0 = ref ResourceZZMS_Record_" + ib, "cs-t1 = ref ResourceZZMS_PlaceAdvanceParams",
+        "cs-u0 = ref ResourceZZMS_History_" + ib], ib
+
+
+def _delayed_skin_lines(name, draw_count):
+    return [
+        "ResourceZZMS_Input = ref vs-t0",
+        "run = CustomShaderZZMS_Import_" + name,
+        "$zzms_imported = 1",
+        "if $zzms_ready",
+        "run = CustomShaderZZMS_Delay_" + name,
+        "vs-t0 = ref ResourceZZMS_Delayed_" + name,
+        "endif",
+        "vb0 = Resource" + name + "Position",
+        "vb2 = Resource" + name + "Blend",
+        "draw = " + str(draw_count) + ", 0",
+    ]
 
 
 def _check_runtime(zms, profile, source, position, weights, indices, drawing, provider):
@@ -141,6 +284,8 @@ def main():
         tree_name = props.selected_blueprint_name
         tree = bpy.data.node_groups[tree_name]
         assert tree.get(zms.TREE_MARKER_MERGED_SKELETON) and not tree.get("LoyalTools:EFMIMergedSkeleton")
+        from LoyalTools.blueprint.node_obj import _is_zzmi_merged_tree
+        assert _is_zzmi_merged_tree(tree), "the Generate Mod node must offer the frame-delay option"
 
         objects = {name: bpy.data.objects.get(parts[name]["unique_str"]) for name in parts}
         assert objects["bangboo"] is None
@@ -185,6 +330,34 @@ def main():
         assert body_indices.max() < 8, "unchanged body must keep its own (local) bone ids"
         _, hair_weights, hair_indices = _read_body_buffers(mod_a, ib["hair"])
         assert hair_indices[hair_weights > 0].max() < 5, "unchanged hair must keep its own (local) bone ids"
+
+        # 2b. the same blueprint, uniform one-frame delay: every part reads its own previous bones
+        by_ib = zms.get_component_by_ib(profile)
+        face_component = by_ib[ib["face"]]
+        delayed_layout = zms.delayed_pool_layout(profile, [face_component["component_id"]])
+        pool_total = profile["bones_count"] + face_component["palette_bone_count"]
+        mod_a2 = os.path.join(temp_folder, "mod_unchanged_delayed")
+        ini_a2 = _export(tree_name, mod_a2, frame_delay=True)
+        assert GlobalKeyCountHelper.generated_mod_number == 4, GlobalKeyCountHelper.generated_mod_number
+        _same_meshes(mod_a, mod_a2)
+        # Every drawn part, the face included, is drawn with its object matrix of the previous frame.
+        by_order = lambda names: sorted((ib[name] for name in names), key=lambda value: by_ib[value]["pose_order"])
+        _check_delay_frame(ini_a2, zms, profile, parts, pool_total, by_order(("body", "hair", "accessory", "face")))
+        for name in ("body", "hair", "accessory"):
+            component = by_ib[ib[name]]
+            assert _section(ini_a2, "[CommandListZZMS_Skin_" + ib[name] + "]") == _delayed_skin_lines(
+                ib[name], _draw_count(mod_a2, ib[name])), name
+            assert _section(ini_a2, "[ResourceZZMS_DelayParams_" + ib[name] + "]")[-1] == "data = %d %d 0 0" % (
+                component["vg_offset"], component["vg_count"]), name
+            blend_lines = _section(ini_a2, "[TextureOverride_VB_" + ib[name] + "_" + ib[name] + "_Blend]")
+            assert "run = CommandListZZMS_Skin_" + ib[name] in blend_lines, blend_lines
+            assert not any("Place" in line for line in blend_lines), blend_lines
+            _check_placed_draw(ini_a2, parts[name]["unique_str"], ib[name])
+        assert "CustomShaderZZMS_Palette" not in ini_a2, "no part uses the bones of another one"
+        assert _section(ini_a2, "[ResourceZZMS_Components]")[-1] == "data = " + " ".join(
+            str(value) for value in zms.runtime_component_table(profile, delayed_layout))
+        for filename in (zms.IMPORT_SHADER_FILENAME, zms.PALETTE_SHADER_FILENAME, zms.DELAY_SHADER_FILENAME):
+            assert os.path.isfile(os.path.join(mod_a2, "Shaders", filename)), filename
 
         # 3. a copy of the hair joined into the body
         hair_obj, body_obj = objects["hair"], objects["body"]
@@ -241,6 +414,33 @@ def main():
         assert (indices[active] >= 9).any(), "hair bones must come from the hair's range"
         worst, counts = _check_runtime(zms, profile, source, position, weights, indices, "body", "hair")
         print("hair in body: vertices " + repr(counts) + ", worst error " + repr(worst))
+        assert not os.path.isfile(os.path.join(mod_b, "Shaders", zms.DELAY_SHADER_FILENAME))
+
+        # 3b. hair in body, uniform delay: the body's merged palette is built from the previous pool
+        mod_b2 = os.path.join(temp_folder, "mod_hair_in_body_delayed")
+        ini_b2 = _export(tree_name, mod_b2, frame_delay=True)
+        _same_meshes(mod_b, mod_b2)
+        _check_delay_frame(ini_b2, zms, profile, parts, pool_total, by_order(("body", "hair", "accessory", "face")))
+        assert _section(ini_b2, "[CommandListZZMS_Skin_" + body + "]") == [
+            "ResourceZZMS_Input = ref vs-t0",
+            "run = CustomShaderZZMS_Import_" + body,
+            "$zzms_imported = 1",
+            "if $zzms_ready",
+            "run = CustomShaderZZMS_PaletteDelayed_" + body,
+            "else",
+            "run = CustomShaderZZMS_Palette_" + body,
+            "endif",
+            "vs-t0 = ref ResourceZZMS_Palette_" + body,
+            "vb0 = Resource" + body + "Position",
+            "vb2 = Resource" + body + "Blend",
+            "draw = " + str(_draw_count(mod_b2, body)) + ", 0",
+        ]
+        assert "cs-t0 = ref ResourceZZMS_PoolPrev" in _section(ini_b2, "[CustomShaderZZMS_PaletteDelayed_" + body + "]")
+        assert "cs-t0 = ref ResourceZZMS_Pool" in _section(ini_b2, "[CustomShaderZZMS_Palette_" + body + "]")
+        assert _section(ini_b2, "[CommandListZZMS_Skin_" + hair + "]") == _delayed_skin_lines(
+            hair, _draw_count(mod_b2, hair))
+        assert "[ResourceZZMS_Delayed_" + body + "]" not in ini_b2
+        assert _section(ini_b2, "[ResourceZZMS_Palette_" + body + "]")[2] == "array = 45"
 
         # 4. the hair and the accessory taken out of the blueprint are hidden; the hair still provides bones
         removed = {parts["hair"]["unique_str"], parts["accessory"]["unique_str"]}
@@ -277,6 +477,39 @@ def main():
         assert "Hidden_" + ib["face"] not in ini_c
         assert "so0" not in ini_c
         assert not os.path.exists(os.path.join(mod_c, "Meshes", hair + "-Position.buf"))
+        assert "zzms_ready" not in ini_c and "ZZMS_Delay" not in ini_c, "with the option off the export is the ordinary one"
+
+        # 4b. the same, uniform delay: the hidden hair still only imports its bones
+        mod_c2 = os.path.join(temp_folder, "mod_hair_provider_delayed")
+        ini_c2 = _export(tree_name, mod_c2, frame_delay=True)
+        assert GlobalKeyCountHelper.generated_mod_number == 2, GlobalKeyCountHelper.generated_mod_number
+        _same_meshes(mod_c, mod_c2)
+        _check_delay_frame(ini_c2, zms, profile, parts, pool_total, by_order(("body", "face")))
+        _check_placed_draw(ini_c2, parts["body"]["unique_str"], body)
+        for name in ("[TextureOverride_ZZMS_Hidden_" + hair + "]", "[TextureOverride_ZZMS_Hidden_IB_" + hair + "]",
+                     "[TextureOverride_ZZMS_Hidden_" + accessory + "]"):
+            assert _section(ini_c2, name) == _section(ini_c, name), name
+        assert _section(ini_c2, "[CommandListZZMS_Skin_" + hair + "]") == [
+            "ResourceZZMS_Input = ref vs-t0",
+            "run = CustomShaderZZMS_Import_" + hair,
+            "$zzms_imported = 1",
+        ]
+        assert "[CommandListZZMS_Skin_" + accessory + "]" not in ini_c2
+
+        # 5. the face taken out of the blueprint too: the game still draws it, so it is still delayed and placed
+        for node in list(tree.nodes):
+            if getattr(node, "bl_idname", "") == 'SSMTNode_Object_Info' and node.object_name == parts["face"]["unique_str"]:
+                tree.nodes.remove(node)
+        mod_d = os.path.join(temp_folder, "mod_face_left_out_delayed")
+        ini_d = _export(tree_name, mod_d, frame_delay=True)
+        face_ib = ib["face"]
+        assert "[TextureOverride_" + parts["face"]["unique_str"].replace("-", "_") + "]" not in ini_d
+        face_first, face_count = parts["face"]["unique_str"].split("-")[2], parts["face"]["unique_str"].split("-")[1]
+        assert _section(ini_d, "[TextureOverride_ZZMS_Face_" + face_ib + "_" + face_first + "]") == [
+            "hash = " + face_ib, "match_first_index = " + face_first, "match_index_count = " + face_count,
+        ] + _face_draw_lines(face_ib)
+        assert "[CommandListZZMS_PlaceBegin_" + face_ib + "]" in ini_d
+        assert "[TextureOverride_ZZMS_Delay_" + face_ib + "]" in ini_d
 
     print("BLENDER_ZZMI_MERGED_EXPORT_REGRESSION=PASS")
 

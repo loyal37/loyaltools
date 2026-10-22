@@ -143,6 +143,21 @@ def check_export_helpers(profile, by_ib, ib):
     assert table == [0, 8, 0, 1, 0, 0, 0, 0, 8, 5, 0, 1, 6, 8, 0, 0, 13, 2, 1, 1, 12, 13, 0, 0], table
     assert zms.runtime_params(profile, accessory["component_id"]) == [2, 3, 15, 0]
 
+    # Uniform one-frame delay: the face gets a pool range after the merged bones.
+    face = next(component for component in profile["components"] if component["role"] == zms.ROLE_SHAPE_KEYED)
+    face_bones = face["palette_bone_count"]
+    layout = zms.delayed_pool_layout(profile, [face["component_id"]])
+    assert layout == [{"component_id": face["component_id"], "offset": 15, "count": face_bones, "table_index": 3}], layout
+    assert zms.runtime_component_table(profile, layout) == table + [15, face_bones, 3, 1, 0, 0, 0, 0]
+    assert zms.runtime_params(profile, face["component_id"], layout) == [3, 3, 15, 0]
+    assert zms.runtime_params(profile, accessory["component_id"], layout) == [2, 3, 15, 0]
+    try:
+        zms.delayed_pool_layout(profile, [body["component_id"]])
+    except zms.ZZMIMergedSkeletonError:
+        pass
+    else:
+        raise AssertionError("merged components already have a pool range")
+
 
 def check_validation(profile):
     def rejects(mutate, label):

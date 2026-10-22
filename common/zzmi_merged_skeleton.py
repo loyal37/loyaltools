@@ -31,6 +31,26 @@ Face meshes are driven by shape keys (a compute pass rewrites their position
 buffer every frame), so they are not merged; the exporter keeps the game's own
 mesh for them, like EFMI does for CPU-posed components.  Components that share
 no bone with the merged ones cannot be converted and stay standalone.
+
+Uniform one-frame delay (optional export)
+-----------------------------------------
+By default a component skinned before another one reads that component's bones
+from the previous frame.  The delayed export instead skins the whole character
+with the bones of the previous frame, as WWMI's merged skeleton does: the pool
+is copied at ``[Present]`` and every palette is built from that copy.  Faces
+and standalone components import their own palette into extra pool ranges
+after the merged bones and are skinned with their previous palette as well;
+their vertex buffers (the faces' expressions) stay the game's current ones.
+
+That delays every part relative to its own root, and the game places each part
+with the current matrix of that root (vs-cb1); the roots are bones (hips,
+chest, head), so every part is also drawn with its object matrix of the
+previous frame (``PLACE_SHADER_SOURCE``), moved by how far the character moved
+since then: the whole character is drawn in the pose of the previous frame, at
+its current position.  The distance is that of the first part drawn in the
+frame and every part is moved by it, so the parts stay together.  (Drawn where
+it was, the character trails by its movement of one frame, which changes with
+the frame time: at flying speed it shakes against the world.)
 """
 
 from __future__ import annotations
@@ -393,13 +413,43 @@ def palette_dependencies(profile: dict, component_id: int, foreign_slots) -> set
 # Runtime tables (written inline into the mod ini)
 # ---------------------------------------------------------------------------
 
-def runtime_component_table(profile: dict) -> list[int]:
+def delayed_pool_layout(profile: dict, component_ids) -> list[dict]:
+    """Pool ranges for components that are not merged but are delayed too.
+
+    Faces and standalone components keep their own bones; with the uniform
+    one-frame delay they import their palette into a range after the merged
+    bones so their previous palette can be read back.  Returns one entry per
+    component, in the given order: ``component_id``, ``offset``, ``count`` and
+    ``table_index`` (their entries follow the merged ones in the runtime table).
+    """
+    by_id = {component["component_id"]: component for component in profile["components"]}
+    merged_count = len(merged_components(profile))
+    offset = int(profile["bones_count"])
+    layout = []
+    for position, component_id in enumerate(component_ids):
+        component = by_id[int(component_id)]
+        if component["role"] == ROLE_MERGED:
+            raise ZZMIMergedSkeletonError("部件 " + str(component_id) + " 已经在骨骼池里。")
+        count = int(component["palette_bone_count"])
+        if count <= 0:
+            raise ZZMIMergedSkeletonError(component["ib_hash"] + " 没有记录骨骼表大小，请重新提取。")
+        layout.append({
+            "component_id": int(component_id), "offset": offset, "count": count,
+            "table_index": merged_count + position,
+        })
+        offset += count
+    return layout
+
+
+def runtime_component_table(profile: dict, delayed_layout=()) -> list[int]:
     """Two ``uint4`` per merged component, in pool order.
 
     [2k + 0] = (vg_offset, vg_count, parent index, 1)
     [2k + 1] = (anchor slot in the parent, anchor slot in this component, 0, 0)
 
-    Indices are positions in this table, not profile component ids.
+    Indices are positions in this table, not profile component ids.  Entries
+    of ``delayed_layout`` (see ``delayed_pool_layout``) follow as roots of
+    their own: (offset, count, own index, 1), (0, 0, 0, 0).
     """
     merged = merged_components(profile)
     index_by_id = {component["component_id"]: index for index, component in enumerate(merged)}
@@ -410,6 +460,8 @@ def runtime_component_table(profile: dict) -> list[int]:
             index_by_id[component["parent_component_id"]], 1,
             component["anchor_parent_slot"], component["anchor_self_slot"], 0, 0,
         ]
+    for entry in delayed_layout:
+        values += [entry["offset"], entry["count"], entry["table_index"], 1, 0, 0, 0, 0]
     return values
 
 
@@ -420,10 +472,16 @@ def runtime_component_index(profile: dict, component_id: int) -> int:
     raise ZZMIMergedSkeletonError("部件 " + str(component_id) + " 不参与骨骼合并。")
 
 
-def runtime_params(profile: dict, component_id: int) -> list[int]:
+def runtime_params(profile: dict, component_id: int, delayed_layout=()) -> list[int]:
     """``uint4`` (table index, merged component count, pool bone count, 0)."""
+    table_index = None
+    for entry in delayed_layout:
+        if entry["component_id"] == int(component_id):
+            table_index = entry["table_index"]
+    if table_index is None:
+        table_index = runtime_component_index(profile, component_id)
     return [
-        runtime_component_index(profile, component_id),
+        table_index,
         len(merged_components(profile)),
         int(profile["bones_count"]),
         0,
@@ -432,6 +490,13 @@ def runtime_params(profile: dict, component_id: int) -> list[int]:
 
 IMPORT_SHADER_FILENAME = "MergedSkeleton_Import.hlsl"
 PALETTE_SHADER_FILENAME = "MergedSkeleton_Palette.hlsl"
+DELAY_SHADER_FILENAME = "MergedSkeleton_Delay.hlsl"
+PLACE_SHADER_FILENAME = "MergedSkeleton_Place.hlsl"
+
+# The game's per-draw object constants (vs-cb1, 29 registers): rows 0-3 the
+# object-to-world matrix (row vectors), 4-7 its inverse, 20-23 the matrix of
+# the previous frame.
+OBJECT_CB_REGISTERS = 29
 
 IMPORT_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: bone import.
 // Copies the bone palette bound for this component's skinning draw (vs-t0)
@@ -606,14 +671,215 @@ void main(uint3 thread_id : SV_DispatchThreadID)
 }
 """
 
+DELAY_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: uniform one-frame delay.
+// Copies a range of bones from one pool to the start of another buffer: at
+// [Present] the whole pool into the previous-frame pool, and before a
+// component's skinning draw its own bones of the previous frame into its
+// palette.
 
-def write_runtime_shaders(shader_folder: str) -> list[str]:
+Buffer<float4> Source : register(t0);
+
+// (first bone in Source, bone count, 0, 0)
+Buffer<uint4> Params : register(t1);
+
+RWBuffer<float4> Target : register(u0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint4 params = Params[0];
+    uint bone = thread_id.x;
+    if (bone >= params.y)
+        return;
+
+    uint src = (params.x + bone) * 3;
+    uint dst = bone * 3;
+    Target[dst + 0] = Source[src + 0];
+    Target[dst + 1] = Source[src + 1];
+    Target[dst + 2] = Source[src + 2];
+}
+"""
+
+PLACE_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: uniform one-frame delay, placement.
+// Every part is skinned with the bones of the previous frame, in the space of
+// its own root, and the game places each part with that root's current matrix
+// (the roots are bones: hips, chest, head).  So every part is also drawn with
+// its object matrix of the previous frame, moved by how far the character
+// moved since then: the pose of the previous frame at the current position.
+// That distance is the first drawn part's of the frame, and every part and
+// pass of the frame is moved by it, so the parts stay together.
+// Only rows 0-3 of the game's object constants (the current matrix) are
+// written for every pass; the other rows can hold what an earlier draw left,
+// so the matrices of earlier frames come from this mod's own records.
+// The object constants (29 registers) are copied with rows 0-3 = the matrix
+// drawn with, 4-7 its inverse and 20-23 the matrix drawn with in the previous
+// frame (motion vectors).
+
+cbuffer SelfObject : register(b0)
+{
+    float4 SelfRows[29];
+};
+
+// This part's records of the previous frame: rows 0-3 its matrix, 4-7 the
+// matrix it was drawn with.  Rows 3 and 7 have w = 0 until they are written.
+Buffer<float4> History : register(t0);
+
+// (1 = place, 0 = only record, 2 = clear Shift (at [Present]), 0)
+Buffer<uint4> Params : register(t1);
+
+RWBuffer<float4> Output : register(u0);
+// This frame's records: rows 0-3 the current matrix, 4-7 the one drawn with.
+RWBuffer<float4> Record : register(u1);
+// Shared by every part: the distance of this frame (0-2) and 1 once it is set
+// (3).  One float per element, the format every device can read from a UAV.
+RWBuffer<float> Shift : register(u2);
+
+float4x4 Rows(float4 r0, float4 r1, float4 r2, float4 r3)
+{
+    return float4x4(r0, r1, r2, r3);
+}
+
+bool IsPlacement(float4x4 m)
+{
+    float3 w = abs(float3(m[0].w, m[1].w, m[2].w));
+    float det = determinant((float3x3)m);
+    return all(w < 1e-3) && abs(m[3].w - 1.0) < 1e-3 && det > 0.25 && det < 4.0
+        && all(abs(m[3].xyz) < 1e6);
+}
+
+// Inverse of an affine matrix in row-vector form.
+float4x4 InverseAffine(float4x4 m)
+{
+    float3 a = m[0].xyz;
+    float3 b = m[1].xyz;
+    float3 c = m[2].xyz;
+    float3 c0 = cross(b, c);
+    float3 c1 = cross(c, a);
+    float3 c2 = cross(a, b);
+    float inv_det = 1.0 / dot(a, c0);
+    float3x3 r = float3x3(
+        float3(c0.x, c1.x, c2.x) * inv_det,
+        float3(c0.y, c1.y, c2.y) * inv_det,
+        float3(c0.z, c1.z, c2.z) * inv_det);
+    float3 t = -mul(m[3].xyz, r);
+    return float4x4(float4(r[0], 0), float4(r[1], 0), float4(r[2], 0), float4(t, 1));
+}
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    uint mode = Params[0].x;
+    if (mode == 2)
+    {
+        Shift[0] = 0;
+        Shift[1] = 0;
+        Shift[2] = 0;
+        Shift[3] = 0;
+        return;
+    }
+
+    [unroll]
+    for (uint i = 0; i < 29; ++i)
+        Output[i] = SelfRows[i];
+
+    float4x4 self_now = Rows(SelfRows[0], SelfRows[1], SelfRows[2], SelfRows[3]);
+    if (!IsPlacement(self_now))
+        return;
+    float4x4 self_previous = Rows(History[0], History[1], History[2], History[3]);
+    float4x4 placed_previous = Rows(History[4], History[5], History[6], History[7]);
+    float4x4 placed = self_now;
+    // Rows are stored one by one (looping over two buffers at once lost rows on WARP).
+    if (mode == 1 && IsPlacement(self_previous))
+    {
+        float3 shift;
+        if (Shift[3] == 1.0)
+        {
+            shift = float3(Shift[0], Shift[1], Shift[2]);
+        }
+        else
+        {
+            shift = self_now[3].xyz - self_previous[3].xyz;
+            Shift[0] = shift.x;
+            Shift[1] = shift.y;
+            Shift[2] = shift.z;
+            Shift[3] = 1.0;
+        }
+        placed = self_previous;
+        placed[3].xyz += shift;
+        float4x4 inverse = InverseAffine(placed);
+        if (!IsPlacement(placed_previous))
+            placed_previous = placed;
+        Output[0] = placed[0];
+        Output[1] = placed[1];
+        Output[2] = placed[2];
+        Output[3] = placed[3];
+        Output[4] = inverse[0];
+        Output[5] = inverse[1];
+        Output[6] = inverse[2];
+        Output[7] = inverse[3];
+        Output[20] = placed_previous[0];
+        Output[21] = placed_previous[1];
+        Output[22] = placed_previous[2];
+        Output[23] = placed_previous[3];
+    }
+    Record[0] = SelfRows[0];
+    Record[1] = SelfRows[1];
+    Record[2] = SelfRows[2];
+    Record[3] = SelfRows[3];
+    Record[4] = placed[0];
+    Record[5] = placed[1];
+    Record[6] = placed[2];
+    Record[7] = placed[3];
+}
+"""
+
+
+def _is_placement(m) -> bool:
+    det = numpy.linalg.det(m[:3, :3])
+    return bool(numpy.all(numpy.abs(m[:3, 3]) < 1e-3) and abs(m[3, 3] - 1.0) < 1e-3
+                and 0.25 < det < 4.0 and numpy.all(numpy.abs(m[3, :3]) < 1e6))
+
+
+def reference_placement(self_rows, history, place: bool = True, shift=None) -> tuple:
+    """What the placement shader writes: (29 object constant rows, 8 record rows or None, shift).
+
+    ``history``: this part's records of the previous frame (rows 0-3 its matrix,
+    4-7 the matrix it was drawn with).  A record of None leaves it unchanged.
+    ``shift``: the distance of this frame set by a part drawn earlier, or None;
+    the shift after this part is returned.
+    """
+    self_rows = numpy.asarray(self_rows, dtype=numpy.float64)
+    history = numpy.asarray(history, dtype=numpy.float64)
+    output = self_rows.copy()
+    self_now = self_rows[0:4]
+    if not _is_placement(self_now):
+        return output, None, shift
+    self_previous, placed_previous = history[0:4], history[4:8]
+    placed = self_now
+    if place and _is_placement(self_previous):
+        if shift is None:
+            shift = self_now[3, :3] - self_previous[3, :3]
+        placed = self_previous.copy()
+        placed[3, :3] += shift
+        if not _is_placement(placed_previous):
+            placed_previous = placed
+        output[0:4] = placed
+        output[4:8] = numpy.linalg.inv(placed)
+        output[20:24] = placed_previous
+    return output, numpy.concatenate([self_now, placed]), shift
+
+
+def write_runtime_shaders(shader_folder: str, frame_delay: bool = False) -> list[str]:
     os.makedirs(shader_folder, exist_ok=True)
     paths = []
-    for filename, source in (
+    shaders = [
         (IMPORT_SHADER_FILENAME, IMPORT_SHADER_SOURCE),
         (PALETTE_SHADER_FILENAME, PALETTE_SHADER_SOURCE),
-    ):
+    ]
+    if frame_delay:
+        shaders.append((DELAY_SHADER_FILENAME, DELAY_SHADER_SOURCE))
+        shaders.append((PLACE_SHADER_FILENAME, PLACE_SHADER_SOURCE))
+    for filename, source in shaders:
         path = os.path.join(shader_folder, filename)
         with open(path, "w", encoding="utf-8", newline="\n") as file:
             file.write(source)
