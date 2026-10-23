@@ -572,7 +572,9 @@ def check_same_frame_skin(module) -> float:
 
     The output buffer is created with the description 3dmigoto gives it, which D3D11 must accept for a
     buffer that is both written and drawn from.  When the matcher did not find every component of the
-    copy, every vertex is written at the origin (nothing is drawn).
+    copy, every vertex is written at the origin (nothing is drawn).  The element after the vertices says
+    whether they are a valid result; the copy's previous output (vb3) gets this frame's result when it is
+    not one, and is left alone when it is.
     """
     rng = numpy.random.default_rng(23)
     gpu = Compute()
@@ -600,10 +602,14 @@ def check_same_frame_skin(module) -> float:
         blend_bytes = numpy.ascontiguousarray(blend).tobytes()
         blend_srv = gpu.raw_srv(gpu.raw_buffer(numpy.frombuffer(blend_bytes, numpy.uint8), D3D11_BIND_SHADER_RESOURCE),
                                 len(blend_bytes))
-        # As 3dmigoto creates `type = RWByteAddressBuffer`, `stride = 40`, `array = <vertices>`.
-        skinned = gpu.raw_buffer(numpy.full(nbytes, 7, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
-        uavs = [gpu.raw_uav(skinned, nbytes)]
-        for found in (True, False):
+        # As 3dmigoto creates `type = RWByteAddressBuffer`, `stride = 40`, `array = <vertices> + 1`.
+        total = nbytes + module.SKIN_VERTEX_STRIDE
+        for found, previous_valid in ((True, False), (True, True), (False, False)):
+            skinned = gpu.raw_buffer(numpy.full(total, 7, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
+            initial_previous = numpy.full(total // 4, 1234.5, numpy.float32)
+            initial_previous.view(numpy.uint32)[nbytes // 4] = 1 if previous_valid else 0
+            previous = gpu.raw_buffer(initial_previous, output_flags, module.SKIN_VERTEX_STRIDE)
+            uavs = [gpu.raw_uav(skinned, total), gpu.raw_uav(previous, total)]
             palette = rng.normal(size=(bone_count * 3, 4)).astype(numpy.float32)
             params = module.same_frame_skin_params(count, layout)
             choice = numpy.zeros((2, 4), numpy.uint32)
@@ -613,15 +619,22 @@ def check_same_frame_skin(module) -> float:
                     gpu.srv(gpu.buffer(numpy.asarray([params], numpy.uint32), uav=False), DXGI_FORMAT_R32G32B32A32_UINT, 1),
                     gpu.srv(gpu.buffer(choice, uav=False), DXGI_FORMAT_R32G32B32A32_UINT, len(choice))]
             gpu.dispatch_bound(shader, [], srvs, uavs, (count + 63) // 64)
-            got = gpu.read(skinned, nbytes).view(numpy.float32).reshape(count, 10)
+            written = gpu.read(skinned, total)
+            got = written[:nbytes].view(numpy.float32).reshape(count, 10)
+            assert written[nbytes:nbytes + 4].view(numpy.uint32)[0] == (1 if found else 0), "validity of the result"
             expected = module.reference_same_frame_skin(palette, position_bytes, blend_bytes, params, found=found)
             scale = max(1.0, float(numpy.abs(expected).max()))
             error = float(numpy.abs(got - expected).max()) / scale
             assert error < 1e-5, (weight_format, found, error)
+            got_previous = gpu.read(previous, total)
             if found:
                 assert numpy.array_equal(got[:, 9], vertices[:, 9]), "tangent w kept"
             else:
                 assert not got.any(), weight_format + ": a copy without all its bones is not drawn"
+            if found and not previous_valid:
+                assert numpy.array_equal(got_previous[:nbytes], written[:nbytes]), "invalid history replaced"
+            else:
+                assert numpy.array_equal(got_previous, initial_previous.view(numpy.uint8)), "valid history kept"
             worst = max(worst, error)
 
     # The description above was accepted (raw views, vertex buffer + unordered access, stride 40); a
@@ -662,7 +675,7 @@ def check_instances(module) -> float:
     host = merged[0]
 
     # Second copy: moved and turned, the limbs in another pose (bones the components do not share).
-    move = _rotation_z(2.1, (1.1, 0.78, 0.0))
+    move = _rotation_z(2.1, (1.3, -0.4, 0.0))
     shared = {4, 5}
     worlds = [list(world_bones), []]
     for index, bone in enumerate(world_bones):
@@ -702,7 +715,7 @@ def check_instances(module) -> float:
               for component in merged}
     params_srv = {ib: uint4(values) for ib, values in params.items()}
 
-    def build(imported, recorded, stale_record=None):
+    def build(imported, recorded, stale=None):
         store, store_srv, store_uav = rw(slots * rows)
         records, records_srv, records_uav = rw(slots * module.INSTANCE_RECORD_ROWS)
         for ib, copy in imported:
@@ -712,8 +725,8 @@ def check_instances(module) -> float:
                                [store_uav], 1, gpu.ini_params(slot_of[(ib, copy)], frame))
         for ib, copy in recorded:
             root, stamp = copy_roots[copy][ib], frame
-            if (ib, copy) == stale_record:
-                root, stamp = _rotation_z(0.02, (0.03, -0.04, 0.0)) @ root, frame - 1
+            if stale and (ib, copy) in stale:
+                root, stamp = stale[(ib, copy)] @ root, frame - 1
             constants = gpu.constant_buffer(numpy.ascontiguousarray(root.T, dtype=numpy.float32))
             gpu.dispatch_bound(record_shader, [constants], [params_srv[ib]], [records_uav], 1,
                                gpu.ini_params(slot_of[(ib, copy)], slot_of[(ib, copy)], stamp,
@@ -736,7 +749,8 @@ def check_instances(module) -> float:
         return got, choice_srv
 
     everything = [(ib, copy) for copy in (1, 0) for ib in bone_sets]
-    store, store_srv, records, records_srv = build(everything, everything, stale_record=("cccc0003", 0))
+    store, store_srv, records, records_srv = build(everything, everything,
+                                                   stale={("cccc0003", 0): _rotation_z(0.02, (0.03, -0.04, 0.0))})
     worst = 0.0
     for copy in (0, 1):
         choice, choice_srv = match(store, store_srv, records, records_srv, copy)
@@ -764,6 +778,26 @@ def check_instances(module) -> float:
     store, store_srv, records, records_srv = build(everything, [(ib, copy) for ib, copy in everything if ib != "bbbb0002"])
     choice, _ = match(store, store_srv, records, records_srv, 0)
     assert choice[0, 0] == 0, choice
+    def matched(choice, copy):
+        return choice[0, 0] == 1 and all(choice[1 + k, 0] == slot_of[(c["ib_hash"], copy)] for k, c in enumerate(merged))
+
+    # A copy that has just appeared (no records yet) next to one that has them: the new copy is not matched
+    # (not drawn this frame) instead of taking the other copy's bones; the other copy is matched.
+    store, store_srv, records, records_srv = build(everything, [(ib, 0) for ib in bone_sets])
+    assert match(store, store_srv, records, records_srv, 1)[0][0, 0] == 0, "a new copy must not borrow bones"
+    assert matched(match(store, store_srv, records, records_srv, 0)[0], 0)
+    # One copy's component not skinned this frame: the other copy's instance is the only candidate and a
+    # metre away, so that copy is not matched rather than given another copy's bones.
+    culled = [(ib, copy) for ib, copy in everything if (ib, copy) != ("cccc0003", 0)]
+    store, store_srv, records, records_srv = build(culled, culled)
+    assert match(store, store_srv, records, records_srv, 0)[0][0, 0] == 0, "a culled component must not be borrowed"
+    assert matched(match(store, store_srv, records, records_srv, 1)[0], 1)
+    # At speed with a low frame rate the records (of the previous frame) are 35 cm off: every
+    # candidate has a record, and the copy's own instance is still clearly the nearest.
+    fast = {(ib, copy): _rotation_z(0.03, (0.3, 0.18, 0.0)) for ib, copy in everything if ib != host["ib_hash"]}
+    store, store_srv, records, records_srv = build(everything, everything, stale=fast)
+    for copy in (0, 1):
+        assert matched(match(store, store_srv, records, records_srv, copy)[0], copy), copy
     # A component skinned only once is taken without a record (a single copy that has just appeared).
     single = [(ib, 0) for ib in bone_sets]
     store, store_srv, records, records_srv = build(single, [])

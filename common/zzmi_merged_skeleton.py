@@ -529,6 +529,9 @@ MAX_INSTANCES = 8
 MAX_INSTANCE_COMPONENTS = 32
 INSTANCE_RECORD_ROWS = 5
 INSTANCE_EXPIRATION_FRAMES = 600
+# Metres between where a candidate and the matched component put a shared bone (the matcher's
+# MATCH_DISTANCE): within it a candidate is taken even when another one has no record yet.
+MATCH_DISTANCE = 0.25
 
 # Vertices the same-frame skinning reads and writes: POSITION float3, NORMAL float3,
 # TANGENT float4, the layout of the game's skinning input and stream output.
@@ -895,6 +898,10 @@ SKIN_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: same-frame skinni
 // position, the normal and the tangent (not normalised); the tangent's w is kept.
 // When the bones of some component of this copy were not found (a copy that has just
 // appeared), every vertex is written at the origin: the copy is not drawn this frame.
+// After the vertices, one more element says whether they are a valid result (first word 1).
+// When the buffer bound as vb3 for this copy is not (the copy was hidden in the previous frame,
+// or the buffer is new), this frame's result is written there too, so the motion vectors start
+// from where the copy is instead of from the origin.
 
 // The merged palette in this part's space (three rows per bone), built from this frame's bones.
 Buffer<float4> Palette : register(t0);
@@ -910,8 +917,10 @@ Buffer<uint4> Params : register(t3);
 // Row 0: (1 when the bones of every component of this copy were found, 0, 0, 0).
 Buffer<uint4> Choice : register(t4);
 
-// Skinned vertices, the layout of the game's stream output (40 bytes).
+// Skinned vertices, the layout of the game's stream output (40 bytes), then the validity word.
 RWByteAddressBuffer Skinned : register(u0);
+// This copy's buffer bound as vb3 in this frame (not bound when it is the same as u0).
+RWByteAddressBuffer Previous : register(u1);
 
 float4 LoadWeights(uint address, uint format)
 {
@@ -949,7 +958,11 @@ void main(uint3 thread_id : SV_DispatchThreadID)
         return;
 
     uint target = vertex * 40;
-    if (Choice[0].x == 0)
+    uint validity = params.x * 40;
+    bool found = Choice[0].x != 0;
+    if (vertex == 0)
+        Skinned.Store(validity, found ? 1 : 0);
+    if (!found)
     {
         Skinned.Store4(target, uint4(0, 0, 0, 0));
         Skinned.Store4(target + 16, uint4(0, 0, 0, 0));
@@ -985,9 +998,18 @@ void main(uint3 thread_id : SV_DispatchThreadID)
     float3 skinned_normal = float3(dot(normal, row0.xyz), dot(normal, row1.xyz), dot(normal, row2.xyz));
     float3 skinned_tangent = float3(dot(tangent.xyz, row0.xyz), dot(tangent.xyz, row1.xyz),
                                     dot(tangent.xyz, row2.xyz));
-    Skinned.Store4(target, uint4(asuint(position), asuint(skinned_normal.x)));
-    Skinned.Store4(target + 16, uint4(asuint(skinned_normal.yz), asuint(skinned_tangent.xy)));
-    Skinned.Store2(target + 32, uint2(asuint(skinned_tangent.z), asuint(tangent.w)));
+    uint4 now0 = uint4(asuint(position), asuint(skinned_normal.x));
+    uint4 now1 = uint4(asuint(skinned_normal.yz), asuint(skinned_tangent.xy));
+    uint2 now2 = uint2(asuint(skinned_tangent.z), asuint(tangent.w));
+    Skinned.Store4(target, now0);
+    Skinned.Store4(target + 16, now1);
+    Skinned.Store2(target + 32, now2);
+    if (Previous.Load(validity) != 1)
+    {
+        Previous.Store4(target, now0);
+        Previous.Store4(target + 16, now1);
+        Previous.Store2(target + 32, now2);
+    }
 }
 """
 
@@ -1109,8 +1131,9 @@ void main(uint3 thread_id : SV_DispatchThreadID)
 """
 
 INSTANCE_RECORD_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: where a component instance is.
-// At the draws of a component, its object constants (vs-cb1 rows 0-3) hold its root's world
-// matrix.  It is recorded for the slots of both stream-output buffers of the instance (this
+// At the draws of a component, its object constants (vs-cb1 rows 0-3, of the part of the buffer
+// the game bound: several objects can share one buffer) hold its root's world matrix.
+// It is recorded for the slots of both stream-output buffers of the instance (this
 // frame's and the previous frame's, the game alternates them), so the slot skinned in the
 // next frame has a matrix of at most one frame before.
 // Record layout: five rows per slot, the matrix rows 0-3, then (table index, frame number, 1, 0).
@@ -1167,8 +1190,13 @@ INSTANCE_MATCH_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: which c
 // instances of a component skinned in this frame, the one whose recorded world matrix puts
 // the shared bone where the already matched component puts it belongs to this copy: another
 // copy stands somewhere else or in another pose, this one agrees to within its movement of a
-// frame.  A component skinned only once this frame is taken even without a record.  The world
-// matrix of a matched component is derived through the shared bone, so it is of this frame.
+// frame.  A candidate is taken only when that is certain: when it agrees to within
+// MATCH_DISTANCE, or, every candidate having a record, when it agrees clearly better than the
+// next one (a record of the previous frame at speed); a copy that has just appeared has no
+// record yet and is not matched (it is not drawn this frame) rather than given another copy's
+// bones.  With a single copy on screen, a component skinned only once this frame is taken
+// even without a record.  The world matrix of a matched component is derived through the
+// shared bone, so it is of this frame.
 """ + INSTANCE_COMMON_HLSL + r"""
 cbuffer HostObject : register(b0)
 {
@@ -1197,6 +1225,8 @@ RWBuffer<uint4> Choice : register(u0);
 
 static const uint MAX_COMPONENTS = 32;
 static const uint NO_SLOT = 0xFFFFFFFF;
+// Metres between where a candidate and the matched component put a shared bone.
+static const float MATCH_DISTANCE = 0.25;
 
 Affine LoadBone(uint slot, uint rows, uint local)
 {
@@ -1239,6 +1269,15 @@ void main()
 
     bool host_found = host < count && host_slot < slots
         && Store[host_slot * rows].x == (float)host && Store[host_slot * rows].y == frame;
+    // Several copies of the drawn part skinned this frame: several copies on screen.
+    uint copies = 0;
+    [loop]
+    for (uint h = 0; h < slots; ++h)
+    {
+        float4 host_header = Store[h * rows];
+        if (host_header.x == (float)host && host_header.y == frame)
+            copies += 1;
+    }
     if (host_found)
     {
         slot_of[host] = host_slot;
@@ -1283,8 +1322,11 @@ void main()
             float3 expected = Apply(world[known], Point(known_bone));
 
             uint best = NO_SLOT;
+            uint only = NO_SLOT;
             float best_distance = 3.0e38;
+            float second_distance = 3.0e38;
             uint candidates = 0;
+            uint unrecorded = 0;
             [loop]
             for (uint s = 0; s < slots; ++s)
             {
@@ -1292,24 +1334,39 @@ void main()
                 if (header.x != (float)target || header.y != frame)
                     continue;
                 candidates += 1;
-                float distance = 1.0e30;
+                only = s;
                 float4 record = Records[s * 5 + 4];
                 if (record.x == (float)target && record.z == 1 && frame - record.y <= 2)
                 {
                     Affine recorded = RowsToWorld(Records[s * 5], Records[s * 5 + 1], Records[s * 5 + 2], Records[s * 5 + 3]);
-                    distance = length(Apply(recorded, Point(LoadBone(s, rows, target_local))) - expected);
+                    float distance = length(Apply(recorded, Point(LoadBone(s, rows, target_local))) - expected);
+                    if (distance < best_distance)
+                    {
+                        second_distance = best_distance;
+                        best_distance = distance;
+                        best = s;
+                    }
+                    else if (distance < second_distance)
+                    {
+                        second_distance = distance;
+                    }
                 }
-                if (distance < best_distance)
+                else
                 {
-                    best_distance = distance;
-                    best = s;
+                    unrecorded += 1;
                 }
             }
-            // Without records two instances cannot be told apart.
-            if (best == NO_SLOT || (best_distance >= 1.0e30 && candidates > 1))
+            uint chosen = NO_SLOT;
+            if (candidates == 1 && copies <= 1)
+                chosen = only;
+            else if (best != NO_SLOT && best_distance <= MATCH_DISTANCE)
+                chosen = best;
+            else if (best != NO_SLOT && unrecorded == 0 && candidates > 1 && best_distance * 2.0 < second_distance)
+                chosen = best;
+            if (chosen == NO_SLOT)
                 continue;
-            slot_of[target] = best;
-            world[target] = Mul(Mul(world[known], known_bone), Inverse(LoadBone(best, rows, target_local)));
+            slot_of[target] = chosen;
+            world[target] = Mul(Mul(world[known], known_bone), Inverse(LoadBone(chosen, rows, target_local)));
             progress = true;
         }
         if (!progress)
@@ -1463,8 +1520,12 @@ def reference_same_frame_skin(palette, position_bytes: bytes, blend_bytes: bytes
 
 
 def instance_slot_count(participant_count: int) -> int:
-    """Store slots: two stream-output buffers per copy of every participating component."""
-    return 2 * MAX_INSTANCES * max(1, int(participant_count))
+    """Store slots: two stream-output buffers per copy of every participating component, twice over.
+
+    Slots are given out first in, first out; the headroom keeps copies that come and go from
+    reaching the slots of copies still on screen soon (unused slots expire).
+    """
+    return 4 * MAX_INSTANCES * max(1, int(participant_count))
 
 
 def instance_slot_rows(profile: dict, component_ids) -> int:
@@ -1514,6 +1575,8 @@ def reference_instance_match(profile: dict, store, records, params, needed, host
     world = [numpy.eye(4)] * count
     host_found = (host < count and host_slot < slots
                   and store[host_slot * rows_per_slot, 0] == host and store[host_slot * rows_per_slot, 1] == frame)
+    copies = sum(1 for h in range(slots)
+                 if store[h * rows_per_slot, 0] == host and store[h * rows_per_slot, 1] == frame)
     if host_found:
         slot_of[host] = host_slot
         world[host] = _rows_to_world(host_rows)
@@ -1535,23 +1598,34 @@ def reference_instance_match(profile: dict, store, records, params, needed, host
             target_local = target_anchor - int(table[target * 2, 0])
             known_bone = bone(slot_of[known], known_anchor - int(table[known * 2, 0]))
             expected = (world[known] @ known_bone)[:3, 3]
-            best, best_distance, candidates = None, 3.0e38, 0
+            best, only, best_distance, second_distance = None, None, 3.0e38, 3.0e38
+            candidates = unrecorded = 0
             for s in range(slots):
                 header = store[s * rows_per_slot]
                 if header[0] != target or header[1] != frame:
                     continue
                 candidates += 1
-                distance = 1.0e30
+                only = s
                 record = records[s * INSTANCE_RECORD_ROWS + 4]
                 if record[0] == target and record[2] == 1 and frame - record[1] <= 2:
                     recorded = _rows_to_world(records[s * INSTANCE_RECORD_ROWS:s * INSTANCE_RECORD_ROWS + 4])
                     distance = float(numpy.linalg.norm((recorded @ bone(s, target_local))[:3, 3] - expected))
-                if distance < best_distance:
-                    best, best_distance = s, distance
-            if best is None or (best_distance >= 1.0e30 and candidates > 1):
+                    if distance < best_distance:
+                        best, best_distance, second_distance = s, distance, best_distance
+                    elif distance < second_distance:
+                        second_distance = distance
+                else:
+                    unrecorded += 1
+            if candidates == 1 and copies <= 1:
+                chosen = only
+            elif best is not None and best_distance <= MATCH_DISTANCE:
+                chosen = best
+            elif best is not None and unrecorded == 0 and candidates > 1 and best_distance * 2.0 < second_distance:
+                chosen = best
+            else:
                 continue
-            slot_of[target] = best
-            world[target] = world[known] @ known_bone @ numpy.linalg.inv(bone(best, target_local))
+            slot_of[target] = chosen
+            world[target] = world[known] @ known_bone @ numpy.linalg.inv(bone(chosen, target_local))
             progress = True
         if not progress:
             break

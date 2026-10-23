@@ -33,7 +33,7 @@ bl_info = {
     "name": "LoyalTools",
     "description": "明日方舟终末地 / 绝区零 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力与 XXMI-Tools 的绝区零支持，两款游戏都支持骨骼合并，无需 SSMT4）",
     "blender": (4, 5, 0),
-    "version": (1, 7, 3),
+    "version": (1, 7, 4),
     "location": "View3D",
     "category": "Generic"
 }

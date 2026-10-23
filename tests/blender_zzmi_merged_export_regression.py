@@ -47,6 +47,9 @@ sys.path.insert(0, str(TESTS_DIR))
 
 import zzmi_merged_synthetic_dump as synthetic  # noqa: E402
 
+# The game's object constants as the game bound them for the draw (a part of a shared buffer).
+OBJECT_WINDOW_CB0 = "cs-cb0 = ref vs-cb1->Region($zzms_cb_offset, $zzms_cb_size)"
+
 
 def _section(ini_text, header):
     assert header in ini_text, header + " missing"
@@ -223,20 +226,24 @@ def _check_same_frame(ini_text, zms, profile, mod_folder, ib, unique_str, layout
     assert lines[draws[-1] + 1:] == ["vb0 = ref ResourceZZMS_GameVb0", "vb3 = ref ResourceZZMS_GameVb3"], lines
     assert _section(ini_text, "[CommandListZZMS_SkinNow_" + ib + "]") == [
         "$zzms_host0 = @vb0", "$zzms_host3 = @vb3",
+        "$zzms_prev3 = $zzms_host0",
+        "if $zzms_host3 != 0 && $PoolZZMS_Skinned[$zzms_host3] == FRAME_NUMBER - 1",
+        "$zzms_prev3 = $zzms_host3",
+        "endif",
         "if $zzms_host0 != 0 && $PoolZZMS_Skinned[$zzms_host0] != FRAME_NUMBER",
         "$PoolZZMS_Skinned[$zzms_host0] = FRAME_NUMBER",
         "run = CommandListZZMS_BackupIniParams",
         "x0 = PoolZZMS_Slot[$zzms_host0]->Index", "y0 = FRAME_NUMBER",
+        "run = CommandListZZMS_ObjectWindow",
         "run = CustomShaderZZMS_Match_" + ib, "run = CustomShaderZZMS_Gather_" + ib,
-        "run = CustomShaderZZMS_Palette_" + ib, "run = CustomShaderZZMS_SkinFrame_" + ib,
+        "run = CustomShaderZZMS_Palette_" + ib,
+        "if $zzms_prev3 != $zzms_host0", "run = CustomShaderZZMS_SkinFrame_" + ib,
+        "else", "run = CustomShaderZZMS_SkinFirst_" + ib, "endif",
         "run = CommandListZZMS_RestoreIniParams",
-        "endif",
-        "$zzms_prev3 = $zzms_host0",
-        "if $zzms_host3 != 0 && $PoolZZMS_Skinned[$zzms_host3] == FRAME_NUMBER - 1",
-        "$zzms_prev3 = $zzms_host3",
         "endif"]
+    # Several objects can share the game's buffer, each bound as a part of it: that part is bound.
     assert _section(ini_text, "[CustomShaderZZMS_Match_" + ib + "]") == [
-        "cs = Shaders/" + zms.INSTANCE_MATCH_SHADER_FILENAME, "cs-cb0 = ref vs-cb1",
+        "cs = Shaders/" + zms.INSTANCE_MATCH_SHADER_FILENAME, OBJECT_WINDOW_CB0,
         "cs-t0 = ref ResourceZZMS_Store", "cs-t1 = ref ResourceZZMS_Records", "cs-t2 = ref ResourceZZMS_Components",
         "cs-t3 = ref ResourceZZMS_InstanceParams_" + ib, "cs-t4 = ref ResourceZZMS_Needed_" + ib,
         "cs-u0 = ref ResourceZZMS_Choice", "dispatch = 1, 1, 1",
@@ -247,13 +254,17 @@ def _check_same_frame(ini_text, zms, profile, mod_folder, ib, unique_str, layout
         "cs-t2 = ref ResourceZZMS_InstanceParams_" + ib, "cs-t3 = ref ResourceZZMS_Choice",
         "cs-u0 = ref ResourceZZMS_Pool", "dispatch = " + str((profile["bones_count"] + 63) // 64) + ", 1, 1",
         "cs-u0 = null", "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null"]
-    assert _section(ini_text, "[CustomShaderZZMS_SkinFrame_" + ib + "]") == [
-        "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
-        "cs-t0 = ref ResourceZZMS_Palette_" + ib, "cs-t1 = ref ResourceZZMS_SkinPosition_" + ib,
-        "cs-t2 = ref ResourceZZMS_SkinBlend_" + ib, "cs-t3 = ref ResourceZZMS_SkinParams_" + ib,
-        "cs-t4 = ref ResourceZZMS_Choice", "cs-u0 = ref PoolZZMS_Out_" + ib + "[$zzms_host0]",
-        "dispatch = " + str((draw_count + 63) // 64) + ", 1, 1",
-        "cs-u0 = null", "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null", "cs-t4 = null"]
+    # With a previous output (vb3) it is bound too: when it is not a valid result it gets this frame's.
+    for section, previous in (("[CustomShaderZZMS_SkinFrame_", True), ("[CustomShaderZZMS_SkinFirst_", False)):
+        assert _section(ini_text, section + ib + "]") == [
+            "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
+            "cs-t0 = ref ResourceZZMS_Palette_" + ib, "cs-t1 = ref ResourceZZMS_SkinPosition_" + ib,
+            "cs-t2 = ref ResourceZZMS_SkinBlend_" + ib, "cs-t3 = ref ResourceZZMS_SkinParams_" + ib,
+            "cs-t4 = ref ResourceZZMS_Choice", "cs-u0 = ref PoolZZMS_Out_" + ib + "[$zzms_host0]",
+        ] + (["cs-u1 = ref PoolZZMS_Out_" + ib + "[$zzms_prev3]"] if previous else []) + [
+            "dispatch = " + str((draw_count + 63) // 64) + ", 1, 1", "cs-u0 = null",
+        ] + (["cs-u1 = null"] if previous else []) + [
+            "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null", "cs-t4 = null"], section
     assert "cs-t0 = ref ResourceZZMS_Pool" in _section(ini_text, "[CustomShaderZZMS_Palette_" + ib + "]")
     for category in ("Position", "Blend"):
         assert _section(ini_text, "[ResourceZZMS_Skin" + category + "_" + ib + "]") == [
@@ -262,10 +273,13 @@ def _check_same_frame(ini_text, zms, profile, mod_folder, ib, unique_str, layout
         str(value) for value in zms.same_frame_skin_params(draw_count, layout))
     assert _section(ini_text, "[ResourceZZMS_Needed_" + ib + "]")[-1] == "data = " + " ".join(
         str(value) for value in zms.instance_needed(profile, {by_ib[value]["component_id"] for value in needed}))
+    # Pools are only read: without refresh on read XXMI never stamps their slots (they never expire).
+    # One element after the vertices holds whether they are a valid result.
     assert _section(ini_text, "[PoolZZMS_Out_" + ib + "]") == [
-        "pool_size = 16", "pool_index_type = fifo", "pool_allocate_slot_on_missing = 1",
-        "pool_expiration_timeout_frames = 600", "type = RWByteAddressBuffer", "stride = 40",
-        "array = " + str(draw_count), "bind_flags = vertex_buffer shader_resource unordered_access"]
+        "pool_size = 32", "pool_index_type = fifo", "pool_allocate_slot_on_missing = 1",
+        "pool_expiration_timeout_frames = 600", "pool_expiration_refresh_on_read = 1",
+        "type = RWByteAddressBuffer", "stride = 40",
+        "array = " + str(draw_count + 1), "bind_flags = vertex_buffer shader_resource unordered_access"]
 
     # Every participant imports into the slot of its stream-output buffer and records where it is.
     for value in participants:
@@ -287,10 +301,11 @@ def _check_same_frame(ini_text, zms, profile, mod_folder, ib, unique_str, layout
             "x0 = PoolZZMS_Slot[$zzms_key]->Index", "y0 = x0",
             "if $zzms_key3 != 0", "y0 = PoolZZMS_Slot[$zzms_key3]->Index", "endif",
             "z0 = FRAME_NUMBER", "w0 = " + str(zms.runtime_component_index(profile, component_id)),
+            "run = CommandListZZMS_ObjectWindow",
             "run = CustomShaderZZMS_Record_" + value, "run = CommandListZZMS_RestoreIniParams",
             "endif"], value
         assert _section(ini_text, "[CustomShaderZZMS_Record_" + value + "]")[:2] == [
-            "cs = Shaders/" + zms.INSTANCE_RECORD_SHADER_FILENAME, "cs-cb0 = ref vs-cb1"]
+            "cs = Shaders/" + zms.INSTANCE_RECORD_SHADER_FILENAME, OBJECT_WINDOW_CB0]
         assert _section(ini_text, "[ResourceZZMS_InstanceParams_" + value + "]")[-1] == "data = " + " ".join(
             str(number) for number in zms.instance_params(profile, component_id, slots, rows))
     assert _section(ini_text, "[ResourceZZMS_Store]")[2] == "array = " + str(slots * rows)
@@ -298,16 +313,19 @@ def _check_same_frame(ini_text, zms, profile, mod_folder, ib, unique_str, layout
     assert _section(ini_text, "[ResourceZZMS_Choice]") == [
         "type = RWBuffer", "format = R32G32B32A32_UINT", "array = " + str(1 + len(zms.merged_components(profile))),
         "bind_flags = shader_resource unordered_access"]
-    for pool_name, size in (("PoolZZMS_Slot", slots), ("PoolZZMS_Recorded", slots), ("PoolZZMS_Skinned", 16)):
+    for pool_name, size in (("PoolZZMS_Slot", slots), ("PoolZZMS_Recorded", slots), ("PoolZZMS_Skinned", 32)):
         assert _section(ini_text, "[" + pool_name + "]") == [
             "pool_size = " + str(size), "pool_index_type = fifo", "pool_allocate_slot_on_missing = 1",
-            "pool_expiration_timeout_frames = 600"], pool_name
+            "pool_expiration_timeout_frames = 600", "pool_expiration_refresh_on_read = 1"], pool_name
     assert _section(ini_text, "[CommandListZZMS_BackupIniParams]") == [
         "$zzms_bak_x0 = x0", "$zzms_bak_y0 = y0", "$zzms_bak_z0 = z0", "$zzms_bak_w0 = w0"]
     assert _section(ini_text, "[CommandListZZMS_RestoreIniParams]") == [
         "x0 = $zzms_bak_x0", "y0 = $zzms_bak_y0", "z0 = $zzms_bak_z0", "w0 = $zzms_bak_w0"]
+    assert _section(ini_text, "[CommandListZZMS_ObjectWindow]") == [
+        "$zzms_cb_offset = vs-cb1->offset", "$zzms_cb_size = vs-cb1->size"]
     constants = _section(ini_text, "[Constants]")
-    for variable in ("$zzms_key", "$zzms_key3", "$zzms_host0", "$zzms_host3", "$zzms_prev3", "$zzms_bak_x0"):
+    for variable in ("$zzms_key", "$zzms_key3", "$zzms_host0", "$zzms_host3", "$zzms_prev3",
+                     "$zzms_cb_offset", "$zzms_cb_size", "$zzms_bak_x0"):
         assert "global " + variable + " = 0" in constants, constants
     for filename in (zms.SKIN_SHADER_FILENAME, zms.INSTANCE_IMPORT_SHADER_FILENAME, zms.INSTANCE_RECORD_SHADER_FILENAME,
                      zms.INSTANCE_MATCH_SHADER_FILENAME, zms.INSTANCE_GATHER_SHADER_FILENAME):
