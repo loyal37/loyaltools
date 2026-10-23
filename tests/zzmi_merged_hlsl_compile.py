@@ -73,6 +73,7 @@ def main() -> int:
     compile_cs(compiler, module.INSTANCE_RECORD_SHADER_SOURCE, module.INSTANCE_RECORD_SHADER_FILENAME)
     compile_cs(compiler, module.INSTANCE_MATCH_SHADER_SOURCE, module.INSTANCE_MATCH_SHADER_FILENAME)
     compile_cs(compiler, module.INSTANCE_GATHER_SHADER_SOURCE, module.INSTANCE_GATHER_SHADER_FILENAME)
+    compile_cs(compiler, module.INSTANCE_CLEAR_SHADER_SOURCE, module.INSTANCE_CLEAR_SHADER_FILENAME)
     print("ZZMI_MERGED_HLSL_COMPILE=PASS")
     return 0
 

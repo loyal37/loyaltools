@@ -573,8 +573,9 @@ def check_same_frame_skin(module) -> float:
     The output buffer is created with the description 3dmigoto gives it, which D3D11 must accept for a
     buffer that is both written and drawn from.  When the matcher did not find every component of the
     copy, every vertex is written at the origin (nothing is drawn).  The element after the vertices says
-    whether they are a valid result; the copy's previous output (vb3) gets this frame's result when it is
-    not one, and is left alone when it is.
+    whether they are a valid result and of which game buffer; the copy's previous output (vb3) gets this
+    frame's result when it is not that buffer's valid result, and is left alone when it is.  Without a
+    previous output (w0 = 0) whatever buffer is left in the slot is never touched.
     """
     rng = numpy.random.default_rng(23)
     gpu = Compute()
@@ -604,10 +605,17 @@ def check_same_frame_skin(module) -> float:
                                 len(blend_bytes))
         # As 3dmigoto creates `type = RWByteAddressBuffer`, `stride = 40`, `array = <vertices> + 1`.
         total = nbytes + module.SKIN_VERTEX_STRIDE
-        for found, previous_valid in ((True, False), (True, True), (False, False)):
+        # The game buffers' identities (as XXMI encodes them: normal floats).
+        key0, key3, stranger = 3.75e-12, 2.5e7, 6.125
+        # (found, what the previous output holds, previous output bound): its buffer's valid result, an
+        # invalid one, another buffer's valid result (the output passed between buffers); unbound: a
+        # buffer left in u1 by whoever used the slot before, which says it is not a valid result.
+        for found, held, bound in ((True, "invalid", True), (True, "valid", True), (True, "another's", True),
+                                   (False, "invalid", True), (True, "invalid", False)):
             skinned = gpu.raw_buffer(numpy.full(total, 7, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
             initial_previous = numpy.full(total // 4, 1234.5, numpy.float32)
-            initial_previous.view(numpy.uint32)[nbytes // 4] = 1 if previous_valid else 0
+            initial_previous[nbytes // 4 + 1] = stranger if held == "another's" else key3
+            initial_previous.view(numpy.uint32)[nbytes // 4] = 0 if held == "invalid" else 1
             previous = gpu.raw_buffer(initial_previous, output_flags, module.SKIN_VERTEX_STRIDE)
             uavs = [gpu.raw_uav(skinned, total), gpu.raw_uav(previous, total)]
             palette = rng.normal(size=(bone_count * 3, 4)).astype(numpy.float32)
@@ -618,10 +626,12 @@ def check_same_frame_skin(module) -> float:
                     position_srv, blend_srv,
                     gpu.srv(gpu.buffer(numpy.asarray([params], numpy.uint32), uav=False), DXGI_FORMAT_R32G32B32A32_UINT, 1),
                     gpu.srv(gpu.buffer(choice, uav=False), DXGI_FORMAT_R32G32B32A32_UINT, len(choice))]
-            gpu.dispatch_bound(shader, [], srvs, uavs, (count + 63) // 64)
+            gpu.dispatch_bound(shader, [], srvs, uavs, (count + 63) // 64,
+                               gpu.ini_params(0, 0, key0, key3 if bound else 0))
             written = gpu.read(skinned, total)
             got = written[:nbytes].view(numpy.float32).reshape(count, 10)
-            assert written[nbytes:nbytes + 4].view(numpy.uint32)[0] == (1 if found else 0), "validity of the result"
+            assert written[nbytes:nbytes + 8].view(numpy.uint32).tolist() == [
+                1 if found else 0, int(numpy.float32(key0).view(numpy.uint32))], "validity of the result, whose"
             expected = module.reference_same_frame_skin(palette, position_bytes, blend_bytes, params, found=found)
             scale = max(1.0, float(numpy.abs(expected).max()))
             error = float(numpy.abs(got - expected).max()) / scale
@@ -631,10 +641,11 @@ def check_same_frame_skin(module) -> float:
                 assert numpy.array_equal(got[:, 9], vertices[:, 9]), "tangent w kept"
             else:
                 assert not got.any(), weight_format + ": a copy without all its bones is not drawn"
-            if found and not previous_valid:
-                assert numpy.array_equal(got_previous[:nbytes], written[:nbytes]), "invalid history replaced"
+            if found and held != "valid" and bound:
+                assert numpy.array_equal(got_previous[:nbytes], written[:nbytes]), held + " history replaced"
             else:
-                assert numpy.array_equal(got_previous, initial_previous.view(numpy.uint8)), "valid history kept"
+                assert numpy.array_equal(got_previous, initial_previous.view(numpy.uint8)), \
+                    "valid history kept" if bound else "a buffer left in the slot must not be written"
             worst = max(worst, error)
 
     # The description above was accepted (raw views, vertex buffer + unordered access, stride 40); a
@@ -661,51 +672,76 @@ def _rotation_z(angle: float, translation) -> numpy.ndarray:
 
 
 def check_instances(module) -> float:
-    """Two copies of the character, skinned interleaved into store slots, matched and gathered per copy.
+    """Copies of the character, skinned interleaved into store slots, matched and gathered per copy.
 
     The second copy stands 1.35 m away, turned, in a slightly different pose (as two copies of an agent
     were seen in the game).  One component's record is of the previous frame (it is drawn after the part
-    being skinned).  Every copy must get the palette built from its own bones only.
+    being skinned).  Every copy must get the palette built from its own bones only.  A copy keeps the
+    instances it was matched with (owner entries, by the identities of its drawn part's buffers), so a
+    copy that has just appeared next to it, even 10 cm away, never takes them; an instance a record of
+    this frame puts elsewhere is never taken.  A slot that passes to another buffer is cleared.
     """
     profile, palettes, roots, world_bones, bone_sets = synthetic_case(module)
-    rng = numpy.random.default_rng(31)
     merged = module.merged_components(profile)
     ids = [component["component_id"] for component in merged]
     by_ib = {component["ib_hash"]: component for component in merged}
     host = merged[0]
-
-    # Second copy: moved and turned, the limbs in another pose (bones the components do not share).
-    move = _rotation_z(2.1, (1.3, -0.4, 0.0))
     shared = {4, 5}
-    worlds = [list(world_bones), []]
-    for index, bone in enumerate(world_bones):
-        bend = numpy.eye(4) if index in shared else _rotation_z(rng.normal(scale=0.3), rng.normal(scale=0.02, size=3))
-        worlds[1].append(move @ bone @ bend)
-    copy_roots = [dict(roots), {ib: move @ root for ib, root in roots.items()}]
-    copy_palettes = [{
-        ib: numpy.stack([(numpy.linalg.inv(copy_roots[copy][ib]) @ worlds[copy][bone])[:3] for bone in bones])
-        for ib, bones in bone_sets.items()} for copy in range(2)]
+
+    def scene(moves, seed):
+        """Every copy's world bones, roots and palettes: the first as in the synthetic case, the others
+        moved by ``moves``, their limbs in another pose."""
+        rng = numpy.random.default_rng(seed)
+        worlds = [list(world_bones)]
+        copy_roots = [dict(roots)]
+        for move in moves:
+            worlds.append([])
+            for index, bone in enumerate(world_bones):
+                bend = numpy.eye(4) if index in shared else _rotation_z(rng.normal(scale=0.3), rng.normal(scale=0.02, size=3))
+                worlds[-1].append(move @ bone @ bend)
+            copy_roots.append({ib: move @ root for ib, root in roots.items()})
+        copy_palettes = [{
+            ib: numpy.stack([(numpy.linalg.inv(copy_roots[copy][ib]) @ worlds[copy][bone])[:3] for bone in bones])
+            for ib, bones in bone_sets.items()} for copy in range(len(worlds))]
+        return worlds, copy_roots, copy_palettes
+
+    far = scene([_rotation_z(2.1, (1.3, -0.4, 0.0))], 31)
+    near = scene([_rotation_z(0.05, (0.1, 0.0, 0.0))], 37)
+    three = scene([_rotation_z(0.0, (1.0, 0.0, 0.0)), _rotation_z(0.0, (3.0, 0.0, 0.0))], 41)
+    # The shared bones of the near copies are 6 to 25 cm apart: closer than any distance a record of the
+    # previous frame could be trusted with, farther than a record of this frame can be off.
+    gaps = [float(numpy.linalg.norm(near[0][0][bone][:3, 3] - near[0][1][bone][:3, 3])) for bone in shared]
+    assert all(module.SAME_FRAME_DISTANCE < gap < 0.25 for gap in gaps), gaps
 
     slots = module.instance_slot_count(len(ids))
     rows = module.instance_slot_rows(profile, ids)
+    owner_rows = module.instance_owner_rows(slots, len(ids))
+    host_index = module.runtime_component_index(profile, host["component_id"])
     frame = 1234.0
     # Interleaved slots, as the game skins the copies' components in any order.
     slot_of = {("aaaa0001", 0): 7, ("aaaa0001", 1): 2, ("bbbb0002", 0): 30, ("bbbb0002", 1): 11,
-               ("cccc0003", 0): 0, ("cccc0003", 1): 41}
+               ("cccc0003", 0): 0, ("cccc0003", 1): 41,
+               ("aaaa0001", 2): 60, ("bbbb0002", 2): 61, ("cccc0003", 2): 62}
+
+    def keys_of(copy):
+        """The identities of the copy's drawn part's two buffers (normal floats, as XXMI encodes them)."""
+        return 1.5e-3 * (copy + 1), 7.25e5 * (copy + 1)
 
     gpu = Compute()
     import_shader = gpu.shader(module.INSTANCE_IMPORT_SHADER_SOURCE)
     record_shader = gpu.shader(module.INSTANCE_RECORD_SHADER_SOURCE)
     match_shader = gpu.shader(module.INSTANCE_MATCH_SHADER_SOURCE)
     gather_shader = gpu.shader(module.INSTANCE_GATHER_SHADER_SOURCE)
+    clear_shader = gpu.shader(module.INSTANCE_CLEAR_SHADER_SOURCE)
     palette_shader = gpu.shader(module.PALETTE_SHADER_SOURCE)
 
     def uint4(values):
         array = numpy.asarray(values, dtype=numpy.uint32).reshape(-1, 4)
         return gpu.srv(gpu.buffer(array, uav=False), DXGI_FORMAT_R32G32B32A32_UINT, len(array))
 
-    def rw(rows_count, dtype=numpy.float32, fmt=DXGI_FORMAT_R32G32B32A32_FLOAT):
-        buffer = gpu.buffer(numpy.zeros((rows_count, 4), dtype), uav=True)
+    def rw(rows_count, dtype=numpy.float32, fmt=DXGI_FORMAT_R32G32B32A32_FLOAT, initial=None):
+        data = numpy.zeros((rows_count, 4), dtype) if initial is None else numpy.ascontiguousarray(initial, dtype)
+        buffer = gpu.buffer(data, uav=True)
         return buffer, gpu.srv(buffer, fmt, rows_count), gpu.uav(buffer, fmt, rows_count)
 
     table_srv = uint4(module.runtime_component_table(profile))
@@ -715,50 +751,86 @@ def check_instances(module) -> float:
               for component in merged}
     params_srv = {ib: uint4(values) for ib, values in params.items()}
 
-    def build(imported, recorded, stale=None):
-        store, store_srv, store_uav = rw(slots * rows)
-        records, records_srv, records_uav = rw(slots * module.INSTANCE_RECORD_ROWS)
-        for ib, copy in imported:
+    class State:
+        pass
+
+    def build(world, imported, recorded, stale=None, owners=None):
+        """The store, records and owner entries of a frame (records of ``stale`` are of the previous one)."""
+        _, copy_roots, copy_palettes = world
+        state = State()
+        state.world = world
+        state.store, state.store_srv, state.store_uav = rw(slots * rows)
+        state.records, state.records_srv, state.records_uav = rw(slots * module.INSTANCE_RECORD_ROWS)
+        state.owners, _, state.owners_uav = rw(owner_rows, initial=owners)
+
+        def import_bones(ib, copy, stamp):
+            # One import for every part: which part it is comes in z0.
             source = numpy.ascontiguousarray(copy_palettes[copy][ib], dtype=numpy.float32).reshape(-1, 4)
             gpu.dispatch_bound(import_shader, [], [gpu.srv(gpu.buffer(source, uav=False), DXGI_FORMAT_R32G32B32A32_FLOAT,
-                                                            len(source)), table_srv, params_srv[ib]],
-                               [store_uav], 1, gpu.ini_params(slot_of[(ib, copy)], frame))
+                                                            len(source)), table_srv, params_srv[host["ib_hash"]]],
+                               [state.store_uav], 1, gpu.ini_params(slot_of[(ib, copy)], stamp,
+                                                                    module.runtime_component_index(profile, by_ib[ib]["component_id"])))
+
+        for ib, copy in imported:
+            import_bones(ib, copy, frame)
         for ib, copy in recorded:
             root, stamp = copy_roots[copy][ib], frame
             if stale and (ib, copy) in stale:
+                # A record of the previous frame was written then, after that frame's import.
                 root, stamp = stale[(ib, copy)] @ root, frame - 1
+                import_bones(ib, copy, stamp)
             constants = gpu.constant_buffer(numpy.ascontiguousarray(root.T, dtype=numpy.float32))
-            gpu.dispatch_bound(record_shader, [constants], [params_srv[ib]], [records_uav], 1,
-                               gpu.ini_params(slot_of[(ib, copy)], slot_of[(ib, copy)], stamp,
-                                              module.runtime_component_index(profile, by_ib[ib]["component_id"])))
-        return store, store_srv, records, records_srv
+            # One record for every part: which part it is, the record reads from the slot's import.
+            gpu.dispatch_bound(record_shader, [constants], [params_srv[host["ib_hash"]], state.store_srv],
+                               [state.records_uav], 1, gpu.ini_params(slot_of[(ib, copy)], slot_of[(ib, copy)], stamp))
+            if stamp != frame and (ib, copy) in imported:
+                import_bones(ib, copy, frame)
+        return state
 
-    def match(store, store_srv, records, records_srv, copy):
+    def owners_of(state):
+        return gpu.read(state.owners, owner_rows * 16).view(numpy.float32).reshape(-1, 4)
+
+    def match(state, copy, keys=None):
+        """The match shader for ``copy``'s drawn part, against the reference (choice and owner entries)."""
+        _, copy_roots, _ = state.world
         choice, choice_srv, choice_uav = rw(1 + len(ids), numpy.uint32, DXGI_FORMAT_R32G32B32A32_UINT)
         host_rows = numpy.ascontiguousarray(copy_roots[copy][host["ib_hash"]].T, dtype=numpy.float32)
         host_slot = slot_of[(host["ib_hash"], copy)]
+        keys = keys_of(copy) if keys is None else keys
+        expected_owners = owners_of(state).astype(numpy.float64)
         gpu.dispatch_bound(match_shader, [gpu.constant_buffer(host_rows)],
-                           [store_srv, records_srv, table_srv, params_srv[host["ib_hash"]], needed_srv],
-                           [choice_uav], 1, gpu.ini_params(host_slot, frame))
+                           [state.store_srv, state.records_srv, table_srv, params_srv[host["ib_hash"]], needed_srv],
+                           [choice_uav, state.owners_uav], 1, gpu.ini_params(host_slot, frame, keys[0], keys[1]))
         got = gpu.read(choice, (1 + len(ids)) * 16).view(numpy.uint32).reshape(-1, 4)
         expected = module.reference_instance_match(
-            profile, gpu.read(store, slots * rows * 16).view(numpy.float32),
-            gpu.read(records, slots * module.INSTANCE_RECORD_ROWS * 16).view(numpy.float32),
-            params[host["ib_hash"]], needed_values, host_rows, host_slot, frame)
+            profile, gpu.read(state.store, slots * rows * 16).view(numpy.float32),
+            gpu.read(state.records, slots * module.INSTANCE_RECORD_ROWS * 16).view(numpy.float32),
+            params[host["ib_hash"]], needed_values, host_rows, host_slot, frame,
+            [float(numpy.float32(key)) for key in keys], expected_owners)
         assert numpy.array_equal(got, expected), (got, expected)
+        assert numpy.array_equal(owners_of(state), expected_owners.astype(numpy.float32)), "owner entries"
         return got, choice_srv
 
+    def matched(choice, copy):
+        return choice[0, 0] == 1 and all(choice[1 + k, 0] == slot_of[(c["ib_hash"], copy)] for k, c in enumerate(merged))
+
+    def kept(copy, stamp, keys=None):
+        """Owner entries as if ``copy`` had been matched in frame ``stamp`` (its drawn part's buffers)."""
+        owners = numpy.zeros((owner_rows, 4), numpy.float32)
+        x, y = keys_of(copy) if keys is None else keys
+        for component in merged[1:]:
+            owners[slot_of[(component["ib_hash"], copy)] * len(ids) + host_index] = (x, y, stamp, 1)
+        return owners
+
     everything = [(ib, copy) for copy in (1, 0) for ib in bone_sets]
-    store, store_srv, records, records_srv = build(everything, everything,
-                                                   stale={("cccc0003", 0): _rotation_z(0.02, (0.03, -0.04, 0.0))})
+    state = build(far, everything, everything, stale={("cccc0003", 0): _rotation_z(0.02, (0.03, -0.04, 0.0))})
     worst = 0.0
     for copy in (0, 1):
-        choice, choice_srv = match(store, store_srv, records, records_srv, copy)
-        assert choice[0, 0] == 1, choice
-        for k, component in enumerate(merged):
-            assert choice[1 + k, 0] == slot_of[(component["ib_hash"], copy)], (copy, component["ib_hash"], choice)
+        _, copy_roots, copy_palettes = far
+        choice, choice_srv = match(state, copy)
+        assert matched(choice, copy), (copy, choice)
         pool, pool_srv, pool_uav = rw(profile["bones_count"] * 3)
-        gpu.dispatch_bound(gather_shader, [], [store_srv, table_srv, params_srv[host["ib_hash"]], choice_srv],
+        gpu.dispatch_bound(gather_shader, [], [state.store_srv, table_srv, params_srv[host["ib_hash"]], choice_srv],
                            [pool_uav], (profile["bones_count"] + 63) // 64)
         gathered = gpu.read(pool, profile["bones_count"] * 48).view(numpy.float32).reshape(-1, 3, 4)
         expected_pool = numpy.concatenate([copy_palettes[copy][component["ib_hash"]] for component in merged])
@@ -771,38 +843,101 @@ def check_instances(module) -> float:
         # Every bone, converted to the copy's host space, is the copy's own bone.
         for other in merged:
             for local_id, bone in enumerate(bone_sets[other["ib_hash"]]):
-                truth = (numpy.linalg.inv(copy_roots[copy][host["ib_hash"]]) @ worlds[copy][bone])[:3]
+                truth = (numpy.linalg.inv(copy_roots[copy][host["ib_hash"]]) @ far[0][copy][bone])[:3]
                 worst = max(worst, float(numpy.abs(built[other["vg_offset"] + local_id] - truth).max()))
+    # The copies keep what they were matched with.
+    assert numpy.array_equal(owners_of(state), kept(0, frame) + kept(1, frame)), owners_of(state)
+
+    # A slot that passes to another buffer is cleared: its header, its records, its owner entries; no other.
+    before = [gpu.read(buffer, size * 16).view(numpy.float32).reshape(-1, 4).copy()
+              for buffer, size in ((state.store, slots * rows), (state.records, slots * module.INSTANCE_RECORD_ROWS),
+                                   (state.owners, owner_rows))]
+    cleared = slot_of[("bbbb0002", 0)]
+    for slot in (cleared, slots + 3):  # a slot out of range clears nothing
+        gpu.dispatch_bound(clear_shader, [], [params_srv[host["ib_hash"]]],
+                           [state.store_uav, state.records_uav, state.owners_uav], 1, gpu.ini_params(slot))
+    after = [gpu.read(buffer, size * 16).view(numpy.float32).reshape(-1, 4)
+             for buffer, size in ((state.store, slots * rows), (state.records, slots * module.INSTANCE_RECORD_ROWS),
+                                  (state.owners, owner_rows))]
+    for name, old, new, first, width in (("header", before[0], after[0], cleared * rows, 1),
+                                         ("records", before[1], after[1], cleared * 5, 5),
+                                         ("owner entries", before[2], after[2], cleared * len(ids), len(ids))):
+        assert old[first:first + width].any(), name + " of the slot were there"
+        assert not new[first:first + width].any(), name + " of the slot cleared"
+        rest = numpy.ones(len(old), bool)
+        rest[first:first + width] = False
+        assert numpy.array_equal(old[rest], new[rest]), name + " of other slots kept"
 
     # Two candidates and no records: the copies cannot be told apart, the copy is not drawn yet.
-    store, store_srv, records, records_srv = build(everything, [(ib, copy) for ib, copy in everything if ib != "bbbb0002"])
-    choice, _ = match(store, store_srv, records, records_srv, 0)
-    assert choice[0, 0] == 0, choice
-    def matched(choice, copy):
-        return choice[0, 0] == 1 and all(choice[1 + k, 0] == slot_of[(c["ib_hash"], copy)] for k, c in enumerate(merged))
-
-    # A copy that has just appeared (no records yet) next to one that has them: the new copy is not matched
-    # (not drawn this frame) instead of taking the other copy's bones; the other copy is matched.
-    store, store_srv, records, records_srv = build(everything, [(ib, 0) for ib in bone_sets])
-    assert match(store, store_srv, records, records_srv, 1)[0][0, 0] == 0, "a new copy must not borrow bones"
-    assert matched(match(store, store_srv, records, records_srv, 0)[0], 0)
+    state = build(far, everything, [(ib, copy) for ib, copy in everything if ib != "bbbb0002"])
+    assert match(state, 0)[0][0, 0] == 0
+    # A copy that has just appeared (no records yet) next to one that has records of this frame: they put
+    # the other copy's instances elsewhere, so the new copy takes the only ones left, its own.
+    state = build(far, everything, [(ib, 0) for ib in bone_sets])
+    assert matched(match(state, 1)[0], 1), "the new copy takes its own instances"
+    assert matched(match(state, 0)[0], 0)
     # One copy's component not skinned this frame: the other copy's instance is the only candidate and a
     # metre away, so that copy is not matched rather than given another copy's bones.
     culled = [(ib, copy) for ib, copy in everything if (ib, copy) != ("cccc0003", 0)]
-    store, store_srv, records, records_srv = build(culled, culled)
-    assert match(store, store_srv, records, records_srv, 0)[0][0, 0] == 0, "a culled component must not be borrowed"
-    assert matched(match(store, store_srv, records, records_srv, 1)[0], 1)
+    state = build(far, culled, culled)
+    assert match(state, 0)[0][0, 0] == 0, "a culled component must not be borrowed"
+    assert matched(match(state, 1)[0], 1)
+    # The same with three copies, the others' instances 1 m and 3 m away (records of this frame): both are
+    # elsewhere, however clearly one is nearer than the other.
+    all_three = [(ib, copy) for copy in (2, 1, 0) for ib in bone_sets]
+    culled = [(ib, copy) for ib, copy in all_three if (ib, copy) != ("cccc0003", 0)]
+    state = build(three, culled, culled)
+    assert match(state, 0)[0][0, 0] == 0, "an instance a record of this frame puts elsewhere must not be taken"
+    for copy in (1, 2):
+        assert matched(match(state, copy)[0], copy), copy
     # At speed with a low frame rate the records (of the previous frame) are 35 cm off: every
     # candidate has a record, and the copy's own instance is still clearly the nearest.
     fast = {(ib, copy): _rotation_z(0.03, (0.3, 0.18, 0.0)) for ib, copy in everything if ib != host["ib_hash"]}
-    store, store_srv, records, records_srv = build(everything, everything, stale=fast)
+    state = build(far, everything, everything, stale=fast)
     for copy in (0, 1):
-        assert matched(match(store, store_srv, records, records_srv, copy)[0], copy), copy
+        assert matched(match(state, copy)[0], copy), copy
     # A component skinned only once is taken without a record (a single copy that has just appeared).
     single = [(ib, 0) for ib in bone_sets]
-    store, store_srv, records, records_srv = build(single, [])
-    choice, _ = match(store, store_srv, records, records_srv, 0)
-    assert choice[0, 0] == 1 and all(choice[1 + k, 0] == slot_of[(c["ib_hash"], 0)] for k, c in enumerate(merged)), choice
+    state = build(far, single, [])
+    assert matched(match(state, 0)[0], 0)
+    # Only the first copy's drawn part and another copy's instance of a component were skinned this frame
+    # (as far as drawn parts go a single copy, and a single candidate): it is still not taken when a record
+    # of this frame puts it elsewhere, or when the other copy keeps it.
+    lone = [(ib, 0) for ib in bone_sets if ib != "cccc0003"] + [("cccc0003", 1)]
+    state = build(far, lone, lone)
+    assert match(state, 0)[0][0, 0] == 0, "a single candidate a record of this frame puts elsewhere"
+    state = build(far, lone, [(ib, copy) for ib, copy in lone if copy == 0], owners=kept(1, frame - 1))
+    assert match(state, 0)[0][0, 0] == 0, "a single candidate another copy keeps"
+
+    # A copy appears 10 cm from one that keeps nothing yet and whose records are of the previous frame (it
+    # is drawn after the part being skinned): nothing tells the copies' instances apart, so the new copy is
+    # not matched rather than borrowing.  With records of this frame, 10 cm is elsewhere: it takes its own.
+    behind = {(ib, 0): numpy.eye(4) for ib in bone_sets if ib != host["ib_hash"]}
+    state = build(near, everything, [(ib, 0) for ib in bone_sets], stale=behind)
+    assert match(state, 1)[0][0, 0] == 0, "a new copy 10 cm away must not borrow bones"
+    assert not owners_of(state).any(), "a copy that is not matched keeps nothing"
+    state = build(near, everything, [(ib, 0) for ib in bone_sets])
+    assert matched(match(state, 1)[0], 1), "records of this frame put the other copy's instances elsewhere"
+    assert matched(match(state, 0)[0], 0), "records of this frame agree exactly"
+    # The same, the first copy having been matched before (owner entries of two frames ago, written when
+    # its other buffer was the drawn one, as the game alternates them): the new copy takes the only
+    # instances nobody keeps, its own; the first copy keeps its own although its records are of the
+    # previous frame and 15 cm off.
+    moving = {(ib, 0): _rotation_z(0.0, (0.15, 0.0, 0.0)) for ib in bone_sets if ib != host["ib_hash"]}
+    for order in ((1, 0), (0, 1)):
+        state = build(near, everything, [(ib, 0) for ib in bone_sets], stale=moving,
+                      owners=kept(0, frame - 2, keys_of(0)[::-1]))
+        for copy in order:
+            assert matched(match(state, copy)[0], copy), (order, copy)
+    # Owner entries older than OWNER_FRAMES are no longer kept: as if nobody kept anything.
+    state = build(near, everything, [(ib, 0) for ib in bone_sets], stale=moving, owners=kept(0, frame - 10))
+    assert match(state, 1)[0][0, 0] == 0, "stale owner entries must not exclude anything"
+    # Owner entries that records of this frame contradict (each copy keeping the other's instances) are not
+    # followed: neither copy is matched until the entries lapse.
+    state = build(far, everything, everything,
+                  owners=kept(0, frame - 1, keys_of(1)) + kept(1, frame - 1, keys_of(0)))
+    for copy in (0, 1):
+        assert match(state, copy)[0][0, 0] == 0, copy
     assert worst < 1e-4, worst
     return worst
 

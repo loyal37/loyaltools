@@ -72,9 +72,13 @@ bones are imported into that slot, and at its draws a component records its
 root's world matrix (vs-cb1) for its slots.  When a copy of a merged part is
 drawn, ``INSTANCE_MATCH_SHADER_SOURCE`` picks, starting from that part, the
 instance of every component whose recorded matrix puts the shared bone where
-the copy puts it; the bones are gathered into the pool and the copy is skinned
-into a buffer of its own (one per stream-output buffer, so vb3 is the copy's
-result of the previous frame).
+the copy puts it; a copy keeps the instances it was matched with, so another
+copy never takes them.  The bones are gathered into the pool and the copy is
+skinned into a buffer of its own (one per stream-output buffer, so vb3 is the
+copy's result of the previous frame).  XXMI's pools hand a slot they have taken
+from a buffer to the next new buffer as it is, so the ini notes which buffer
+each slot belongs to and, when that changes, forgets what the slot held
+(``INSTANCE_CLEAR_SHADER_SOURCE``); an output buffer says whose result it holds.
 """
 
 from __future__ import annotations
@@ -521,17 +525,26 @@ INSTANCE_IMPORT_SHADER_FILENAME = "MergedSkeleton_InstanceImport.hlsl"
 INSTANCE_RECORD_SHADER_FILENAME = "MergedSkeleton_InstanceRecord.hlsl"
 INSTANCE_MATCH_SHADER_FILENAME = "MergedSkeleton_InstanceMatch.hlsl"
 INSTANCE_GATHER_SHADER_FILENAME = "MergedSkeleton_InstanceGather.hlsl"
+INSTANCE_CLEAR_SHADER_FILENAME = "MergedSkeleton_InstanceClear.hlsl"
 
 # Same-frame skinning with several copies of the character on screen: copies of one
 # component are told apart by their stream-output buffers (two per copy, the game
 # alternates them), each buffer gets a slot of the instance store.
 MAX_INSTANCES = 8
+# Output buffers of a part skinned by the mod: two per copy, twice over.  Below 64: the ini keeps the
+# numbers of a copy's two outputs in one value (this frame's * 64 + the previous one's).
+INSTANCE_OUTPUTS = 4 * MAX_INSTANCES
+assert INSTANCE_OUTPUTS <= 64
 MAX_INSTANCE_COMPONENTS = 32
 INSTANCE_RECORD_ROWS = 5
 INSTANCE_EXPIRATION_FRAMES = 600
-# Metres between where a candidate and the matched component put a shared bone (the matcher's
-# MATCH_DISTANCE): within it a candidate is taken even when another one has no record yet.
-MATCH_DISTANCE = 0.25
+# Metres between where a record of this frame and the matched component put a shared bone
+# (the matcher's SAME_FRAME_DISTANCE): within it the record is of the same instance, beyond it
+# of another one.
+SAME_FRAME_DISTANCE = 0.05
+# Frames for which the copy that took an instance keeps it (the matcher's OWNER_FRAMES; each
+# instance alternates two slots, so an owner entry is renewed every other frame).
+OWNER_FRAMES = 4
 
 # Vertices the same-frame skinning reads and writes: POSITION float3, NORMAL float3,
 # TANGENT float4, the layout of the game's skinning input and stream output.
@@ -898,10 +911,12 @@ SKIN_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: same-frame skinni
 // position, the normal and the tangent (not normalised); the tangent's w is kept.
 // When the bones of some component of this copy were not found (a copy that has just
 // appeared), every vertex is written at the origin: the copy is not drawn this frame.
-// After the vertices, one more element says whether they are a valid result (first word 1).
-// When the buffer bound as vb3 for this copy is not (the copy was hidden in the previous frame,
-// or the buffer is new), this frame's result is written there too, so the motion vectors start
-// from where the copy is instead of from the origin.
+// After the vertices, one more element says whether they are a valid result (first word 1)
+// and of which game buffer (second word, its identity: an output buffer of the pool can pass
+// to another copy).  When the buffer bound as vb3 for this copy is not that buffer's valid
+// result (the copy was hidden in the previous frame, or the buffer is new or was another's),
+// this frame's result is written there too, so the motion vectors start from where the copy
+// is instead of from the origin.
 
 // The merged palette in this part's space (three rows per bone), built from this frame's bones.
 Buffer<float4> Palette : register(t0);
@@ -917,9 +932,14 @@ Buffer<uint4> Params : register(t3);
 // Row 0: (1 when the bones of every component of this copy were found, 0, 0, 0).
 Buffer<uint4> Choice : register(t4);
 
-// Skinned vertices, the layout of the game's stream output (40 bytes), then the validity word.
+// z0 = identity of the game buffer this result is for (vb0), w0 = identity of the one whose
+// result is bound as Previous (vb3), or 0 when none is (it is the same as Skinned): Previous
+// is then never touched, whatever is left in that slot.
+Texture1D<float4> IniParams : register(t120);
+
+// Skinned vertices, the layout of the game's stream output (40 bytes), then the validity element.
 RWByteAddressBuffer Skinned : register(u0);
-// This copy's buffer bound as vb3 in this frame (not bound when it is the same as u0).
+// This copy's buffer bound as vb3 in this frame.
 RWByteAddressBuffer Previous : register(u1);
 
 float4 LoadWeights(uint address, uint format)
@@ -959,9 +979,10 @@ void main(uint3 thread_id : SV_DispatchThreadID)
 
     uint target = vertex * 40;
     uint validity = params.x * 40;
+    float4 ini = IniParams.Load(int2(0, 0));
     bool found = Choice[0].x != 0;
     if (vertex == 0)
-        Skinned.Store(validity, found ? 1 : 0);
+        Skinned.Store2(validity, uint2(found ? 1 : 0, asuint(ini.z)));
     if (!found)
     {
         Skinned.Store4(target, uint4(0, 0, 0, 0));
@@ -1004,7 +1025,7 @@ void main(uint3 thread_id : SV_DispatchThreadID)
     Skinned.Store4(target, now0);
     Skinned.Store4(target + 16, now1);
     Skinned.Store2(target + 32, now2);
-    if (Previous.Load(validity) != 1)
+    if (ini.w != 0 && any(Previous.Load2(validity) != uint2(1, asuint(ini.w))))
     {
         Previous.Store4(target, now0);
         Previous.Store4(target + 16, now1);
@@ -1098,10 +1119,11 @@ tbuffer ComponentBones : register(t0)
 //   [2k + 1] = (anchor slot in parent, anchor slot in self, 0, 0)
 Buffer<uint4> Components : register(t1);
 
-// (table index of this component, merged component count, slot count, rows per slot)
+// (table index of a drawn part, merged component count, slot count, rows per slot): only the
+// slot count and the rows per slot are read
 Buffer<uint4> Params : register(t2);
 
-// x0 = slot, y0 = frame number
+// x0 = slot, y0 = frame number, z0 = table index of this component
 Texture1D<float4> IniParams : register(t120);
 
 RWBuffer<float4> Store : register(u0);
@@ -1112,13 +1134,14 @@ void main(uint3 thread_id : SV_DispatchThreadID)
     uint4 params = Params[0];
     float4 ini = IniParams.Load(int2(0, 0));
     uint slot = (uint)ini.x;
-    if (slot >= params.z)
+    uint table = (uint)ini.z;
+    if (slot >= params.z || table >= params.y)
         return;
     uint base = slot * params.w;
-    uint4 component = Components[params.x * 2];
+    uint4 component = Components[table * 2];
     uint bone = thread_id.x;
     if (bone == 0)
-        Store[base] = float4(params.x, ini.y, 1, 0);
+        Store[base] = float4(table, ini.y, 1, 0);
     if (bone >= component.y)
         return;
 
@@ -1137,17 +1160,21 @@ INSTANCE_RECORD_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: where 
 // frame's and the previous frame's, the game alternates them), so the slot skinned in the
 // next frame has a matrix of at most one frame before.
 // Record layout: five rows per slot, the matrix rows 0-3, then (table index, frame number, 1, 0).
+// Which component it is comes from the header its bones were imported with in this frame (a
+// slot whose buffer has changed since is not recorded).
 
 cbuffer Object : register(b0)
 {
     float4 ObjectRows[4];
 };
 
-// (table index of this component, merged component count, slot count, rows per slot)
+// (table index of a drawn part, merged component count, slot count, rows per slot): only the
+// slot count and the rows per slot are read
 Buffer<uint4> Params : register(t0);
+Buffer<float4> Store : register(t1);
 
 // x0 = slot of this frame's buffer, y0 = slot of the previous frame's buffer (or the same),
-// z0 = frame number, w0 = table index
+// z0 = frame number
 Texture1D<float4> IniParams : register(t120);
 
 RWBuffer<float4> Records : register(u0);
@@ -1159,7 +1186,7 @@ bool IsPlacement(float4 r0, float4 r1, float4 r2, float4 r3)
         && det > 0.25 && det < 4.0 && all(abs(r3.xyz) < 1e6);
 }
 
-void Write(uint slot, uint slots, float4 ini)
+void Write(uint slot, uint slots, float table, float frame)
 {
     if (slot >= slots)
         return;
@@ -1168,7 +1195,7 @@ void Write(uint slot, uint slots, float4 ini)
     Records[base + 1] = ObjectRows[1];
     Records[base + 2] = ObjectRows[2];
     Records[base + 3] = ObjectRows[3];
-    Records[base + 4] = float4(ini.w, ini.z, 1, 0);
+    Records[base + 4] = float4(table, frame, 1, 0);
 }
 
 [numthreads(1, 1, 1)]
@@ -1178,9 +1205,15 @@ void main()
         return;
     float4 ini = IniParams.Load(int2(0, 0));
     uint slots = Params[0].z;
-    Write((uint)ini.x, slots, ini);
-    if ((uint)ini.y != (uint)ini.x)
-        Write((uint)ini.y, slots, ini);
+    uint slot = (uint)ini.x;
+    if (slot >= slots)
+        return;
+    float4 header = Store[slot * Params[0].w];
+    if (header.z != 1 || header.y != ini.z)
+        return;
+    Write(slot, slots, header.x, ini.z);
+    if ((uint)ini.y != slot)
+        Write((uint)ini.y, slots, header.x, ini.z);
 }
 """
 
@@ -1189,14 +1222,22 @@ INSTANCE_MATCH_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: which c
 // draw), the components are reached through the bones they share (anchors).  Of the
 // instances of a component skinned in this frame, the one whose recorded world matrix puts
 // the shared bone where the already matched component puts it belongs to this copy: another
-// copy stands somewhere else or in another pose, this one agrees to within its movement of a
-// frame.  A candidate is taken only when that is certain: when it agrees to within
-// MATCH_DISTANCE, or, every candidate having a record, when it agrees clearly better than the
-// next one (a record of the previous frame at speed); a copy that has just appeared has no
-// record yet and is not matched (it is not drawn this frame) rather than given another copy's
-// bones.  With a single copy on screen, a component skinned only once this frame is taken
-// even without a record.  The world matrix of a matched component is derived through the
-// shared bone, so it is of this frame.
+// copy stands somewhere else or in another pose, this one agrees exactly with a record of
+// this frame, and to within its movement of a frame with a record of the previous frame.
+// A copy that matched keeps its instances (owners, renewed every frame it matches; a copy is
+// known by the identities of its drawn part's two stream-output buffers, which never pass to
+// another buffer as slots do), and the instances another copy keeps are never candidates,
+// nor are those a record of this frame puts elsewhere.  An instance is taken only when that
+// is certain, in this order:
+//   - a single copy on screen and a single instance skinned this frame, not excluded;
+//   - the instance this copy keeps;
+//   - the only instance left, when every copy has skinned one;
+//   - the only instance whose record of this frame agrees (to within SAME_FRAME_DISTANCE);
+//   - every remaining instance having a record, the one that agrees clearly better than the
+//     next (a record of the previous frame at speed).
+// Otherwise this copy is not matched (not drawn this frame) rather than given another copy's
+// bones: distance alone never decides while an instance has no record.  The world matrix of
+// a matched component is derived through the shared bone, so it is of this frame.
 """ + INSTANCE_COMMON_HLSL + r"""
 cbuffer HostObject : register(b0)
 {
@@ -1217,16 +1258,24 @@ Buffer<uint4> Params : register(t3);
 // Per merged component: (1 when this part reads its bones, 0, 0, 0).
 Buffer<uint4> Needed : register(t4);
 
-// x0 = slot of the drawn part, y0 = frame number
+// x0 = slot of the drawn part, y0 = frame number, z0 = identity of the drawn part's buffer,
+// w0 = identity of its other stream-output buffer (its previous frame's, or z0)
 Texture1D<float4> IniParams : register(t120);
 
 // Row 0: (1 when every needed component was found, 0, 0, 0); row 1 + k: (slot, found, 0, 0).
 RWBuffer<uint4> Choice : register(u0);
+// Per slot and drawn part ([slot * merged count + table index of the drawn part]): the copy
+// that took this instance, (its drawn part's two buffer identities, frame, 1).  Cleared when
+// the slot passes to another buffer.
+RWBuffer<float4> Owners : register(u1);
 
 static const uint MAX_COMPONENTS = 32;
 static const uint NO_SLOT = 0xFFFFFFFF;
-// Metres between where a candidate and the matched component put a shared bone.
-static const float MATCH_DISTANCE = 0.25;
+// Metres between where a record of this frame and the matched component put a shared bone:
+// within it the same instance, beyond it another one.
+static const float SAME_FRAME_DISTANCE = 0.05;
+// Frames an owner entry holds.
+static const float OWNER_FRAMES = 4;
 
 Affine LoadBone(uint slot, uint rows, uint local)
 {
@@ -1255,6 +1304,10 @@ void main()
     uint rows = params.w;
     uint host_slot = (uint)ini.x;
     float frame = ini.y;
+    // Identities are encoded so that float equality is integer equality (never 0, NaN or
+    // denormal).
+    float host_key = ini.z;
+    float host_other = ini.w;
 
     uint slot_of[MAX_COMPONENTS];
     Affine world[MAX_COMPONENTS];
@@ -1321,12 +1374,19 @@ void main()
             Affine known_bone = LoadBone(slot_of[known], rows, known_anchor - Components[known * 2].x);
             float3 expected = Apply(world[known], Point(known_bone));
 
+            uint candidates = 0;
+            // This copy's own instance (kept from earlier frames).
+            uint mine = NO_SLOT;
+            uint mine_count = 0;
+            // The instances that may be this copy's: neither kept by another copy nor placed
+            // elsewhere by a record of this frame.
+            uint free_count = 0;
+            uint free_only = NO_SLOT;
+            uint free_unrecorded = 0;
             uint best = NO_SLOT;
-            uint only = NO_SLOT;
+            bool best_this_frame = false;
             float best_distance = 3.0e38;
             float second_distance = 3.0e38;
-            uint candidates = 0;
-            uint unrecorded = 0;
             [loop]
             for (uint s = 0; s < slots; ++s)
             {
@@ -1334,34 +1394,59 @@ void main()
                 if (header.x != (float)target || header.y != frame)
                     continue;
                 candidates += 1;
-                only = s;
                 float4 record = Records[s * 5 + 4];
-                if (record.x == (float)target && record.z == 1 && frame - record.y <= 2)
+                bool recorded = record.x == (float)target && record.z == 1 && frame - record.y <= 2;
+                bool this_frame = recorded && record.y == frame;
+                float distance = 3.0e38;
+                if (recorded)
                 {
-                    Affine recorded = RowsToWorld(Records[s * 5], Records[s * 5 + 1], Records[s * 5 + 2], Records[s * 5 + 3]);
-                    float distance = length(Apply(recorded, Point(LoadBone(s, rows, target_local))) - expected);
-                    if (distance < best_distance)
-                    {
-                        second_distance = best_distance;
-                        best_distance = distance;
-                        best = s;
-                    }
-                    else if (distance < second_distance)
-                    {
-                        second_distance = distance;
-                    }
+                    Affine placed = RowsToWorld(Records[s * 5], Records[s * 5 + 1], Records[s * 5 + 2], Records[s * 5 + 3]);
+                    distance = length(Apply(placed, Point(LoadBone(s, rows, target_local))) - expected);
                 }
-                else
+                // A record of this frame elsewhere: another copy's instance, whoever keeps it.
+                if (this_frame && distance > SAME_FRAME_DISTANCE)
+                    continue;
+                float4 owner = Owners[s * count + host];
+                bool kept = owner.w == 1 && owner.z <= frame && frame - owner.z <= OWNER_FRAMES;
+                bool ours = kept && (owner.x == host_key || owner.x == host_other
+                                     || owner.y == host_key || owner.y == host_other);
+                if (kept && !ours)
+                    continue;
+                if (ours)
                 {
-                    unrecorded += 1;
+                    mine = s;
+                    mine_count += 1;
+                }
+                free_count += 1;
+                free_only = s;
+                if (!recorded)
+                {
+                    free_unrecorded += 1;
+                    continue;
+                }
+                if (distance < best_distance)
+                {
+                    second_distance = best_distance;
+                    best_distance = distance;
+                    best = s;
+                    best_this_frame = this_frame;
+                }
+                else if (distance < second_distance)
+                {
+                    second_distance = distance;
                 }
             }
             uint chosen = NO_SLOT;
-            if (candidates == 1 && copies <= 1)
-                chosen = only;
-            else if (best != NO_SLOT && best_distance <= MATCH_DISTANCE)
+            if (copies <= 1 && candidates == 1 && free_count == 1)
+                chosen = free_only;
+            else if (mine_count == 1)
+                chosen = mine;
+            else if (free_count == 1 && candidates == copies)
+                chosen = free_only;
+            else if (best != NO_SLOT && best_this_frame && best_distance <= SAME_FRAME_DISTANCE
+                     && second_distance > SAME_FRAME_DISTANCE)
                 chosen = best;
-            else if (best != NO_SLOT && unrecorded == 0 && candidates > 1 && best_distance * 2.0 < second_distance)
+            else if (best != NO_SLOT && free_unrecorded == 0 && free_count > 1 && best_distance * 2.0 < second_distance)
                 chosen = best;
             if (chosen == NO_SLOT)
                 continue;
@@ -1383,6 +1468,49 @@ void main()
         Choice[1 + m] = uint4(found ? slot_of[m] : 0, found ? 1 : 0, 0, 0);
     }
     Choice[0] = uint4(all_found ? 1 : 0, 0, 0, 0);
+    // This copy keeps the instances it was matched with (a partial match is not drawn and
+    // keeps nothing).
+    if (all_found)
+    {
+        [loop]
+        for (uint o = 0; o < count; ++o)
+        {
+            if (o != host && slot_of[o] != NO_SLOT)
+                Owners[slot_of[o] * count + host] = float4(host_key, host_other, frame, 1);
+        }
+    }
+}
+"""
+
+INSTANCE_CLEAR_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: a store slot that has passed to another buffer.
+// XXMI gives a slot whose buffer it has dropped (expired, or the oldest when the pool is full)
+// to the next new buffer as it is; what the previous buffer left there (its header, its
+// records, which copy kept it) must not be taken for the new buffer's.
+
+// (table index, merged component count, slot count, rows per slot)
+Buffer<uint4> Params : register(t0);
+
+// x0 = the slot
+Texture1D<float4> IniParams : register(t120);
+
+RWBuffer<float4> Store : register(u0);
+RWBuffer<float4> Records : register(u1);
+RWBuffer<float4> Owners : register(u2);
+
+[numthreads(32, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint4 params = Params[0];
+    uint slot = (uint)IniParams.Load(int2(0, 0)).x;
+    uint i = thread_id.x;
+    if (slot >= params.z)
+        return;
+    if (i == 0)
+        Store[slot * params.w] = float4(0, 0, 0, 0);
+    if (i < 5)
+        Records[slot * 5 + i] = float4(0, 0, 0, 0);
+    if (i < params.y)
+        Owners[slot * params.y + i] = float4(0, 0, 0, 0);
 }
 """
 
@@ -1557,15 +1685,28 @@ def _rows_to_world(rows) -> numpy.ndarray:
     return matrix
 
 
+def instance_owner_rows(slot_count: int, merged_count: int) -> int:
+    """Owner entries: one per store slot and merged component (the drawn part's table index)."""
+    return int(slot_count) * int(merged_count)
+
+
 def reference_instance_match(profile: dict, store, records, params, needed, host_rows, host_slot: int,
-                             frame: float) -> numpy.ndarray:
-    """What the match shader writes: ``uint`` rows (1 + merged count, 4)."""
+                             frame: float, host_keys=None, owners=None) -> numpy.ndarray:
+    """What the match shader writes: ``uint`` rows (1 + merged count, 4).
+
+    ``host_keys``: the identities of the drawn part's buffer and of its other stream-output buffer
+    (z0, w0; default the slot number, for both).  ``owners``: float rows (slots * merged count, 4),
+    updated in place as the shader does; None for none kept.
+    """
     host, count, slots, rows_per_slot = (int(value) for value in params)
     count = min(count, MAX_INSTANCE_COMPONENTS)
+    host_key, host_other = (float(host_slot), float(host_slot)) if host_keys is None else (
+        float(host_keys[0]), float(host_keys[1]))
     store = numpy.asarray(store, dtype=numpy.float64).reshape(-1, 4)
     records = numpy.asarray(records, dtype=numpy.float64).reshape(-1, 4)
     needed = numpy.asarray(needed).reshape(-1, 4)[:, 0]
     table = numpy.asarray(runtime_component_table(profile), dtype=numpy.int64).reshape(-1, 4)
+    kept_by = numpy.zeros((slots * count, 4)) if owners is None else owners
 
     def bone(slot, local):
         base = slot * rows_per_slot + 1 + local * 3
@@ -1598,29 +1739,49 @@ def reference_instance_match(profile: dict, store, records, params, needed, host
             target_local = target_anchor - int(table[target * 2, 0])
             known_bone = bone(slot_of[known], known_anchor - int(table[known * 2, 0]))
             expected = (world[known] @ known_bone)[:3, 3]
-            best, only, best_distance, second_distance = None, None, 3.0e38, 3.0e38
-            candidates = unrecorded = 0
+            candidates = 0
+            mine, mine_count = None, 0
+            free_count, free_only, free_unrecorded = 0, None, 0
+            best, best_this_frame, best_distance, second_distance = None, False, 3.0e38, 3.0e38
             for s in range(slots):
                 header = store[s * rows_per_slot]
                 if header[0] != target or header[1] != frame:
                     continue
                 candidates += 1
-                only = s
                 record = records[s * INSTANCE_RECORD_ROWS + 4]
-                if record[0] == target and record[2] == 1 and frame - record[1] <= 2:
-                    recorded = _rows_to_world(records[s * INSTANCE_RECORD_ROWS:s * INSTANCE_RECORD_ROWS + 4])
-                    distance = float(numpy.linalg.norm((recorded @ bone(s, target_local))[:3, 3] - expected))
-                    if distance < best_distance:
-                        best, best_distance, second_distance = s, distance, best_distance
-                    elif distance < second_distance:
-                        second_distance = distance
-                else:
-                    unrecorded += 1
-            if candidates == 1 and copies <= 1:
-                chosen = only
-            elif best is not None and best_distance <= MATCH_DISTANCE:
+                recorded = bool(record[0] == target and record[2] == 1 and frame - record[1] <= 2)
+                this_frame = recorded and record[1] == frame
+                distance = 3.0e38
+                if recorded:
+                    placed = _rows_to_world(records[s * INSTANCE_RECORD_ROWS:s * INSTANCE_RECORD_ROWS + 4])
+                    distance = float(numpy.linalg.norm((placed @ bone(s, target_local))[:3, 3] - expected))
+                if this_frame and distance > SAME_FRAME_DISTANCE:
+                    continue
+                owner = kept_by[s * count + host]
+                kept = owner[3] == 1 and owner[2] <= frame and frame - owner[2] <= OWNER_FRAMES
+                ours = kept and bool({float(owner[0]), float(owner[1])} & {host_key, host_other})
+                if kept and not ours:
+                    continue
+                if ours:
+                    mine, mine_count = s, mine_count + 1
+                free_count, free_only = free_count + 1, s
+                if not recorded:
+                    free_unrecorded += 1
+                    continue
+                if distance < best_distance:
+                    best, best_this_frame, best_distance, second_distance = s, this_frame, distance, best_distance
+                elif distance < second_distance:
+                    second_distance = distance
+            if copies <= 1 and candidates == 1 and free_count == 1:
+                chosen = free_only
+            elif mine_count == 1:
+                chosen = mine
+            elif free_count == 1 and candidates == copies:
+                chosen = free_only
+            elif (best is not None and best_this_frame and best_distance <= SAME_FRAME_DISTANCE
+                  and second_distance > SAME_FRAME_DISTANCE):
                 chosen = best
-            elif best is not None and unrecorded == 0 and candidates > 1 and best_distance * 2.0 < second_distance:
+            elif best is not None and free_unrecorded == 0 and free_count > 1 and best_distance * 2.0 < second_distance:
                 chosen = best
             else:
                 continue
@@ -1637,6 +1798,10 @@ def reference_instance_match(profile: dict, store, records, params, needed, host
             all_found = False
         choice[1 + m] = [slot_of[m] if found else 0, 1 if found else 0, 0, 0]
     choice[0, 0] = 1 if all_found else 0
+    if all_found and owners is not None:
+        for m in range(count):
+            if m != host and slot_of[m] is not None:
+                owners[slot_of[m] * count + host] = [host_key, host_other, frame, 1]
     return choice
 
 
@@ -1693,10 +1858,9 @@ def reference_placement(self_rows, history, place: bool = True, shift=None) -> t
 def write_runtime_shaders(shader_folder: str, frame_delay: bool = False, same_frame: bool = False) -> list[str]:
     os.makedirs(shader_folder, exist_ok=True)
     paths = []
-    shaders = [
-        (IMPORT_SHADER_FILENAME, IMPORT_SHADER_SOURCE),
-        (PALETTE_SHADER_FILENAME, PALETTE_SHADER_SOURCE),
-    ]
+    # Same-frame skinning imports into the instance store instead.
+    shaders = [] if same_frame else [(IMPORT_SHADER_FILENAME, IMPORT_SHADER_SOURCE)]
+    shaders.append((PALETTE_SHADER_FILENAME, PALETTE_SHADER_SOURCE))
     if frame_delay:
         shaders.append((DELAY_SHADER_FILENAME, DELAY_SHADER_SOURCE))
         shaders.append((PLACE_SHADER_FILENAME, PLACE_SHADER_SOURCE))
@@ -1706,6 +1870,7 @@ def write_runtime_shaders(shader_folder: str, frame_delay: bool = False, same_fr
         shaders.append((INSTANCE_RECORD_SHADER_FILENAME, INSTANCE_RECORD_SHADER_SOURCE))
         shaders.append((INSTANCE_MATCH_SHADER_FILENAME, INSTANCE_MATCH_SHADER_SOURCE))
         shaders.append((INSTANCE_GATHER_SHADER_FILENAME, INSTANCE_GATHER_SHADER_SOURCE))
+        shaders.append((INSTANCE_CLEAR_SHADER_FILENAME, INSTANCE_CLEAR_SHADER_SOURCE))
     for filename, source in shaders:
         path = os.path.join(shader_folder, filename)
         with open(path, "w", encoding="utf-8", newline="\n") as file:
