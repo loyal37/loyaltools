@@ -25,8 +25,13 @@ vb2，ZZMI 对所有 DRAW_TYPE 1 的绘制都检查 vb2，不加判断就会在�
 仍是游戏当帧算出来的。刚出现的第一帧还没有上一帧的骨骼，照常用当帧的。
 各部件的骨骼表在自己根骨骼的空间里，游戏用这个根当帧的物体矩阵 (vs-cb1) 摆放部件，
 而这些根是骨骼 (胯、胸、头)。所以自己绘制的部件画的时候也换成上一帧的物体矩阵: 整个
-角色画成上一帧的样子 (位置也晚一帧)。游戏只给每一遍绘制写物体常量的第 0~3 行，
-上一帧的矩阵用 Mod 自己的记录。
+角色画成上一帧的姿势，再平移这一帧整个角色挪动的距离 (位置是当帧的)。游戏只给每一遍
+绘制写物体常量的第 0~3 行，上一帧的矩阵用 Mod 自己的记录。
+
+同帧蒙皮 (生成 Mod 节点上的「同帧蒙皮(骨骼合并)」选项): 游戏先给所有部件蒙皮，再开始画。
+用到别的部件骨骼的部件不在自己的预蒙皮绘制上蒙皮 (那里只导入骨骼)，而是在它这一帧第一次
+绘制时用骨骼池生成调色板，由 Mod 的计算着色器蒙皮写进 Mod 自己的缓冲，画的时候绑成 vb0；
+上一帧的结果绑成 vb3 (运动矢量)。整个角色用当帧的骨骼。脸和其它部件照常由游戏蒙皮、绘制。
 '''
 
 import math
@@ -69,10 +74,17 @@ class ZZMIMergedSkeletonExport:
         self.delayed_copies = {}   # 统一延迟: 蒙皮前换成自己上一帧骨骼表的部件 ib -> (起始骨骼, 骨骼数)
         self.placed_ibs = []       # 统一延迟: 画的时候换成上一帧物体矩阵的部件 (蓝图里的部件、脸)
         self.face_parts_written = set()  # 统一延迟: 已经写了绘制行的 (脸 ib, 首索引)
+        self.same_frame = False
+        self.skin_layouts = {}     # 同帧蒙皮: 合并部件 ib -> (权重缓冲布局, 不能蒙皮的原因)
+        self.same_frame_ibs = []   # 同帧蒙皮: 在第一次绘制时由 Mod 蒙皮的部件
         self.warnings = []
         if not self.enabled:
             return
+        self.same_frame = bool(GlobalProterties.zzz_merged_same_frame())
         self.frame_delay = bool(GlobalProterties.zzz_merged_frame_delay())
+        if self.same_frame and self.frame_delay:
+            print("[ZZMI骨骼合并] 同时勾选了同帧蒙皮和统一延迟一帧，按同帧蒙皮导出")
+            self.frame_delay = False
 
         self.profile = zms.load_profile(GlobalConfig.path_workspace_folder(), required=True)
         self.component_by_ib = zms.get_component_by_ib(self.profile)
@@ -88,6 +100,8 @@ class ZZMIMergedSkeletonExport:
         print("[ZZMI骨骼合并] 已启用，骨骼池 " + str(self.profile["bones_count"]) + " 根骨骼")
         if self.frame_delay:
             print("[ZZMI骨骼合并] 统一延迟一帧: 整个角色 (含脸) 用上一帧的骨骼蒙皮")
+        if self.same_frame:
+            print("[ZZMI骨骼合并] 同帧蒙皮: 用到别的部件骨骼的部件在第一次绘制时用当帧骨骼蒙皮")
 
     # ------------------------------------------------------------------
     # 检测
@@ -139,6 +153,13 @@ class ZZMIMergedSkeletonExport:
                     weights = (offset, element)
             offset += int(element.ByteWidth)
         return indices, weights, offset
+
+    @staticmethod
+    def _category_elements(game_type, category: str) -> list:
+        return [
+            (element.SemanticName, int(element.SemanticIndex), element.Format, int(element.ByteWidth))
+            for element in game_type.D3D11ElementList if element.Category == category
+        ]
 
     def prepare_blend_buffers(self):
         if not self.enabled:
@@ -216,6 +237,10 @@ class ZZMIMergedSkeletonExport:
             drawib_model.category_buffer_dict["Blend"] = rows.reshape(-1)
             self.modes[drawib_model.draw_ib] = mode
             self.foreign_slots[drawib_model.draw_ib] = foreign
+            if self.same_frame and mode == "merged":
+                self.skin_layouts[drawib_model.draw_ib] = zms.same_frame_skin_layout(
+                    self._category_elements(game_type, "Position"), self._category_elements(game_type, "Blend"),
+                )
 
         self._plan_runtime()
 
@@ -243,9 +268,13 @@ class ZZMIMergedSkeletonExport:
             self.participants = sorted(participants, key=lambda ib_hash: self.component_by_ib[ib_hash]["pose_order"])
             return
         self.participants = sorted(participants, key=lambda ib_hash: self.component_by_ib[ib_hash]["pose_order"])
+        if self.same_frame:
+            self._plan_same_frame()
 
         # 按抓帧时的蒙皮顺序提示: 比绘制部件更晚上传骨骼的部件，其骨骼会慢一帧
         for ib_hash, dependency_ibs in sorted(self.dependencies.items()):
+            if ib_hash in self.same_frame_ibs:
+                continue
             own_order = self.component_by_ib[ib_hash]["pose_order"]
             late = sorted(
                 dependency for dependency in dependency_ibs
@@ -258,6 +287,16 @@ class ZZMIMergedSkeletonExport:
                 )
         for warning in self.warnings:
             print("[ZZMI骨骼合并][提示] " + warning)
+
+    def _plan_same_frame(self):
+        '''同帧蒙皮: 用合并调色板的部件改由 Mod 在第一次绘制时蒙皮；布局不支持的照常在预蒙皮绘制上蒙皮'''
+        for ib_hash in self.participants_order(ib for ib, mode in self.modes.items() if mode == "merged"):
+            layout, reason = self.skin_layouts[ib_hash]
+            if layout is None:
+                print("[ZZMI骨骼合并][提示] " + ib_hash + " 不能同帧蒙皮 (" + reason + ")，照常在预蒙皮绘制上蒙皮")
+                continue
+            self.same_frame_ibs.append(ib_hash)
+            print("[ZZMI骨骼合并] " + ib_hash + " 在这一帧第一次绘制时用当帧骨骼蒙皮")
 
     def _plan_frame_delay(self, participants: set):
         '''
@@ -337,17 +376,35 @@ class ZZMIMergedSkeletonExport:
     # 这次绘制换回去，否则后面的绘制都会用它。ZZMI 的 legacy 模式下 IB 覆盖段一次绘制会被
     # 检查两次，所以换上、绘制、换回放在同一个 IB 覆盖段里，每次执行都成对。
 
-    def place_begin_lines(self, ib_hash: str) -> list:
-        '''统一延迟: 我们自己绘制的部件，IB 覆盖段里 drawindexed 之前的行'''
-        if not self.enabled or not self.frame_delay or ib_hash not in self.placed_ibs:
+    def draw_begin_lines(self, ib_hash: str) -> list:
+        '''
+        我们自己绘制的部件，IB 覆盖段里 drawindexed 之前的行。统一延迟: 换上物体常量；
+        同帧蒙皮: 这一帧还没蒙皮就先蒙皮，换上 Mod 的顶点缓冲 (vb0 当帧、vb3 上一帧)。
+        '''
+        if not self.enabled:
             return []
-        return ["run = CommandListZZMS_PlaceBegin_" + _ini_name(ib_hash)]
+        name = _ini_name(ib_hash)
+        if self.frame_delay and ib_hash in self.placed_ibs:
+            return ["run = CommandListZZMS_PlaceBegin_" + name]
+        if self.same_frame and ib_hash in self.same_frame_ibs:
+            return [
+                "run = CommandListZZMS_SkinNow_" + name,
+                "ResourceZZMS_GameVb0 = ref vb0",
+                "ResourceZZMS_GameVb3 = ref vb3",
+                "vb0 = ref ResourceZZMS_Skinned_" + name,
+                "vb3 = ref ResourceZZMS_SkinnedPrev_" + name,
+            ]
+        return []
 
-    def place_end_lines(self, ib_hash: str) -> list:
-        '''统一延迟: 我们自己绘制的部件，IB 覆盖段里 drawindexed 之后的行'''
-        if not self.enabled or not self.frame_delay or ib_hash not in self.placed_ibs:
+    def draw_end_lines(self, ib_hash: str) -> list:
+        '''我们自己绘制的部件，IB 覆盖段里 drawindexed 之后的行: 换回游戏的绑定'''
+        if not self.enabled:
             return []
-        return ["run = CommandListZZMS_PlaceEnd_" + _ini_name(ib_hash)]
+        if self.frame_delay and ib_hash in self.placed_ibs:
+            return ["run = CommandListZZMS_PlaceEnd_" + _ini_name(ib_hash)]
+        if self.same_frame and ib_hash in self.same_frame_ibs:
+            return ["vb0 = ref ResourceZZMS_GameVb0", "vb3 = ref ResourceZZMS_GameVb3"]
+        return []
 
     def face_draw_lines(self, ib_hash: str, first_index: int) -> list:
         '''
@@ -411,6 +468,10 @@ class ZZMIMergedSkeletonExport:
                 lines.append(slot_dict["Position"] + " = Resource" + ib_hash + "Position")
                 lines.append(slot_dict["Blend"] + " = Resource" + ib_hash + "Blend")
                 lines.append("draw = " + str(exported_drawib.draw_number) + ", 0")
+            lines.append("")
+            return lines
+        if ib_hash in self.same_frame_ibs:
+            # 同帧蒙皮: 这里只导入骨骼，跳过游戏的预蒙皮；第一次绘制时再蒙皮
             lines.append("")
             return lines
         if exported_drawib is not None:
@@ -793,8 +854,103 @@ class ZZMIMergedSkeletonExport:
         resources.append("[ResourceZZMS_Input]")
         resources.new_line()
         ini_builder.append_section(resources)
+        self._add_same_frame_sections(ini_builder, exported_by_ib)
+
+    def _add_same_frame_sections(self, ini_builder, exported_by_ib: dict):
+        '''
+        同帧蒙皮: $zzms_skinned_<ib> 表示这一帧已经蒙过皮 (每帧只蒙一次)；$zzms_primed_<ib> 表示
+        上一帧的结果可用，部件有一帧没画就重新开始 (第一帧 vb3 也用当帧的结果)。
+        '''
+        if not self.same_frame_ibs:
+            return
+        from ...blueprint.export_helper import BlueprintExportHelper
+        buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+        constants = M_IniSection(M_SectionType.Constants)
+        constants.SectionName = "Constants"
+        present = M_IniSection(M_SectionType.Present)
+        present.SectionName = "Present"
+        command_lists = M_IniSection(M_SectionType.CommandList)
+        command_lists.append("; Merged skeleton runtime (Zenless Zone Zero), skinned at the first draw with the bones of this frame")
+        resources = M_IniSection(M_SectionType.ResourceBuffer)
+        for ib_hash in self.same_frame_ibs:
+            name = _ini_name(ib_hash)
+            vertex_count = int(exported_by_ib[ib_hash].draw_number)
+            layout = self.skin_layouts[ib_hash][0]
+            skinned = "$zzms_skinned_" + name
+            primed = "$zzms_primed_" + name
+            constants.append("global " + skinned + " = 0")
+            constants.append("global " + primed + " = 0")
+            present.append("if " + skinned + " == 0")
+            present.append("\t" + primed + " = 0")
+            present.append("endif")
+            present.append(skinned + " = 0")
+
+            for line in (
+                "[CommandListZZMS_SkinNow_" + name + "]",
+                "if " + skinned + " == 0",
+                "\trun = CustomShaderZZMS_Palette_" + name,
+                "\tif " + primed,
+                "\t\trun = CustomShaderZZMS_SkinFrame_" + name,
+                "\telse",
+                "\t\trun = CustomShaderZZMS_SkinFirst_" + name,
+                "\t\t" + primed + " = 1",
+                "\tendif",
+                "\t" + skinned + " = 1",
+                "endif",
+                "",
+            ):
+                command_lists.append(line)
+            for section_name, params in (("CustomShaderZZMS_SkinFrame_", "ResourceZZMS_SkinParams_"),
+                                         ("CustomShaderZZMS_SkinFirst_", "ResourceZZMS_SkinParamsFirst_")):
+                for line in (
+                    "[" + section_name + name + "]",
+                    "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
+                    "cs-t0 = ref ResourceZZMS_Palette_" + name,
+                    "cs-t1 = ref ResourceZZMS_SkinPosition_" + name,
+                    "cs-t2 = ref ResourceZZMS_SkinBlend_" + name,
+                    "cs-t3 = ref " + params + name,
+                    "cs-u0 = ref ResourceZZMS_Skinned_" + name,
+                    "cs-u1 = ref ResourceZZMS_SkinnedPrev_" + name,
+                    "dispatch = " + str(_ceil_groups(vertex_count)) + ", 1, 1",
+                    "cs-u0 = null",
+                    "cs-u1 = null",
+                    "cs-t0 = null",
+                    "cs-t1 = null",
+                    "cs-t2 = null",
+                    "cs-t3 = null",
+                    "",
+                ):
+                    command_lists.append(line)
+
+            # 读导出的顶点和权重 (同一份文件，按字节读)
+            for category in ("Position", "Blend"):
+                resources.append("[ResourceZZMS_Skin" + category + "_" + name + "]")
+                resources.append("type = ByteAddressBuffer")
+                resources.append("filename = " + buffer_folder_name + "/" + ib_hash + "-" + category + ".buf")
+                resources.new_line()
+            self._uint4_data(resources, "ResourceZZMS_SkinParams_" + name,
+                             zms.same_frame_skin_params(vertex_count, layout))
+            self._uint4_data(resources, "ResourceZZMS_SkinParamsFirst_" + name,
+                             zms.same_frame_skin_params(vertex_count, layout, first_frame=True))
+            # 计算着色器写、绘制时当顶点缓冲读: 原始视图 + 顶点缓冲标记 (结构化缓冲不能当顶点缓冲)
+            for resource_name in ("ResourceZZMS_Skinned_", "ResourceZZMS_SkinnedPrev_"):
+                resources.append("[" + resource_name + name + "]")
+                resources.append("type = RWByteAddressBuffer")
+                resources.append("stride = " + str(zms.SKIN_VERTEX_STRIDE))
+                resources.append("array = " + str(vertex_count))
+                resources.append("bind_flags = vertex_buffer shader_resource unordered_access")
+                resources.new_line()
+        resources.append("[ResourceZZMS_GameVb0]")
+        resources.new_line()
+        resources.append("[ResourceZZMS_GameVb3]")
+        resources.new_line()
+        ini_builder.append_section(constants)
+        ini_builder.append_section(present)
+        ini_builder.append_section(command_lists)
+        ini_builder.append_section(resources)
 
     def write_shaders(self, mod_folder: str):
         if not self.uses_runtime():
             return
-        zms.write_runtime_shaders(os.path.join(mod_folder, "Shaders"), frame_delay=self.frame_delay)
+        zms.write_runtime_shaders(os.path.join(mod_folder, "Shaders"), frame_delay=self.frame_delay,
+                                  same_frame=bool(self.same_frame_ibs))

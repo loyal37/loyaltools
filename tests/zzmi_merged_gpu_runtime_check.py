@@ -35,11 +35,16 @@ def load_module():
 
 DXGI_FORMAT_R32G32B32A32_FLOAT = 2
 DXGI_FORMAT_R32G32B32A32_UINT = 3
+DXGI_FORMAT_R32_TYPELESS = 39
+D3D11_BIND_VERTEX_BUFFER = 0x1
 D3D11_BIND_CONSTANT_BUFFER = 0x4
 D3D11_BIND_SHADER_RESOURCE = 0x8
 D3D11_BIND_UNORDERED_ACCESS = 0x80
 D3D11_USAGE_DEFAULT = 0
 D3D11_USAGE_STAGING = 3
+D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS = 0x20
+D3D11_SRV_DIMENSION_BUFFEREX = 11
+D3D11_RAW_VIEW_FLAG = 1
 D3D11_CPU_ACCESS_READ = 0x20000
 D3D11_MAP_READ = 1
 D3D_DRIVER_TYPE_WARP = 5
@@ -142,6 +147,45 @@ class Compute:
                        ctypes.POINTER(ctypes.c_void_p))(buffer, ctypes.byref(desc), ctypes.byref(view)),
                "CreateUnorderedAccessView")
         return view.value
+
+    def raw_buffer(self, data: numpy.ndarray, bind_flags: int, stride: int = 0):
+        """A buffer as 3dmigoto creates a ByteAddressBuffer resource (raw views allowed)."""
+        data = numpy.ascontiguousarray(data)
+        desc = BufferDesc(data.nbytes, D3D11_USAGE_DEFAULT, bind_flags, 0,
+                          D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS, stride)
+        initial = SubresourceData(data.ctypes.data, 0, 0)
+        buffer = ctypes.c_void_p()
+        _check(_method(self.device, 3, ctypes.c_long, ctypes.POINTER(BufferDesc), ctypes.POINTER(SubresourceData),
+                       ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(desc), ctypes.byref(initial), ctypes.byref(buffer)),
+               "CreateBuffer(raw)")
+        return buffer.value
+
+    def raw_srv(self, buffer, nbytes: int):
+        desc = SrvDesc(DXGI_FORMAT_R32_TYPELESS, D3D11_SRV_DIMENSION_BUFFEREX, 0, nbytes // 4)
+        desc._pad[0] = D3D11_RAW_VIEW_FLAG
+        view = ctypes.c_void_p()
+        _check(_method(self.device, 7, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(SrvDesc),
+                       ctypes.POINTER(ctypes.c_void_p))(buffer, ctypes.byref(desc), ctypes.byref(view)),
+               "CreateShaderResourceView(raw)")
+        return view.value
+
+    def raw_uav(self, buffer, nbytes: int):
+        desc = UavDesc(DXGI_FORMAT_R32_TYPELESS, 1, 0, nbytes // 4, D3D11_RAW_VIEW_FLAG)
+        view = ctypes.c_void_p()
+        _check(_method(self.device, 8, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(UavDesc),
+                       ctypes.POINTER(ctypes.c_void_p))(buffer, ctypes.byref(desc), ctypes.byref(view)),
+               "CreateUnorderedAccessView(raw)")
+        return view.value
+
+    def create_buffer_result(self, nbytes: int, bind_flags: int, misc_flags: int, stride: int) -> int:
+        """HRESULT of CreateBuffer for this description (the runtime validates it even without the debug layer)."""
+        desc = BufferDesc(nbytes, D3D11_USAGE_DEFAULT, bind_flags, 0, misc_flags, stride)
+        buffer = ctypes.c_void_p()
+        result = _method(self.device, 3, ctypes.c_long, ctypes.POINTER(BufferDesc), ctypes.c_void_p,
+                         ctypes.POINTER(ctypes.c_void_p))(ctypes.byref(desc), None, ctypes.byref(buffer))
+        if result == 0 and buffer.value:
+            _method(buffer.value, 2, wintypes.ULONG)()
+        return result
 
     def constant_buffer(self, data: numpy.ndarray):
         data = numpy.ascontiguousarray(data)
@@ -480,10 +524,108 @@ def check_placement(module) -> float:
     return worst
 
 
+def _blend_rows(rng, count: int, bone_count: int, weight_format: str, indices_first: bool):
+    """A weight buffer in one of the formats the skinning shader decodes, and its element list."""
+    indices = rng.integers(0, bone_count, size=(count, 4)).astype(numpy.uint32)
+    weights = rng.random(size=(count, 4))
+    weights /= weights.sum(axis=1, keepdims=True)
+    if weight_format == "R32G32B32A32_FLOAT":
+        weight_bytes = weights.astype(numpy.float32).view(numpy.uint8).reshape(count, -1)
+    elif weight_format == "R16G16B16A16_FLOAT":
+        weight_bytes = weights.astype(numpy.float16).view(numpy.uint8).reshape(count, -1)
+    elif weight_format == "R16G16B16A16_UNORM":
+        weight_bytes = numpy.round(weights * 65535).astype(numpy.uint16).view(numpy.uint8).reshape(count, -1)
+    else:
+        weight_bytes = numpy.round(weights * 255).astype(numpy.uint8)
+    index_bytes = indices.view(numpy.uint8).reshape(count, -1)
+    weight_element = ("BLENDWEIGHTS", 0, weight_format, weight_bytes.shape[1])
+    index_element = ("BLENDINDICES", 0, "R32G32B32A32_UINT", 16)
+    if indices_first:
+        return numpy.hstack([index_bytes, weight_bytes]), [index_element, weight_element]
+    return numpy.hstack([weight_bytes, index_bytes]), [weight_element, index_element]
+
+
+def check_same_frame_skin(module) -> float:
+    """The same-frame skinning shader against reference_same_frame_skin, on buffers created as 3dmigoto does.
+
+    Two frames: the first one primes the previous-frame buffer with its own result, the second keeps the
+    first frame's result there (motion vectors).  The output buffers are created with the description
+    3dmigoto gives them, which D3D11 must accept for a buffer that is both written and drawn from.
+    """
+    rng = numpy.random.default_rng(23)
+    gpu = Compute()
+    shader = gpu.shader(module.SKIN_SHADER_SOURCE)
+    count, bone_count = 150, 9
+    vertices = rng.normal(size=(count, 10)).astype(numpy.float32)
+    vertices[:, 9] = rng.choice([-1.0, 1.0], size=count)
+    position_elements = [("POSITION", 0, "R32G32B32_FLOAT", 12), ("NORMAL", 0, "R32G32B32_FLOAT", 12),
+                         ("TANGENT", 0, "R32G32B32A32_FLOAT", 16)]
+    position_bytes = vertices.tobytes()
+    position_srv = gpu.raw_srv(gpu.raw_buffer(vertices, D3D11_BIND_SHADER_RESOURCE), len(position_bytes))
+    output_flags = D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS
+    nbytes = count * module.SKIN_VERTEX_STRIDE
+
+    cases = [(fmt, False) for fmt in module.SKIN_WEIGHT_FORMATS] + [("R8G8B8A8_UNORM", True), ("one bone", False)]
+    worst = 0.0
+    for weight_format, indices_first in cases:
+        if weight_format == "one bone":
+            blend = rng.integers(0, bone_count, size=(count, 1)).astype(numpy.uint32).view(numpy.uint8).reshape(count, -1)
+            elements = [("BLENDINDICES", 0, "R32_UINT", 4)]
+        else:
+            blend, elements = _blend_rows(rng, count, bone_count, weight_format, indices_first)
+        layout, reason = module.same_frame_skin_layout(position_elements, elements)
+        assert layout is not None, (weight_format, reason)
+        blend_bytes = numpy.ascontiguousarray(blend).tobytes()
+        blend_srv = gpu.raw_srv(gpu.raw_buffer(numpy.frombuffer(blend_bytes, numpy.uint8), D3D11_BIND_SHADER_RESOURCE),
+                                len(blend_bytes))
+        # As 3dmigoto creates `type = RWByteAddressBuffer`, `stride = 40`, `array = <vertices>`.
+        skinned = gpu.raw_buffer(numpy.zeros(nbytes, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
+        previous = gpu.raw_buffer(numpy.zeros(nbytes, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
+        uavs = [gpu.raw_uav(skinned, nbytes), gpu.raw_uav(previous, nbytes)]
+
+        before = None
+        for frame in range(2):
+            palette = rng.normal(size=(bone_count * 3, 4)).astype(numpy.float32)
+            params = module.same_frame_skin_params(count, layout, first_frame=frame == 0)
+            srvs = [gpu.srv(gpu.buffer(palette, uav=False), DXGI_FORMAT_R32G32B32A32_FLOAT, len(palette)),
+                    position_srv, blend_srv,
+                    gpu.srv(gpu.buffer(numpy.asarray([params], numpy.uint32), uav=False), DXGI_FORMAT_R32G32B32A32_UINT, 1)]
+            gpu.dispatch_bound(shader, [], srvs, uavs, (count + 63) // 64)
+            got = gpu.read(skinned, nbytes).view(numpy.float32).reshape(count, 10)
+            got_previous = gpu.read(previous, nbytes).view(numpy.float32).reshape(count, 10)
+            expected, expected_previous = module.reference_same_frame_skin(
+                palette, position_bytes, blend_bytes, params, skinned_before=before)
+            scale = max(1.0, float(numpy.abs(expected).max()))
+            error = float(numpy.abs(got - expected).max()) / scale
+            assert error < 1e-5, (weight_format, frame, error)
+            assert numpy.array_equal(got_previous, expected_previous if frame else got), (weight_format, frame)
+            if frame:
+                assert numpy.array_equal(got_previous, before), weight_format + ": previous frame kept"
+            assert numpy.array_equal(got[:, 9], vertices[:, 9]), "tangent w kept"
+            worst = max(worst, error)
+            before = got
+
+    # The description above was accepted (raw views, vertex buffer + unordered access, stride 40); a
+    # structured buffer cannot be a vertex buffer, and the runtime refuses it, so this check means something.
+    D3D11_RESOURCE_MISC_BUFFER_STRUCTURED = 0x40
+    assert gpu.create_buffer_result(nbytes, output_flags, D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS,
+                                    module.SKIN_VERTEX_STRIDE) == 0
+    assert gpu.create_buffer_result(nbytes, output_flags, D3D11_RESOURCE_MISC_BUFFER_STRUCTURED,
+                                    module.SKIN_VERTEX_STRIDE) != 0, "structured vertex buffers must be refused"
+
+    # Layouts the shader cannot skin are refused (the part is then skinned the standard way).
+    for elements in ([("BLENDWEIGHTS", 0, "R10G10B10A2_UNORM", 4), ("BLENDINDICES", 0, "R32G32B32A32_UINT", 16)],
+                     [("BLENDWEIGHTS", 0, "R32G32B32A32_FLOAT", 16), ("BLENDINDICES", 0, "R8G8B8A8_UINT", 4)]):
+        assert module.same_frame_skin_layout(position_elements, elements)[0] is None, elements
+    assert module.same_frame_skin_layout(position_elements[:2], [("BLENDINDICES", 0, "R32_UINT", 4)])[0] is None
+    return worst
+
+
 def main() -> int:
     if sys.platform != "win32":
         print("ZZMI_MERGED_GPU_RUNTIME=SKIP (not Windows)")
         return 0
+    skin_error = check_same_frame_skin(load_module())
     place_error = check_placement(load_module())
     module = load_module()
     profile, palettes, roots, world_bones, bone_sets = synthetic_case(module)
@@ -508,8 +650,8 @@ def main() -> int:
                 worst_truth = max(worst_truth, float(numpy.abs(gpu_palette[other["vg_offset"] + local_id] - truth).max()))
     assert worst_reference < 1e-5, worst_reference
     assert worst_truth < 1e-5, worst_truth
-    print("ZZMI_MERGED_GPU_RUNTIME=PASS (reference %.1e, truth %.1e, delayed %.1e, placement %.1e)"
-          % (worst_reference, worst_truth, delay_error, place_error))
+    print("ZZMI_MERGED_GPU_RUNTIME=PASS (reference %.1e, truth %.1e, delayed %.1e, placement %.1e, same-frame skin %.1e)"
+          % (worst_reference, worst_truth, delay_error, place_error, skin_error))
     return 0
 
 

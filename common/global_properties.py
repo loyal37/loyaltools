@@ -137,6 +137,12 @@ class GlobalProterties(bpy.types.PropertyGroup):
         default=False,
     ) # type: ignore
 
+    zzz_merged_same_frame: bpy.props.BoolProperty(
+        name="同帧蒙皮(骨骼合并)",
+        description="绝区零骨骼合并: 用到别的部件骨骼的部件，在这一帧第一次绘制时由Mod用当帧的骨骼蒙皮，整个角色都是当帧的姿势和位置，不延迟。勾选后不再使用统一延迟一帧。实验功能",
+        default=False,
+    ) # type: ignore
+
     gimi_use_orfix: bpy.props.BoolProperty(
         name="槽位风格贴图使用ORFix",
         description="勾选后，在使用槽位风格贴图标记时，如果偷懒不想手动维护由于贴图槽位变化导致的贴图损坏问题，可以勾选此选项将问题交给ORFix维护者来解决，仅GIMI可用\n注意，如果你不懂ORFix和NNFix的原理，请不要取消勾选，取消勾选会严格按照贴图标记来执行贴图部分ini生成，默认你会在ini中自行写判断语句修复来替代实现ORFix和NNFix的功能",
@@ -407,6 +413,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def zzz_merged_frame_delay(cls):
         return cls._instance().zzz_merged_frame_delay
+
+    @classmethod
+    def zzz_merged_same_frame(cls):
+        return cls._instance().zzz_merged_same_frame
 
     @classmethod
     def gimi_use_orfix(cls):

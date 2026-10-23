@@ -24,6 +24,11 @@ Each case is also exported with the "uniform one-frame delay" option: the whole
 character, the face included, is skinned with the bones of the previous frame
 (the pool is copied at [Present]), the buffers stay byte-identical, and
 switching the option off again gives the ordinary export.
+
+And with the "same-frame skinning" option: a part that uses bones of other
+components only imports its bones at its skinning draw and is skinned by the
+mod at its first draw of the frame, into a buffer of the mod bound as vb0 (the
+previous result as vb3); the skinning parameters decode the exported buffers.
 """
 
 from __future__ import annotations
@@ -49,10 +54,11 @@ def _section(ini_text, header):
     return [line.strip() for line in lines if line.strip() and not line.startswith(";")]
 
 
-def _export(tree_name, output_dir, frame_delay=False):
+def _export(tree_name, output_dir, frame_delay=False, same_frame=False):
     props = bpy.context.scene.global_properties
     props.generate_mod_folder_path = output_dir
     props.zzz_merged_frame_delay = frame_delay
+    props.zzz_merged_same_frame = same_frame
     os.makedirs(output_dir, exist_ok=True)
     bpy.ops.ssmt.generate_mod_blueprint(blueprint_name=tree_name)
     ini_files = [name for name in os.listdir(output_dir) if name.lower().endswith(".ini")]
@@ -194,6 +200,76 @@ def _check_place(ini_text, zms, ib):
     assert _section(ini_text, "[CustomShaderZZMS_PlaceAdvance_" + ib + "]")[1:4] == [
         "cs-t0 = ref ResourceZZMS_Record_" + ib, "cs-t1 = ref ResourceZZMS_PlaceAdvanceParams",
         "cs-u0 = ref ResourceZZMS_History_" + ib], ib
+
+
+def _check_same_frame(ini_text, zms, mod_folder, ib, unique_str, layout):
+    """A part skinned by the mod at its first draw of the frame, into the mod's vertex buffers."""
+    draw_count = _draw_count(mod_folder, ib)
+    assert _section(ini_text, "[CommandListZZMS_Skin_" + ib + "]") == [
+        "ResourceZZMS_Input = ref vs-t0", "run = CustomShaderZZMS_Import_" + ib], "only the bones are imported"
+    lines = _section(ini_text, "[TextureOverride_" + unique_str.replace("-", "_") + "]")
+    draws = [index for index, line in enumerate(lines) if line.startswith("drawindexed")]
+    assert draws and lines[draws[0] - 5:draws[0]] == [
+        "run = CommandListZZMS_SkinNow_" + ib,
+        "ResourceZZMS_GameVb0 = ref vb0", "ResourceZZMS_GameVb3 = ref vb3",
+        "vb0 = ref ResourceZZMS_Skinned_" + ib, "vb3 = ref ResourceZZMS_SkinnedPrev_" + ib], lines
+    assert lines[draws[-1] + 1:] == ["vb0 = ref ResourceZZMS_GameVb0", "vb3 = ref ResourceZZMS_GameVb3"], lines
+    skinned, primed = "$zzms_skinned_" + ib, "$zzms_primed_" + ib
+    assert _section(ini_text, "[CommandListZZMS_SkinNow_" + ib + "]") == [
+        "if " + skinned + " == 0",
+        "run = CustomShaderZZMS_Palette_" + ib,
+        "if " + primed, "run = CustomShaderZZMS_SkinFrame_" + ib,
+        "else", "run = CustomShaderZZMS_SkinFirst_" + ib, primed + " = 1", "endif",
+        skinned + " = 1",
+        "endif"]
+    for section, params in (("[CustomShaderZZMS_SkinFrame_", "ResourceZZMS_SkinParams_"),
+                            ("[CustomShaderZZMS_SkinFirst_", "ResourceZZMS_SkinParamsFirst_")):
+        assert _section(ini_text, section + ib + "]") == [
+            "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
+            "cs-t0 = ref ResourceZZMS_Palette_" + ib, "cs-t1 = ref ResourceZZMS_SkinPosition_" + ib,
+            "cs-t2 = ref ResourceZZMS_SkinBlend_" + ib, "cs-t3 = ref " + params + ib,
+            "cs-u0 = ref ResourceZZMS_Skinned_" + ib, "cs-u1 = ref ResourceZZMS_SkinnedPrev_" + ib,
+            "dispatch = " + str((draw_count + 63) // 64) + ", 1, 1",
+            "cs-u0 = null", "cs-u1 = null", "cs-t0 = null", "cs-t1 = null", "cs-t2 = null", "cs-t3 = null"], section
+    for category in ("Position", "Blend"):
+        assert _section(ini_text, "[ResourceZZMS_Skin" + category + "_" + ib + "]") == [
+            "type = ByteAddressBuffer", "filename = Meshes/" + ib + "-" + category + ".buf"], category
+    for name, first_frame in (("SkinParams", False), ("SkinParamsFirst", True)):
+        assert _section(ini_text, "[ResourceZZMS_" + name + "_" + ib + "]")[-1] == "data = " + " ".join(
+            str(value) for value in zms.same_frame_skin_params(draw_count, layout, first_frame=first_frame)), name
+    for name in ("Skinned", "SkinnedPrev"):
+        assert _section(ini_text, "[ResourceZZMS_" + name + "_" + ib + "]") == [
+            "type = RWByteAddressBuffer", "stride = 40", "array = " + str(draw_count),
+            "bind_flags = vertex_buffer shader_resource unordered_access"], name
+    constants, present = _section(ini_text, "[Constants]"), _section(ini_text, "[Present]")
+    assert "global " + skinned + " = 0" in constants and "global " + primed + " = 0" in constants, constants
+    assert present == ["if " + skinned + " == 0", primed + " = 0", "endif", skinned + " = 0"], present
+    assert os.path.isfile(os.path.join(mod_folder, "Shaders", zms.SKIN_SHADER_FILENAME))
+    for forbidden in ("so0", "zzms_ready", "Place", "ZZMS_Delay"):
+        assert forbidden not in ini_text, forbidden
+
+
+def _check_same_frame_skin(zms, profile, source, mod_folder, drawing, layout):
+    """The skinning parameters decode the exported buffers: same result as skinning them directly."""
+    meshes = os.path.join(mod_folder, "Meshes")
+    ib = source["components"][drawing]["spec"]["ib"]
+    with open(os.path.join(meshes, ib + "-Position.buf"), "rb") as handle:
+        position_bytes = handle.read()
+    with open(os.path.join(meshes, ib + "-Blend.buf"), "rb") as handle:
+        blend_bytes = handle.read()
+    parts = source["components"]
+    pool = numpy.concatenate([parts[name]["palette"] for name in ("body", "hair", "accessory")]).astype(numpy.float64)
+    palette = zms.reference_palette(profile, pool, zms.get_component_by_ib(profile)[ib]["component_id"])
+    position, weights, indices = _read_body_buffers(mod_folder, ib)
+    params = zms.same_frame_skin_params(len(position), layout)
+    skinned, _ = zms.reference_same_frame_skin(palette.reshape(-1, 4), position_bytes, blend_bytes, params)
+    matrices = numpy.zeros((len(position), 3, 4))
+    for k in range(4):
+        matrices += weights[:, k, None, None] * palette[indices[:, k]]
+    expected = numpy.einsum("vij,vj->vi", matrices, numpy.c_[position[:, :3], numpy.ones(len(position))])
+    error = float(numpy.abs(skinned[:, :3] - expected).max())
+    assert error < 1e-4, error
+    return error
 
 
 def _delayed_skin_lines(name, draw_count):
@@ -359,6 +435,13 @@ def main():
         for filename in (zms.IMPORT_SHADER_FILENAME, zms.PALETTE_SHADER_FILENAME, zms.DELAY_SHADER_FILENAME):
             assert os.path.isfile(os.path.join(mod_a2, "Shaders", filename)), filename
 
+        # 2c. same-frame skinning with no part using bones of another one: the ordinary export
+        mod_a3 = os.path.join(temp_folder, "mod_unchanged_same_frame")
+        ini_a3 = _export(tree_name, mod_a3, same_frame=True)
+        assert ini_a3 == ini_a, "same-frame skinning changes nothing when no part uses foreign bones"
+        _same_meshes(mod_a, mod_a3)
+        assert not os.path.isdir(os.path.join(mod_a3, "Shaders"))
+
         # 3. a copy of the hair joined into the body
         hair_obj, body_obj = objects["hair"], objects["body"]
         hair_copy = hair_obj.copy()
@@ -442,6 +525,22 @@ def main():
         assert "[ResourceZZMS_Delayed_" + body + "]" not in ini_b2
         assert _section(ini_b2, "[ResourceZZMS_Palette_" + body + "]")[2] == "array = 45"
 
+        # 3c. hair in body, same-frame skinning: the body is skinned by the mod at its first draw
+        body_layout = (32, 0, 1, 16, False)  # BLENDWEIGHTS float4 @0, BLENDINDICES uint4 @16
+        mod_b3 = os.path.join(temp_folder, "mod_hair_in_body_same_frame")
+        ini_b3 = _export(tree_name, mod_b3, same_frame=True)
+        _same_meshes(mod_b, mod_b3)
+        _check_same_frame(ini_b3, zms, mod_b3, body, parts["body"]["unique_str"], body_layout)
+        assert body_blend_b == _section(ini_b3, "[TextureOverride_VB_" + body + "_" + body + "_Blend]")
+        assert _section(ini_b3, "[CommandListZZMS_Skin_" + hair + "]") == _section(ini_b, "[CommandListZZMS_Skin_" + hair + "]")
+        assert _section(ini_b3, "[CustomShaderZZMS_Palette_" + body + "]") == _section(ini_b, "[CustomShaderZZMS_Palette_" + body + "]")
+        assert "ResourceZZMS_Skinned_" + hair not in ini_b3, "the hair uses only its own bones"
+        skin_error = _check_same_frame_skin(zms, profile, source, mod_b3, "body", body_layout)
+        print("hair in body, same frame: worst error " + repr(skin_error))
+        # Both options ticked: same-frame skinning wins.
+        mod_b4 = os.path.join(temp_folder, "mod_hair_in_body_both")
+        assert _export(tree_name, mod_b4, frame_delay=True, same_frame=True) == ini_b3
+
         # 4. the hair and the accessory taken out of the blueprint are hidden; the hair still provides bones
         removed = {parts["hair"]["unique_str"], parts["accessory"]["unique_str"]}
         for node in list(tree.nodes):
@@ -495,6 +594,15 @@ def main():
             "$zzms_imported = 1",
         ]
         assert "[CommandListZZMS_Skin_" + accessory + "]" not in ini_c2
+
+        # 4c. the same, same-frame skinning: the hidden hair imports its bones, the body is skinned at its draw
+        mod_c3 = os.path.join(temp_folder, "mod_hair_provider_same_frame")
+        ini_c3 = _export(tree_name, mod_c3, same_frame=True)
+        _same_meshes(mod_c, mod_c3)
+        _check_same_frame(ini_c3, zms, mod_c3, body, parts["body"]["unique_str"], body_layout)
+        for name in ("[TextureOverride_ZZMS_Hidden_" + hair + "]", "[TextureOverride_ZZMS_Hidden_IB_" + hair + "]",
+                     "[TextureOverride_ZZMS_Hidden_" + accessory + "]", "[CommandListZZMS_Skin_" + hair + "]"):
+            assert _section(ini_c3, name) == _section(ini_c, name), name
 
         # 5. the face taken out of the blueprint too: the game still draws it, so it is still delayed and placed
         for node in list(tree.nodes):

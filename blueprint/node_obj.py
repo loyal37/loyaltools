@@ -444,7 +444,9 @@ class SSMTNode_Result_Output(SSMTNodeBase):
         if GlobalConfig.logic_name == LogicName.ZZMI:
             layout.prop(context.scene.global_properties, "zzz_outline_optimization")
             if _is_zzmi_merged_tree(self.id_data):
-                layout.prop(context.scene.global_properties, "zzz_merged_frame_delay")
+                layout.prop(context.scene.global_properties, "zzz_merged_same_frame")
+                if not context.scene.global_properties.zzz_merged_same_frame:
+                    layout.prop(context.scene.global_properties, "zzz_merged_frame_delay")
 
         if GlobalConfig.logic_name == LogicName.GIMI:
             layout.prop(context.scene.global_properties, "gimi_use_orfix")

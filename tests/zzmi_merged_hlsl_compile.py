@@ -68,6 +68,7 @@ def main() -> int:
     compile_cs(compiler, module.PALETTE_SHADER_SOURCE, module.PALETTE_SHADER_FILENAME)
     compile_cs(compiler, module.DELAY_SHADER_SOURCE, module.DELAY_SHADER_FILENAME)
     compile_cs(compiler, module.PLACE_SHADER_SOURCE, module.PLACE_SHADER_FILENAME)
+    compile_cs(compiler, module.SKIN_SHADER_SOURCE, module.SKIN_SHADER_FILENAME)
     print("ZZMI_MERGED_HLSL_COMPILE=PASS")
     return 0
 

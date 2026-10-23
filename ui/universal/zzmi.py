@@ -310,8 +310,8 @@ class ExportZZMI(ExportUnity):
             if needs_skin_texture:
                 texture_override_ib_section.append("run = CommandListSkinTexture")
 
-            # 骨骼合并统一延迟: 绘制前后换上 / 换回物体常量
-            for line in self.merged_skeleton.place_begin_lines(draw_ib):
+            # 骨骼合并统一延迟 / 同帧蒙皮: 绘制前后换上 / 换回物体常量或顶点缓冲
+            for line in self.merged_skeleton.draw_begin_lines(draw_ib):
                 texture_override_ib_section.append(line)
 
             if is_cross_ib_source:
@@ -388,7 +388,7 @@ class ExportZZMI(ExportUnity):
                     else:
                         print(f"[CrossIB ZZMI] 警告: 未找到源块 submesh for {source_ib_key}")
 
-            for line in self.merged_skeleton.place_end_lines(draw_ib):
+            for line in self.merged_skeleton.draw_end_lines(draw_ib):
                 texture_override_ib_section.append(line)
 
         ini_builder.append_section(texture_override_ib_section)

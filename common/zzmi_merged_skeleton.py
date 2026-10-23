@@ -51,6 +51,17 @@ its current position.  The distance is that of the first part drawn in the
 frame and every part is moved by it, so the parts stay together.  (Drawn where
 it was, the character trails by its movement of one frame, which changes with
 the frame time: at flying speed it shakes against the world.)
+
+Same-frame skinning (optional export)
+-------------------------------------
+The game skins every component before it draws the first one.  The same-frame
+export therefore does not skin a merged part at its own stream-output draw:
+the part only imports its bones there, and at its first draw of the frame,
+when every component has uploaded its bones, its palette is built from the
+pool and ``SKIN_SHADER_SOURCE`` skins it into a buffer of the mod, which is
+bound as the part's vertex buffer (vb0) for its draws; the result of the
+previous frame is bound as vb3 (previous positions for motion vectors).  The
+whole character uses the bones of the current frame.
 """
 
 from __future__ import annotations
@@ -492,6 +503,18 @@ IMPORT_SHADER_FILENAME = "MergedSkeleton_Import.hlsl"
 PALETTE_SHADER_FILENAME = "MergedSkeleton_Palette.hlsl"
 DELAY_SHADER_FILENAME = "MergedSkeleton_Delay.hlsl"
 PLACE_SHADER_FILENAME = "MergedSkeleton_Place.hlsl"
+SKIN_SHADER_FILENAME = "MergedSkeleton_Skin.hlsl"
+
+# Vertices the same-frame skinning reads and writes: POSITION float3, NORMAL float3,
+# TANGENT float4, the layout of the game's skinning input and stream output.
+SKIN_VERTEX_STRIDE = 40
+SKIN_POSITION_LAYOUT = (("POSITION", "R32G32B32_FLOAT"), ("NORMAL", "R32G32B32_FLOAT"),
+                        ("TANGENT", "R32G32B32A32_FLOAT"))
+# Weight formats the skinning shader decodes (code in its parameters).
+SKIN_WEIGHT_FORMATS = {"R32G32B32A32_FLOAT": 1, "R16G16B16A16_FLOAT": 2, "R16G16B16A16_UNORM": 3,
+                       "R8G8B8A8_UNORM": 4}
+SKIN_FOUR_INDEX_FORMATS = ("R32G32B32A32_UINT", "R32G32B32A32_SINT")
+SKIN_ONE_INDEX_FORMATS = ("R32_UINT", "R32_SINT")
 
 # The game's per-draw object constants (vs-cb1, 29 registers): rows 0-3 the
 # object-to-world matrix (row vectors), 4-7 its inverse, 20-23 the matrix of
@@ -834,6 +857,206 @@ void main()
 """
 
 
+SKIN_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: same-frame skinning.
+// The game skins each component with a stream-output draw right after uploading its bones,
+// so a part that also uses bones of components skinned later in the frame would get their
+// bones of the previous frame.  The game skins every component before it draws the first
+// one, so the merged part is skinned here instead, at its first draw of the frame, and the
+// result is bound as its vertex buffer (vb0); the result of the previous frame is kept for
+// vb3 (previous positions, motion vectors).
+// The arithmetic is that of the game's skinning shaders (e8425f64cfb887cd, four weights;
+// 9684c4091fc9e35a, one bone): the rows of the blended float4x3 bone transform the
+// position, the normal and the tangent (not normalised); the tangent's w is kept.
+
+// The merged palette in this part's space (three rows per bone), built from this frame's pool.
+Buffer<float4> Palette : register(t0);
+// The exported vertices: POSITION float3, NORMAL float3, TANGENT float4 (40 bytes).
+ByteAddressBuffer Position : register(t1);
+// The exported weight buffer.
+ByteAddressBuffer Blend : register(t2);
+// (vertex count, weight buffer stride,
+//  weight offset | weight format << 16 (0 none, 1 R32G32B32A32_FLOAT, 2 R16G16B16A16_FLOAT,
+//                                       3 R16G16B16A16_UNORM, 4 R8G8B8A8_UNORM),
+//  index offset | one bone << 16 | first frame << 17)
+Buffer<uint4> Params : register(t3);
+
+// Skinned vertices, the layout of the game's stream output (40 bytes).
+RWByteAddressBuffer Skinned : register(u0);
+// The skinned vertices of the previous frame (on the first frame, this frame's).
+RWByteAddressBuffer Previous : register(u1);
+
+float4 LoadWeights(uint address, uint format)
+{
+    if (format == 1)
+        return asfloat(Blend.Load4(address));
+    if (format == 2)
+    {
+        uint2 halves = Blend.Load2(address);
+        return float4(f16tof32(halves.x), f16tof32(halves.x >> 16), f16tof32(halves.y), f16tof32(halves.y >> 16));
+    }
+    if (format == 3)
+    {
+        uint2 halves = Blend.Load2(address);
+        return float4(halves.x & 0xFFFF, halves.x >> 16, halves.y & 0xFFFF, halves.y >> 16) / 65535.0;
+    }
+    uint bytes = Blend.Load(address);
+    return float4(bytes & 0xFF, (bytes >> 8) & 0xFF, (bytes >> 16) & 0xFF, bytes >> 24) / 255.0;
+}
+
+// One row of the blended bone, summed in the order of the game's shader.
+float4 BlendedRow(uint4 bones, float4 weights, uint row)
+{
+    float4 value = weights.y * Palette[bones.y + row];
+    value = weights.x * Palette[bones.x + row] + value;
+    value = weights.z * Palette[bones.z + row] + value;
+    return weights.w * Palette[bones.w + row] + value;
+}
+
+[numthreads(64, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint4 params = Params[0];
+    uint vertex = thread_id.x;
+    if (vertex >= params.x)
+        return;
+
+    uint source = vertex * 40;
+    float4 homogeneous = float4(asfloat(Position.Load3(source)), 1.0);
+    float3 normal = asfloat(Position.Load3(source + 12));
+    float4 tangent = asfloat(Position.Load4(source + 24));
+
+    uint blend = vertex * params.y;
+    uint index_address = blend + (params.w & 0xFFFF);
+    float4 row0, row1, row2;
+    if (params.w & 0x10000)
+    {
+        uint bone = Blend.Load(index_address) * 3;
+        row0 = Palette[bone + 0];
+        row1 = Palette[bone + 1];
+        row2 = Palette[bone + 2];
+    }
+    else
+    {
+        uint4 bones = Blend.Load4(index_address) * 3;
+        float4 weights = LoadWeights(blend + (params.z & 0xFFFF), params.z >> 16);
+        row0 = BlendedRow(bones, weights, 0);
+        row1 = BlendedRow(bones, weights, 1);
+        row2 = BlendedRow(bones, weights, 2);
+    }
+
+    float3 position = float3(dot(homogeneous, row0), dot(homogeneous, row1), dot(homogeneous, row2));
+    float3 skinned_normal = float3(dot(normal, row0.xyz), dot(normal, row1.xyz), dot(normal, row2.xyz));
+    float3 skinned_tangent = float3(dot(tangent.xyz, row0.xyz), dot(tangent.xyz, row1.xyz),
+                                    dot(tangent.xyz, row2.xyz));
+    uint4 now0 = uint4(asuint(position), asuint(skinned_normal.x));
+    uint4 now1 = uint4(asuint(skinned_normal.yz), asuint(skinned_tangent.xy));
+    uint2 now2 = uint2(asuint(skinned_tangent.z), asuint(tangent.w));
+
+    uint target = vertex * 40;
+    if (params.w & 0x20000)
+    {
+        Previous.Store4(target, now0);
+        Previous.Store4(target + 16, now1);
+        Previous.Store2(target + 32, now2);
+    }
+    else
+    {
+        Previous.Store4(target, Skinned.Load4(target));
+        Previous.Store4(target + 16, Skinned.Load4(target + 16));
+        Previous.Store2(target + 32, Skinned.Load2(target + 32));
+    }
+    Skinned.Store4(target, now0);
+    Skinned.Store4(target + 16, now1);
+    Skinned.Store2(target + 32, now2);
+}
+"""
+
+
+def same_frame_skin_layout(position_elements, blend_elements):
+    """Weight buffer layout for the skinning shader, or (None, reason) when it cannot skin it.
+
+    Elements are (semantic name, semantic index, format, byte width) in buffer order.
+    Returns ((stride, weight offset, weight format code, index offset, one bone), None).
+    """
+    position = [(name, fmt) for name, index, fmt, _ in position_elements if index == 0]
+    if tuple(position) != SKIN_POSITION_LAYOUT or sum(width for *_, width in position_elements) != SKIN_VERTEX_STRIDE:
+        return None, "顶点不是 POSITION/NORMAL/TANGENT 的 32 位浮点布局"
+    offset = 0
+    weights = indices = None
+    for name, index, fmt, width in blend_elements:
+        if index == 0 and name == "BLENDINDICES":
+            indices = (offset, fmt)
+        elif index == 0 and name in ("BLENDWEIGHT", "BLENDWEIGHTS"):
+            weights = (offset, fmt)
+        offset += int(width)
+    if indices is None:
+        return None, "没有 BLENDINDICES"
+    if indices[1] in SKIN_ONE_INDEX_FORMATS:
+        return (offset, 0, 0, indices[0], True), None
+    if indices[1] not in SKIN_FOUR_INDEX_FORMATS:
+        return None, "BLENDINDICES 格式 " + indices[1] + " 不支持"
+    if weights is None or weights[1] not in SKIN_WEIGHT_FORMATS:
+        return None, "BLENDWEIGHTS 格式 " + (weights[1] if weights else "缺失") + " 不支持"
+    return (offset, weights[0], SKIN_WEIGHT_FORMATS[weights[1]], indices[0], False), None
+
+
+def same_frame_skin_params(vertex_count: int, layout, first_frame: bool = False) -> list[int]:
+    stride, weight_offset, weight_format, index_offset, one_bone = layout
+    return [
+        int(vertex_count),
+        int(stride),
+        int(weight_offset) | (int(weight_format) << 16),
+        int(index_offset) | (0x10000 if one_bone else 0) | (0x20000 if first_frame else 0),
+    ]
+
+
+def reference_same_frame_skin(palette, position_bytes: bytes, blend_bytes: bytes, params,
+                              skinned_before=None) -> tuple:
+    """What the skinning shader writes: (skinned, previous), float32 rows of 10 values."""
+    vertex_count, stride, weight_word, index_word = (int(value) for value in params)
+    palette = numpy.asarray(palette, dtype=numpy.float64).reshape(-1, 4)
+    vertices = numpy.frombuffer(position_bytes, dtype=numpy.float32)[:vertex_count * 10].reshape(-1, 10)
+    rows = numpy.frombuffer(blend_bytes, dtype=numpy.uint8)[:vertex_count * stride].reshape(-1, stride)
+
+    def bone_rows(bone):
+        rows3 = numpy.zeros((3, 4))
+        for row in range(3):
+            slot = bone * 3 + row
+            if 0 <= slot < len(palette):
+                rows3[row] = palette[slot]
+        return rows3
+
+    index_offset = index_word & 0xFFFF
+    weight_offset, weight_format = weight_word & 0xFFFF, weight_word >> 16
+    skinned = numpy.zeros((vertex_count, 10), dtype=numpy.float32)
+    for vertex in range(vertex_count):
+        row = rows[vertex]
+        if index_word & 0x10000:
+            matrix = bone_rows(int(row[index_offset:index_offset + 4].view(numpy.uint32)[0]))
+        else:
+            bones = row[index_offset:index_offset + 16].view(numpy.uint32)
+            raw = row[weight_offset:]
+            if weight_format == 1:
+                weights = raw[:16].view(numpy.float32).astype(numpy.float64)
+            elif weight_format == 2:
+                weights = raw[:8].view(numpy.float16).astype(numpy.float64)
+            elif weight_format == 3:
+                weights = raw[:8].view(numpy.uint16) / 65535.0
+            else:
+                weights = raw[:4].astype(numpy.float64) / 255.0
+            matrix = sum(weights[k] * bone_rows(int(bones[k])) for k in range(4))
+        position, normal, tangent = vertices[vertex, 0:3], vertices[vertex, 3:6], vertices[vertex, 6:10]
+        skinned[vertex, 0:3] = matrix @ numpy.r_[position, 1.0]
+        skinned[vertex, 3:6] = matrix[:, :3] @ normal
+        skinned[vertex, 6:9] = matrix[:, :3] @ tangent[:3]
+        skinned[vertex, 9] = tangent[3]
+    if index_word & 0x20000 or skinned_before is None:
+        previous = skinned.copy()
+    else:
+        previous = numpy.asarray(skinned_before, dtype=numpy.float32).reshape(-1, 10)[:vertex_count].copy()
+    return skinned, previous
+
+
 def _is_placement(m) -> bool:
     det = numpy.linalg.det(m[:3, :3])
     return bool(numpy.all(numpy.abs(m[:3, 3]) < 1e-3) and abs(m[3, 3] - 1.0) < 1e-3
@@ -869,7 +1092,7 @@ def reference_placement(self_rows, history, place: bool = True, shift=None) -> t
     return output, numpy.concatenate([self_now, placed]), shift
 
 
-def write_runtime_shaders(shader_folder: str, frame_delay: bool = False) -> list[str]:
+def write_runtime_shaders(shader_folder: str, frame_delay: bool = False, same_frame: bool = False) -> list[str]:
     os.makedirs(shader_folder, exist_ok=True)
     paths = []
     shaders = [
@@ -879,6 +1102,8 @@ def write_runtime_shaders(shader_folder: str, frame_delay: bool = False) -> list
     if frame_delay:
         shaders.append((DELAY_SHADER_FILENAME, DELAY_SHADER_SOURCE))
         shaders.append((PLACE_SHADER_FILENAME, PLACE_SHADER_SOURCE))
+    if same_frame:
+        shaders.append((SKIN_SHADER_FILENAME, SKIN_SHADER_SOURCE))
     for filename, source in shaders:
         path = os.path.join(shader_folder, filename)
         with open(path, "w", encoding="utf-8", newline="\n") as file:
