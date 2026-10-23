@@ -197,19 +197,41 @@ class Compute:
                "CreateBuffer(constant)")
         return buffer.value
 
-    def dispatch_bound(self, shader, cbs: list, srvs: list, uavs: list, groups: int):
-        """Dispatch with constant buffers and several UAVs bound."""
+    def dispatch_bound(self, shader, cbs: list, srvs: list, uavs: list, groups: int, ini_params=None):
+        """Dispatch with constant buffers and several UAVs bound (and IniParams at t120)."""
         set_cbs = _method(self.context, 71, None, wintypes.UINT, wintypes.UINT, ctypes.c_void_p)
         set_srvs = _method(self.context, 67, None, wintypes.UINT, wintypes.UINT, ctypes.c_void_p)
         set_uavs = _method(self.context, 68, None, wintypes.UINT, wintypes.UINT, ctypes.c_void_p, ctypes.c_void_p)
         _method(self.context, 69, None, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT)(shader, None, 0)
         set_cbs(0, len(cbs), (ctypes.c_void_p * len(cbs))(*cbs))
         set_srvs(0, len(srvs), (ctypes.c_void_p * len(srvs))(*srvs))
+        if ini_params is not None:
+            set_srvs(120, 1, (ctypes.c_void_p * 1)(ini_params))
         set_uavs(0, len(uavs), (ctypes.c_void_p * len(uavs))(*uavs), None)
         _method(self.context, 41, None, wintypes.UINT, wintypes.UINT, wintypes.UINT)(groups, 1, 1)
         set_uavs(0, len(uavs), (ctypes.c_void_p * len(uavs))(), None)
         set_srvs(0, len(srvs), (ctypes.c_void_p * len(srvs))())
+        if ini_params is not None:
+            set_srvs(120, 1, (ctypes.c_void_p * 1)())
         set_cbs(0, len(cbs), (ctypes.c_void_p * len(cbs))())
+
+    def ini_params(self, x0, y0=0.0, z0=0.0, w0=0.0):
+        """IniParams as 3dmigoto binds them: a Texture1D of float4 at t120 (only x0..w0 used here)."""
+        data = numpy.zeros((8, 4), numpy.float32)
+        data[0] = (x0, y0, z0, w0)
+        desc = (wintypes.UINT * 8)(len(data), 1, 1, DXGI_FORMAT_R32G32B32A32_FLOAT, D3D11_USAGE_DEFAULT,
+                                   D3D11_BIND_SHADER_RESOURCE, 0, 0)
+        initial = SubresourceData(data.ctypes.data, 0, 0)
+        texture = ctypes.c_void_p()
+        _check(_method(self.device, 4, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(SubresourceData),
+                       ctypes.POINTER(ctypes.c_void_p))(desc, ctypes.byref(initial), ctypes.byref(texture)),
+               "CreateTexture1D")
+        view_desc = SrvDesc(DXGI_FORMAT_R32G32B32A32_FLOAT, 2, 0, 1)  # TEXTURE1D, mip 0, one mip
+        view = ctypes.c_void_p()
+        _check(_method(self.device, 7, ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(SrvDesc),
+                       ctypes.POINTER(ctypes.c_void_p))(texture.value, ctypes.byref(view_desc), ctypes.byref(view)),
+               "CreateShaderResourceView(Texture1D)")
+        return view.value
 
     def dispatch(self, shader, srvs: list, uav, groups: int):
         srv_array = (ctypes.c_void_p * len(srvs))(*srvs)
@@ -548,9 +570,9 @@ def _blend_rows(rng, count: int, bone_count: int, weight_format: str, indices_fi
 def check_same_frame_skin(module) -> float:
     """The same-frame skinning shader against reference_same_frame_skin, on buffers created as 3dmigoto does.
 
-    Two frames: the first one primes the previous-frame buffer with its own result, the second keeps the
-    first frame's result there (motion vectors).  The output buffers are created with the description
-    3dmigoto gives them, which D3D11 must accept for a buffer that is both written and drawn from.
+    The output buffer is created with the description 3dmigoto gives it, which D3D11 must accept for a
+    buffer that is both written and drawn from.  When the matcher did not find every component of the
+    copy, every vertex is written at the origin (nothing is drawn).
     """
     rng = numpy.random.default_rng(23)
     gpu = Compute()
@@ -579,31 +601,28 @@ def check_same_frame_skin(module) -> float:
         blend_srv = gpu.raw_srv(gpu.raw_buffer(numpy.frombuffer(blend_bytes, numpy.uint8), D3D11_BIND_SHADER_RESOURCE),
                                 len(blend_bytes))
         # As 3dmigoto creates `type = RWByteAddressBuffer`, `stride = 40`, `array = <vertices>`.
-        skinned = gpu.raw_buffer(numpy.zeros(nbytes, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
-        previous = gpu.raw_buffer(numpy.zeros(nbytes, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
-        uavs = [gpu.raw_uav(skinned, nbytes), gpu.raw_uav(previous, nbytes)]
-
-        before = None
-        for frame in range(2):
+        skinned = gpu.raw_buffer(numpy.full(nbytes, 7, numpy.uint8), output_flags, module.SKIN_VERTEX_STRIDE)
+        uavs = [gpu.raw_uav(skinned, nbytes)]
+        for found in (True, False):
             palette = rng.normal(size=(bone_count * 3, 4)).astype(numpy.float32)
-            params = module.same_frame_skin_params(count, layout, first_frame=frame == 0)
+            params = module.same_frame_skin_params(count, layout)
+            choice = numpy.zeros((2, 4), numpy.uint32)
+            choice[0, 0] = 1 if found else 0
             srvs = [gpu.srv(gpu.buffer(palette, uav=False), DXGI_FORMAT_R32G32B32A32_FLOAT, len(palette)),
                     position_srv, blend_srv,
-                    gpu.srv(gpu.buffer(numpy.asarray([params], numpy.uint32), uav=False), DXGI_FORMAT_R32G32B32A32_UINT, 1)]
+                    gpu.srv(gpu.buffer(numpy.asarray([params], numpy.uint32), uav=False), DXGI_FORMAT_R32G32B32A32_UINT, 1),
+                    gpu.srv(gpu.buffer(choice, uav=False), DXGI_FORMAT_R32G32B32A32_UINT, len(choice))]
             gpu.dispatch_bound(shader, [], srvs, uavs, (count + 63) // 64)
             got = gpu.read(skinned, nbytes).view(numpy.float32).reshape(count, 10)
-            got_previous = gpu.read(previous, nbytes).view(numpy.float32).reshape(count, 10)
-            expected, expected_previous = module.reference_same_frame_skin(
-                palette, position_bytes, blend_bytes, params, skinned_before=before)
+            expected = module.reference_same_frame_skin(palette, position_bytes, blend_bytes, params, found=found)
             scale = max(1.0, float(numpy.abs(expected).max()))
             error = float(numpy.abs(got - expected).max()) / scale
-            assert error < 1e-5, (weight_format, frame, error)
-            assert numpy.array_equal(got_previous, expected_previous if frame else got), (weight_format, frame)
-            if frame:
-                assert numpy.array_equal(got_previous, before), weight_format + ": previous frame kept"
-            assert numpy.array_equal(got[:, 9], vertices[:, 9]), "tangent w kept"
+            assert error < 1e-5, (weight_format, found, error)
+            if found:
+                assert numpy.array_equal(got[:, 9], vertices[:, 9]), "tangent w kept"
+            else:
+                assert not got.any(), weight_format + ": a copy without all its bones is not drawn"
             worst = max(worst, error)
-            before = got
 
     # The description above was accepted (raw views, vertex buffer + unordered access, stride 40); a
     # structured buffer cannot be a vertex buffer, and the runtime refuses it, so this check means something.
@@ -621,10 +640,144 @@ def check_same_frame_skin(module) -> float:
     return worst
 
 
+def _rotation_z(angle: float, translation) -> numpy.ndarray:
+    matrix = numpy.eye(4)
+    matrix[:2, :2] = [[numpy.cos(angle), -numpy.sin(angle)], [numpy.sin(angle), numpy.cos(angle)]]
+    matrix[:3, 3] = translation
+    return matrix
+
+
+def check_instances(module) -> float:
+    """Two copies of the character, skinned interleaved into store slots, matched and gathered per copy.
+
+    The second copy stands 1.35 m away, turned, in a slightly different pose (as two copies of an agent
+    were seen in the game).  One component's record is of the previous frame (it is drawn after the part
+    being skinned).  Every copy must get the palette built from its own bones only.
+    """
+    profile, palettes, roots, world_bones, bone_sets = synthetic_case(module)
+    rng = numpy.random.default_rng(31)
+    merged = module.merged_components(profile)
+    ids = [component["component_id"] for component in merged]
+    by_ib = {component["ib_hash"]: component for component in merged}
+    host = merged[0]
+
+    # Second copy: moved and turned, the limbs in another pose (bones the components do not share).
+    move = _rotation_z(2.1, (1.1, 0.78, 0.0))
+    shared = {4, 5}
+    worlds = [list(world_bones), []]
+    for index, bone in enumerate(world_bones):
+        bend = numpy.eye(4) if index in shared else _rotation_z(rng.normal(scale=0.3), rng.normal(scale=0.02, size=3))
+        worlds[1].append(move @ bone @ bend)
+    copy_roots = [dict(roots), {ib: move @ root for ib, root in roots.items()}]
+    copy_palettes = [{
+        ib: numpy.stack([(numpy.linalg.inv(copy_roots[copy][ib]) @ worlds[copy][bone])[:3] for bone in bones])
+        for ib, bones in bone_sets.items()} for copy in range(2)]
+
+    slots = module.instance_slot_count(len(ids))
+    rows = module.instance_slot_rows(profile, ids)
+    frame = 1234.0
+    # Interleaved slots, as the game skins the copies' components in any order.
+    slot_of = {("aaaa0001", 0): 7, ("aaaa0001", 1): 2, ("bbbb0002", 0): 30, ("bbbb0002", 1): 11,
+               ("cccc0003", 0): 0, ("cccc0003", 1): 41}
+
+    gpu = Compute()
+    import_shader = gpu.shader(module.INSTANCE_IMPORT_SHADER_SOURCE)
+    record_shader = gpu.shader(module.INSTANCE_RECORD_SHADER_SOURCE)
+    match_shader = gpu.shader(module.INSTANCE_MATCH_SHADER_SOURCE)
+    gather_shader = gpu.shader(module.INSTANCE_GATHER_SHADER_SOURCE)
+    palette_shader = gpu.shader(module.PALETTE_SHADER_SOURCE)
+
+    def uint4(values):
+        array = numpy.asarray(values, dtype=numpy.uint32).reshape(-1, 4)
+        return gpu.srv(gpu.buffer(array, uav=False), DXGI_FORMAT_R32G32B32A32_UINT, len(array))
+
+    def rw(rows_count, dtype=numpy.float32, fmt=DXGI_FORMAT_R32G32B32A32_FLOAT):
+        buffer = gpu.buffer(numpy.zeros((rows_count, 4), dtype), uav=True)
+        return buffer, gpu.srv(buffer, fmt, rows_count), gpu.uav(buffer, fmt, rows_count)
+
+    table_srv = uint4(module.runtime_component_table(profile))
+    needed_values = module.instance_needed(profile, ids)
+    needed_srv = uint4(needed_values)
+    params = {component["ib_hash"]: module.instance_params(profile, component["component_id"], slots, rows)
+              for component in merged}
+    params_srv = {ib: uint4(values) for ib, values in params.items()}
+
+    def build(imported, recorded, stale_record=None):
+        store, store_srv, store_uav = rw(slots * rows)
+        records, records_srv, records_uav = rw(slots * module.INSTANCE_RECORD_ROWS)
+        for ib, copy in imported:
+            source = numpy.ascontiguousarray(copy_palettes[copy][ib], dtype=numpy.float32).reshape(-1, 4)
+            gpu.dispatch_bound(import_shader, [], [gpu.srv(gpu.buffer(source, uav=False), DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                                            len(source)), table_srv, params_srv[ib]],
+                               [store_uav], 1, gpu.ini_params(slot_of[(ib, copy)], frame))
+        for ib, copy in recorded:
+            root, stamp = copy_roots[copy][ib], frame
+            if (ib, copy) == stale_record:
+                root, stamp = _rotation_z(0.02, (0.03, -0.04, 0.0)) @ root, frame - 1
+            constants = gpu.constant_buffer(numpy.ascontiguousarray(root.T, dtype=numpy.float32))
+            gpu.dispatch_bound(record_shader, [constants], [params_srv[ib]], [records_uav], 1,
+                               gpu.ini_params(slot_of[(ib, copy)], slot_of[(ib, copy)], stamp,
+                                              module.runtime_component_index(profile, by_ib[ib]["component_id"])))
+        return store, store_srv, records, records_srv
+
+    def match(store, store_srv, records, records_srv, copy):
+        choice, choice_srv, choice_uav = rw(1 + len(ids), numpy.uint32, DXGI_FORMAT_R32G32B32A32_UINT)
+        host_rows = numpy.ascontiguousarray(copy_roots[copy][host["ib_hash"]].T, dtype=numpy.float32)
+        host_slot = slot_of[(host["ib_hash"], copy)]
+        gpu.dispatch_bound(match_shader, [gpu.constant_buffer(host_rows)],
+                           [store_srv, records_srv, table_srv, params_srv[host["ib_hash"]], needed_srv],
+                           [choice_uav], 1, gpu.ini_params(host_slot, frame))
+        got = gpu.read(choice, (1 + len(ids)) * 16).view(numpy.uint32).reshape(-1, 4)
+        expected = module.reference_instance_match(
+            profile, gpu.read(store, slots * rows * 16).view(numpy.float32),
+            gpu.read(records, slots * module.INSTANCE_RECORD_ROWS * 16).view(numpy.float32),
+            params[host["ib_hash"]], needed_values, host_rows, host_slot, frame)
+        assert numpy.array_equal(got, expected), (got, expected)
+        return got, choice_srv
+
+    everything = [(ib, copy) for copy in (1, 0) for ib in bone_sets]
+    store, store_srv, records, records_srv = build(everything, everything, stale_record=("cccc0003", 0))
+    worst = 0.0
+    for copy in (0, 1):
+        choice, choice_srv = match(store, store_srv, records, records_srv, copy)
+        assert choice[0, 0] == 1, choice
+        for k, component in enumerate(merged):
+            assert choice[1 + k, 0] == slot_of[(component["ib_hash"], copy)], (copy, component["ib_hash"], choice)
+        pool, pool_srv, pool_uav = rw(profile["bones_count"] * 3)
+        gpu.dispatch_bound(gather_shader, [], [store_srv, table_srv, params_srv[host["ib_hash"]], choice_srv],
+                           [pool_uav], (profile["bones_count"] + 63) // 64)
+        gathered = gpu.read(pool, profile["bones_count"] * 48).view(numpy.float32).reshape(-1, 3, 4)
+        expected_pool = numpy.concatenate([copy_palettes[copy][component["ib_hash"]] for component in merged])
+        assert numpy.abs(gathered - expected_pool).max() < 1e-6, copy
+        palette, _, palette_uav = rw(profile["bones_count"] * 3)
+        gpu.dispatch(palette_shader, [pool_srv, table_srv, uint4(module.runtime_params(profile, host["component_id"]))],
+                     palette_uav, (profile["bones_count"] + 63) // 64)
+        built = gpu.read(palette, profile["bones_count"] * 48).view(numpy.float32).reshape(-1, 3, 4)
+        worst = max(worst, float(numpy.abs(built - module.reference_palette(profile, expected_pool, host["component_id"])).max()))
+        # Every bone, converted to the copy's host space, is the copy's own bone.
+        for other in merged:
+            for local_id, bone in enumerate(bone_sets[other["ib_hash"]]):
+                truth = (numpy.linalg.inv(copy_roots[copy][host["ib_hash"]]) @ worlds[copy][bone])[:3]
+                worst = max(worst, float(numpy.abs(built[other["vg_offset"] + local_id] - truth).max()))
+
+    # Two candidates and no records: the copies cannot be told apart, the copy is not drawn yet.
+    store, store_srv, records, records_srv = build(everything, [(ib, copy) for ib, copy in everything if ib != "bbbb0002"])
+    choice, _ = match(store, store_srv, records, records_srv, 0)
+    assert choice[0, 0] == 0, choice
+    # A component skinned only once is taken without a record (a single copy that has just appeared).
+    single = [(ib, 0) for ib in bone_sets]
+    store, store_srv, records, records_srv = build(single, [])
+    choice, _ = match(store, store_srv, records, records_srv, 0)
+    assert choice[0, 0] == 1 and all(choice[1 + k, 0] == slot_of[(c["ib_hash"], 0)] for k, c in enumerate(merged)), choice
+    assert worst < 1e-4, worst
+    return worst
+
+
 def main() -> int:
     if sys.platform != "win32":
         print("ZZMI_MERGED_GPU_RUNTIME=SKIP (not Windows)")
         return 0
+    instance_error = check_instances(load_module())
     skin_error = check_same_frame_skin(load_module())
     place_error = check_placement(load_module())
     module = load_module()
@@ -650,8 +803,8 @@ def main() -> int:
                 worst_truth = max(worst_truth, float(numpy.abs(gpu_palette[other["vg_offset"] + local_id] - truth).max()))
     assert worst_reference < 1e-5, worst_reference
     assert worst_truth < 1e-5, worst_truth
-    print("ZZMI_MERGED_GPU_RUNTIME=PASS (reference %.1e, truth %.1e, delayed %.1e, placement %.1e, same-frame skin %.1e)"
-          % (worst_reference, worst_truth, delay_error, place_error, skin_error))
+    print("ZZMI_MERGED_GPU_RUNTIME=PASS (reference %.1e, truth %.1e, delayed %.1e, placement %.1e, same-frame skin %.1e,"
+          " instances %.1e)" % (worst_reference, worst_truth, delay_error, place_error, skin_error, instance_error))
     return 0
 
 

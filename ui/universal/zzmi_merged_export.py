@@ -32,6 +32,9 @@ vb2，ZZMI 对所有 DRAW_TYPE 1 的绘制都检查 vb2，不加判断就会在�
 用到别的部件骨骼的部件不在自己的预蒙皮绘制上蒙皮 (那里只导入骨骼)，而是在它这一帧第一次
 绘制时用骨骼池生成调色板，由 Mod 的计算着色器蒙皮写进 Mod 自己的缓冲，画的时候绑成 vb0；
 上一帧的结果绑成 vb3 (运动矢量)。整个角色用当帧的骨骼。脸和其它部件照常由游戏蒙皮、绘制。
+同一角色同屏多份时 (两份的部件交错蒙皮)，预蒙皮绘制里只有流输出缓冲能分开各份: 每个部件实例
+的两块缓冲各占实例仓库一个槽 (按缓冲身份分配)，骨骼导入各自的槽；绘制时记下根的世界矩阵；画
+某一份时从它出发按共有骨骼的世界位置挑出同一份的部件实例，汇总骨骼后蒙皮写进这一份自己的输出。
 '''
 
 import math
@@ -289,14 +292,24 @@ class ZZMIMergedSkeletonExport:
             print("[ZZMI骨骼合并][提示] " + warning)
 
     def _plan_same_frame(self):
-        '''同帧蒙皮: 用合并调色板的部件改由 Mod 在第一次绘制时蒙皮；布局不支持的照常在预蒙皮绘制上蒙皮'''
-        for ib_hash in self.participants_order(ib for ib, mode in self.modes.items() if mode == "merged"):
+        '''
+        同帧蒙皮: 用合并调色板的部件改由 Mod 在第一次绘制时蒙皮。参与的部件把骨骼导入实例仓库
+        (同一角色同屏多份时各占各的槽)，所以只要有一个部件的布局不支持，就整份按默认做法导出。
+        '''
+        hosts = self.participants_order(ib for ib, mode in self.modes.items() if mode == "merged")
+        for ib_hash in hosts:
             layout, reason = self.skin_layouts[ib_hash]
             if layout is None:
-                print("[ZZMI骨骼合并][提示] " + ib_hash + " 不能同帧蒙皮 (" + reason + ")，照常在预蒙皮绘制上蒙皮")
-                continue
-            self.same_frame_ibs.append(ib_hash)
-            print("[ZZMI骨骼合并] " + ib_hash + " 在这一帧第一次绘制时用当帧骨骼蒙皮")
+                print("[ZZMI骨骼合并][提示] " + ib_hash + " 不能同帧蒙皮 (" + reason + ")，整份按默认做法导出")
+                self.same_frame = False
+                return
+        if len(zms.merged_components(self.profile)) > zms.MAX_INSTANCE_COMPONENTS:
+            print("[ZZMI骨骼合并][提示] 合并部件超过 " + str(zms.MAX_INSTANCE_COMPONENTS) + " 个，不能同帧蒙皮，整份按默认做法导出")
+            self.same_frame = False
+            return
+        self.same_frame_ibs = hosts
+        for ib_hash in hosts:
+            print("[ZZMI骨骼合并] " + ib_hash + " 在这一帧第一次绘制时用当帧骨骼蒙皮 (同屏多份时每份各自配对、蒙皮)")
 
     def _plan_frame_delay(self, participants: set):
         '''
@@ -379,22 +392,26 @@ class ZZMIMergedSkeletonExport:
     def draw_begin_lines(self, ib_hash: str) -> list:
         '''
         我们自己绘制的部件，IB 覆盖段里 drawindexed 之前的行。统一延迟: 换上物体常量；
-        同帧蒙皮: 这一帧还没蒙皮就先蒙皮，换上 Mod 的顶点缓冲 (vb0 当帧、vb3 上一帧)。
+        同帧蒙皮: 先记下这个部件实例在哪 (参与的部件都记)，要蒙皮的部件这一份这一帧还没蒙皮就先
+        蒙皮，换上这一份的顶点缓冲 (vb0 当帧，vb3 上一帧的结果)。必须在换掉 vb0 之前读它的身份。
         '''
         if not self.enabled:
             return []
         name = _ini_name(ib_hash)
         if self.frame_delay and ib_hash in self.placed_ibs:
             return ["run = CommandListZZMS_PlaceBegin_" + name]
-        if self.same_frame and ib_hash in self.same_frame_ibs:
-            return [
+        if not self.same_frame_ibs or ib_hash not in self.participants:
+            return []
+        lines = ["run = CommandListZZMS_Record_" + name]
+        if ib_hash in self.same_frame_ibs:
+            lines += [
                 "run = CommandListZZMS_SkinNow_" + name,
                 "ResourceZZMS_GameVb0 = ref vb0",
                 "ResourceZZMS_GameVb3 = ref vb3",
-                "vb0 = ref ResourceZZMS_Skinned_" + name,
-                "vb3 = ref ResourceZZMS_SkinnedPrev_" + name,
+                "vb0 = ref PoolZZMS_Out_" + name + "[$zzms_host0]",
+                "vb3 = ref PoolZZMS_Out_" + name + "[$zzms_prev3]",
             ]
-        return []
+        return lines
 
     def draw_end_lines(self, ib_hash: str) -> list:
         '''我们自己绘制的部件，IB 覆盖段里 drawindexed 之后的行: 换回游戏的绑定'''
@@ -402,7 +419,7 @@ class ZZMIMergedSkeletonExport:
             return []
         if self.frame_delay and ib_hash in self.placed_ibs:
             return ["run = CommandListZZMS_PlaceEnd_" + _ini_name(ib_hash)]
-        if self.same_frame and ib_hash in self.same_frame_ibs:
+        if self.same_frame_ibs and ib_hash in self.same_frame_ibs:
             return ["vb0 = ref ResourceZZMS_GameVb0", "vb3 = ref ResourceZZMS_GameVb3"]
         return []
 
@@ -448,6 +465,23 @@ class ZZMIMergedSkeletonExport:
         name = _ini_name(ib_hash)
         lines = ["[CommandListZZMS_Skin_" + name + "]"]
         lines.append("ResourceZZMS_Input = ref vs-t0")
+        if self.same_frame_ibs:
+            # 同帧蒙皮: 骨骼导入这个部件实例的仓库槽 (按这次流输出缓冲的身份分配)；
+            # 要蒙皮的部件跳过游戏的预蒙皮，第一次绘制时再蒙皮
+            lines += [
+                "$zzms_key = @so0",
+                "run = CommandListZZMS_BackupIniParams",
+                "x0 = PoolZZMS_Slot[$zzms_key]->Index",
+                "y0 = FRAME_NUMBER",
+                "run = CustomShaderZZMS_Import_" + name,
+                "run = CommandListZZMS_RestoreIniParams",
+            ]
+            if exported_drawib is not None and ib_hash not in self.same_frame_ibs:
+                lines.append(slot_dict["Position"] + " = Resource" + ib_hash + "Position")
+                lines.append(slot_dict["Blend"] + " = Resource" + ib_hash + "Blend")
+                lines.append("draw = " + str(exported_drawib.draw_number) + ", 0")
+            lines.append("")
+            return lines
         lines.append("run = CustomShaderZZMS_Import_" + name)
         if self.frame_delay:
             lines.append("$zzms_imported = 1")
@@ -468,10 +502,6 @@ class ZZMIMergedSkeletonExport:
                 lines.append(slot_dict["Position"] + " = Resource" + ib_hash + "Position")
                 lines.append(slot_dict["Blend"] + " = Resource" + ib_hash + "Blend")
                 lines.append("draw = " + str(exported_drawib.draw_number) + ", 0")
-            lines.append("")
-            return lines
-        if ib_hash in self.same_frame_ibs:
-            # 同帧蒙皮: 这里只导入骨骼，跳过游戏的预蒙皮；第一次绘制时再蒙皮
             lines.append("")
             return lines
         if exported_drawib is not None:
@@ -529,6 +559,9 @@ class ZZMIMergedSkeletonExport:
             ib_sections.append("[TextureOverride_ZZMS_Hidden_IB_" + _ini_name(ib_hash) + "]")
             ib_sections.append("hash = " + ib_hash)
             ib_sections.append("handling = skip")
+            if self.same_frame_ibs and provides_bones:
+                # 同帧蒙皮: 不画，但记下这个部件实例在哪 (同屏多份时用来配对)
+                ib_sections.append("run = CommandListZZMS_Record_" + _ini_name(ib_hash))
             ib_sections.new_line()
         ini_builder.append_section(blend_sections)
         ini_builder.append_section(ib_sections)
@@ -792,11 +825,19 @@ class ZZMIMergedSkeletonExport:
             name = _ini_name(ib_hash)
             component = self.component_by_ib[ib_hash]
             command_lists.append("[CustomShaderZZMS_Import_" + name + "]")
-            command_lists.append("cs = " + shader_folder + "/" + zms.IMPORT_SHADER_FILENAME)
-            command_lists.append("cs-t0 = ref ResourceZZMS_Input")
-            command_lists.append("cs-t1 = ref ResourceZZMS_Components")
-            command_lists.append("cs-t2 = ref ResourceZZMS_Params_" + name)
-            command_lists.append("cs-u0 = ref ResourceZZMS_Pool")
+            if self.same_frame_ibs:
+                # 同帧蒙皮: 导入实例仓库里这个部件实例的槽 (槽号由 x0 传入)
+                command_lists.append("cs = " + shader_folder + "/" + zms.INSTANCE_IMPORT_SHADER_FILENAME)
+                command_lists.append("cs-t0 = ref ResourceZZMS_Input")
+                command_lists.append("cs-t1 = ref ResourceZZMS_Components")
+                command_lists.append("cs-t2 = ref ResourceZZMS_InstanceParams_" + name)
+                command_lists.append("cs-u0 = ref ResourceZZMS_Store")
+            else:
+                command_lists.append("cs = " + shader_folder + "/" + zms.IMPORT_SHADER_FILENAME)
+                command_lists.append("cs-t0 = ref ResourceZZMS_Input")
+                command_lists.append("cs-t1 = ref ResourceZZMS_Components")
+                command_lists.append("cs-t2 = ref ResourceZZMS_Params_" + name)
+                command_lists.append("cs-u0 = ref ResourceZZMS_Pool")
             command_lists.append("dispatch = " + str(_ceil_groups(component["vg_count"])) + ", 1, 1")
             command_lists.append("cs-u0 = null")
             command_lists.append("cs-t0 = null")
@@ -858,69 +899,153 @@ class ZZMIMergedSkeletonExport:
 
     def _add_same_frame_sections(self, ini_builder, exported_by_ib: dict):
         '''
-        同帧蒙皮: $zzms_skinned_<ib> 表示这一帧已经蒙过皮 (每帧只蒙一次)；$zzms_primed_<ib> 表示
-        上一帧的结果可用，部件有一帧没画就重新开始 (第一帧 vb3 也用当帧的结果)。
+        同帧蒙皮 (同屏可以有同一角色的多份): 每个参与部件实例的两块流输出缓冲各占实例仓库一个槽
+        (PoolZZMS_Slot 按缓冲身份分配)。预蒙皮时骨骼导入当帧缓冲的槽；每次绘制记下根的世界矩阵
+        (当帧和上一帧缓冲的槽各一份，PoolZZMS_Recorded 让每份每帧只记一次有 vb3 的那遍)。要蒙皮的
+        部件每一份每帧只蒙一次 (PoolZZMS_Skinned 按当帧缓冲身份记帧号): 配对、汇总骨骼、生成调色板、
+        蒙皮写进这一份自己的输出 (PoolZZMS_Out_<ib>，按缓冲身份对应，所以 vb3 对应的就是这一份上一帧
+        的结果；上一帧没蒙皮就用当帧的)。IniParams 用前备份、用后恢复 (和 EFMI 一样)。
         '''
         if not self.same_frame_ibs:
             return
         from ...blueprint.export_helper import BlueprintExportHelper
         buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()
+        bones_count = int(self.profile["bones_count"])
+        participant_ids = [self.component_by_ib[ib_hash]["component_id"] for ib_hash in self.participants]
+        slots = zms.instance_slot_count(len(self.participants))
+        rows = zms.instance_slot_rows(self.profile, participant_ids)
+        merged_count = len(zms.merged_components(self.profile))
+
         constants = M_IniSection(M_SectionType.Constants)
         constants.SectionName = "Constants"
-        present = M_IniSection(M_SectionType.Present)
-        present.SectionName = "Present"
+        for variable in ("$zzms_key", "$zzms_key3", "$zzms_host0", "$zzms_host3", "$zzms_prev3",
+                         "$zzms_bak_x0", "$zzms_bak_y0", "$zzms_bak_z0", "$zzms_bak_w0"):
+            constants.append("global " + variable + " = 0")
+
         command_lists = M_IniSection(M_SectionType.CommandList)
-        command_lists.append("; Merged skeleton runtime (Zenless Zone Zero), skinned at the first draw with the bones of this frame")
+        command_lists.append("; Merged skeleton runtime (Zenless Zone Zero), skinned at the first draw of each copy")
+        for line in (
+            "[CommandListZZMS_BackupIniParams]",
+            "$zzms_bak_x0 = x0", "$zzms_bak_y0 = y0", "$zzms_bak_z0 = z0", "$zzms_bak_w0 = w0",
+            "",
+            "[CommandListZZMS_RestoreIniParams]",
+            "x0 = $zzms_bak_x0", "y0 = $zzms_bak_y0", "z0 = $zzms_bak_z0", "w0 = $zzms_bak_w0",
+            "",
+        ):
+            command_lists.append(line)
+
+        for ib_hash in self.participants:
+            name = _ini_name(ib_hash)
+            component = self.component_by_ib[ib_hash]
+            for line in (
+                "[CommandListZZMS_Record_" + name + "]",
+                "$zzms_key = @vb0",
+                "$zzms_key3 = @vb3",
+                "if $zzms_key != 0 && $PoolZZMS_Recorded[$zzms_key] != FRAME_NUMBER",
+                "\tif $zzms_key3 != 0",
+                "\t\t$PoolZZMS_Recorded[$zzms_key] = FRAME_NUMBER",
+                "\tendif",
+                "\trun = CommandListZZMS_BackupIniParams",
+                "\tx0 = PoolZZMS_Slot[$zzms_key]->Index",
+                "\ty0 = x0",
+                "\tif $zzms_key3 != 0",
+                "\t\ty0 = PoolZZMS_Slot[$zzms_key3]->Index",
+                "\tendif",
+                "\tz0 = FRAME_NUMBER",
+                "\tw0 = " + str(zms.runtime_component_index(self.profile, component["component_id"])),
+                "\trun = CustomShaderZZMS_Record_" + name,
+                "\trun = CommandListZZMS_RestoreIniParams",
+                "endif",
+                "",
+                "[CustomShaderZZMS_Record_" + name + "]",
+                "cs = Shaders/" + zms.INSTANCE_RECORD_SHADER_FILENAME,
+                "cs-cb0 = ref vs-cb1",
+                "cs-t0 = ref ResourceZZMS_InstanceParams_" + name,
+                "cs-u0 = ref ResourceZZMS_Records",
+                "dispatch = 1, 1, 1",
+                "cs-u0 = null",
+                "cs-t0 = null",
+                "cs-cb0 = null",
+                "",
+            ):
+                command_lists.append(line)
+
         resources = M_IniSection(M_SectionType.ResourceBuffer)
         for ib_hash in self.same_frame_ibs:
             name = _ini_name(ib_hash)
             vertex_count = int(exported_by_ib[ib_hash].draw_number)
             layout = self.skin_layouts[ib_hash][0]
-            skinned = "$zzms_skinned_" + name
-            primed = "$zzms_primed_" + name
-            constants.append("global " + skinned + " = 0")
-            constants.append("global " + primed + " = 0")
-            present.append("if " + skinned + " == 0")
-            present.append("\t" + primed + " = 0")
-            present.append("endif")
-            present.append(skinned + " = 0")
-
             for line in (
                 "[CommandListZZMS_SkinNow_" + name + "]",
-                "if " + skinned + " == 0",
+                "$zzms_host0 = @vb0",
+                "$zzms_host3 = @vb3",
+                "if $zzms_host0 != 0 && $PoolZZMS_Skinned[$zzms_host0] != FRAME_NUMBER",
+                "\t$PoolZZMS_Skinned[$zzms_host0] = FRAME_NUMBER",
+                "\trun = CommandListZZMS_BackupIniParams",
+                "\tx0 = PoolZZMS_Slot[$zzms_host0]->Index",
+                "\ty0 = FRAME_NUMBER",
+                "\trun = CustomShaderZZMS_Match_" + name,
+                "\trun = CustomShaderZZMS_Gather_" + name,
                 "\trun = CustomShaderZZMS_Palette_" + name,
-                "\tif " + primed,
-                "\t\trun = CustomShaderZZMS_SkinFrame_" + name,
-                "\telse",
-                "\t\trun = CustomShaderZZMS_SkinFirst_" + name,
-                "\t\t" + primed + " = 1",
-                "\tendif",
-                "\t" + skinned + " = 1",
+                "\trun = CustomShaderZZMS_SkinFrame_" + name,
+                "\trun = CommandListZZMS_RestoreIniParams",
                 "endif",
+                "; vb3: this copy's result of the previous frame, or of this frame when it was not skinned then",
+                "$zzms_prev3 = $zzms_host0",
+                "if $zzms_host3 != 0 && $PoolZZMS_Skinned[$zzms_host3] == FRAME_NUMBER - 1",
+                "\t$zzms_prev3 = $zzms_host3",
+                "endif",
+                "",
+                "[CustomShaderZZMS_Match_" + name + "]",
+                "cs = Shaders/" + zms.INSTANCE_MATCH_SHADER_FILENAME,
+                "cs-cb0 = ref vs-cb1",
+                "cs-t0 = ref ResourceZZMS_Store",
+                "cs-t1 = ref ResourceZZMS_Records",
+                "cs-t2 = ref ResourceZZMS_Components",
+                "cs-t3 = ref ResourceZZMS_InstanceParams_" + name,
+                "cs-t4 = ref ResourceZZMS_Needed_" + name,
+                "cs-u0 = ref ResourceZZMS_Choice",
+                "dispatch = 1, 1, 1",
+                "cs-u0 = null",
+                "cs-t0 = null",
+                "cs-t1 = null",
+                "cs-t2 = null",
+                "cs-t3 = null",
+                "cs-t4 = null",
+                "cs-cb0 = null",
+                "",
+                "[CustomShaderZZMS_Gather_" + name + "]",
+                "cs = Shaders/" + zms.INSTANCE_GATHER_SHADER_FILENAME,
+                "cs-t0 = ref ResourceZZMS_Store",
+                "cs-t1 = ref ResourceZZMS_Components",
+                "cs-t2 = ref ResourceZZMS_InstanceParams_" + name,
+                "cs-t3 = ref ResourceZZMS_Choice",
+                "cs-u0 = ref ResourceZZMS_Pool",
+                "dispatch = " + str(_ceil_groups(bones_count)) + ", 1, 1",
+                "cs-u0 = null",
+                "cs-t0 = null",
+                "cs-t1 = null",
+                "cs-t2 = null",
+                "cs-t3 = null",
+                "",
+                "[CustomShaderZZMS_SkinFrame_" + name + "]",
+                "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
+                "cs-t0 = ref ResourceZZMS_Palette_" + name,
+                "cs-t1 = ref ResourceZZMS_SkinPosition_" + name,
+                "cs-t2 = ref ResourceZZMS_SkinBlend_" + name,
+                "cs-t3 = ref ResourceZZMS_SkinParams_" + name,
+                "cs-t4 = ref ResourceZZMS_Choice",
+                "cs-u0 = ref PoolZZMS_Out_" + name + "[$zzms_host0]",
+                "dispatch = " + str(_ceil_groups(vertex_count)) + ", 1, 1",
+                "cs-u0 = null",
+                "cs-t0 = null",
+                "cs-t1 = null",
+                "cs-t2 = null",
+                "cs-t3 = null",
+                "cs-t4 = null",
                 "",
             ):
                 command_lists.append(line)
-            for section_name, params in (("CustomShaderZZMS_SkinFrame_", "ResourceZZMS_SkinParams_"),
-                                         ("CustomShaderZZMS_SkinFirst_", "ResourceZZMS_SkinParamsFirst_")):
-                for line in (
-                    "[" + section_name + name + "]",
-                    "cs = Shaders/" + zms.SKIN_SHADER_FILENAME,
-                    "cs-t0 = ref ResourceZZMS_Palette_" + name,
-                    "cs-t1 = ref ResourceZZMS_SkinPosition_" + name,
-                    "cs-t2 = ref ResourceZZMS_SkinBlend_" + name,
-                    "cs-t3 = ref " + params + name,
-                    "cs-u0 = ref ResourceZZMS_Skinned_" + name,
-                    "cs-u1 = ref ResourceZZMS_SkinnedPrev_" + name,
-                    "dispatch = " + str(_ceil_groups(vertex_count)) + ", 1, 1",
-                    "cs-u0 = null",
-                    "cs-u1 = null",
-                    "cs-t0 = null",
-                    "cs-t1 = null",
-                    "cs-t2 = null",
-                    "cs-t3 = null",
-                    "",
-                ):
-                    command_lists.append(line)
 
             # 读导出的顶点和权重 (同一份文件，按字节读)
             for category in ("Position", "Blend"):
@@ -930,22 +1055,50 @@ class ZZMIMergedSkeletonExport:
                 resources.new_line()
             self._uint4_data(resources, "ResourceZZMS_SkinParams_" + name,
                              zms.same_frame_skin_params(vertex_count, layout))
-            self._uint4_data(resources, "ResourceZZMS_SkinParamsFirst_" + name,
-                             zms.same_frame_skin_params(vertex_count, layout, first_frame=True))
-            # 计算着色器写、绘制时当顶点缓冲读: 原始视图 + 顶点缓冲标记 (结构化缓冲不能当顶点缓冲)
-            for resource_name in ("ResourceZZMS_Skinned_", "ResourceZZMS_SkinnedPrev_"):
-                resources.append("[" + resource_name + name + "]")
-                resources.append("type = RWByteAddressBuffer")
-                resources.append("stride = " + str(zms.SKIN_VERTEX_STRIDE))
-                resources.append("array = " + str(vertex_count))
-                resources.append("bind_flags = vertex_buffer shader_resource unordered_access")
-                resources.new_line()
+            needed_ids = {self.component_by_ib[ib_hash]["component_id"]} | {
+                self.component_by_ib[dependency]["component_id"] for dependency in self.dependencies.get(ib_hash, ())}
+            self._uint4_data(resources, "ResourceZZMS_Needed_" + name, zms.instance_needed(self.profile, needed_ids))
+            # 每一份的蒙皮结果: 计算着色器写、绘制时当顶点缓冲读，原始视图 + 顶点缓冲标记
+            # (结构化缓冲不能当顶点缓冲)；按游戏流输出缓冲的身份分配，每份两块
+            for line in (
+                "[PoolZZMS_Out_" + name + "]",
+                "pool_size = " + str(2 * zms.MAX_INSTANCES),
+                "pool_index_type = fifo",
+                "pool_allocate_slot_on_missing = 1",
+                "pool_expiration_timeout_frames = " + str(zms.INSTANCE_EXPIRATION_FRAMES),
+                "type = RWByteAddressBuffer",
+                "stride = " + str(zms.SKIN_VERTEX_STRIDE),
+                "array = " + str(vertex_count),
+                "bind_flags = vertex_buffer shader_resource unordered_access",
+            ):
+                resources.append(line)
+            resources.new_line()
+
+        for ib_hash in self.participants:
+            component = self.component_by_ib[ib_hash]
+            self._uint4_data(resources, "ResourceZZMS_InstanceParams_" + _ini_name(ib_hash),
+                             zms.instance_params(self.profile, component["component_id"], slots, rows))
+        self._rw_buffer(resources, "ResourceZZMS_Store", slots * rows)
+        self._rw_buffer(resources, "ResourceZZMS_Records", slots * zms.INSTANCE_RECORD_ROWS)
+        resources.append("[ResourceZZMS_Choice]")
+        resources.append("type = RWBuffer")
+        resources.append("format = R32G32B32A32_UINT")
+        resources.append("array = " + str(1 + merged_count))
+        resources.append("bind_flags = shader_resource unordered_access")
+        resources.new_line()
+        for pool_name, size in (("PoolZZMS_Slot", slots), ("PoolZZMS_Recorded", slots),
+                                ("PoolZZMS_Skinned", 2 * zms.MAX_INSTANCES * len(self.same_frame_ibs))):
+            resources.append("[" + pool_name + "]")
+            resources.append("pool_size = " + str(size))
+            resources.append("pool_index_type = fifo")
+            resources.append("pool_allocate_slot_on_missing = 1")
+            resources.append("pool_expiration_timeout_frames = " + str(zms.INSTANCE_EXPIRATION_FRAMES))
+            resources.new_line()
         resources.append("[ResourceZZMS_GameVb0]")
         resources.new_line()
         resources.append("[ResourceZZMS_GameVb3]")
         resources.new_line()
         ini_builder.append_section(constants)
-        ini_builder.append_section(present)
         ini_builder.append_section(command_lists)
         ini_builder.append_section(resources)
 

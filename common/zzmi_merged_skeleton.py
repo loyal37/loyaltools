@@ -62,6 +62,19 @@ pool and ``SKIN_SHADER_SOURCE`` skins it into a buffer of the mod, which is
 bound as the part's vertex buffer (vb0) for its draws; the result of the
 previous frame is bound as vb3 (previous positions for motion vectors).  The
 whole character uses the bones of the current frame.
+
+The character can be on screen more than once (the copies are skinned
+interleaved, a few metres or less apart).  Nothing in a skinning draw tells
+the copies apart except its stream-output buffer: each copy of a component
+skins into its own two buffers, which the game alternates.  The ini gives each
+buffer a slot of the instance store by its identity (``@so0``, ``@vb0``), the
+bones are imported into that slot, and at its draws a component records its
+root's world matrix (vs-cb1) for its slots.  When a copy of a merged part is
+drawn, ``INSTANCE_MATCH_SHADER_SOURCE`` picks, starting from that part, the
+instance of every component whose recorded matrix puts the shared bone where
+the copy puts it; the bones are gathered into the pool and the copy is skinned
+into a buffer of its own (one per stream-output buffer, so vb3 is the copy's
+result of the previous frame).
 """
 
 from __future__ import annotations
@@ -504,6 +517,18 @@ PALETTE_SHADER_FILENAME = "MergedSkeleton_Palette.hlsl"
 DELAY_SHADER_FILENAME = "MergedSkeleton_Delay.hlsl"
 PLACE_SHADER_FILENAME = "MergedSkeleton_Place.hlsl"
 SKIN_SHADER_FILENAME = "MergedSkeleton_Skin.hlsl"
+INSTANCE_IMPORT_SHADER_FILENAME = "MergedSkeleton_InstanceImport.hlsl"
+INSTANCE_RECORD_SHADER_FILENAME = "MergedSkeleton_InstanceRecord.hlsl"
+INSTANCE_MATCH_SHADER_FILENAME = "MergedSkeleton_InstanceMatch.hlsl"
+INSTANCE_GATHER_SHADER_FILENAME = "MergedSkeleton_InstanceGather.hlsl"
+
+# Same-frame skinning with several copies of the character on screen: copies of one
+# component are told apart by their stream-output buffers (two per copy, the game
+# alternates them), each buffer gets a slot of the instance store.
+MAX_INSTANCES = 8
+MAX_INSTANCE_COMPONENTS = 32
+INSTANCE_RECORD_ROWS = 5
+INSTANCE_EXPIRATION_FRAMES = 600
 
 # Vertices the same-frame skinning reads and writes: POSITION float3, NORMAL float3,
 # TANGENT float4, the layout of the game's skinning input and stream output.
@@ -861,14 +886,17 @@ SKIN_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: same-frame skinni
 // The game skins each component with a stream-output draw right after uploading its bones,
 // so a part that also uses bones of components skinned later in the frame would get their
 // bones of the previous frame.  The game skins every component before it draws the first
-// one, so the merged part is skinned here instead, at its first draw of the frame, and the
-// result is bound as its vertex buffer (vb0); the result of the previous frame is kept for
-// vb3 (previous positions, motion vectors).
+// one, so the merged part is skinned here instead, at its first draw of the frame, into a
+// buffer of the mod that is bound as its vertex buffer (vb0).  Each copy of the character
+// has two such buffers, one per stream-output buffer the game alternates, so the result of
+// the previous frame is bound as vb3 (previous positions, motion vectors).
 // The arithmetic is that of the game's skinning shaders (e8425f64cfb887cd, four weights;
 // 9684c4091fc9e35a, one bone): the rows of the blended float4x3 bone transform the
 // position, the normal and the tangent (not normalised); the tangent's w is kept.
+// When the bones of some component of this copy were not found (a copy that has just
+// appeared), every vertex is written at the origin: the copy is not drawn this frame.
 
-// The merged palette in this part's space (three rows per bone), built from this frame's pool.
+// The merged palette in this part's space (three rows per bone), built from this frame's bones.
 Buffer<float4> Palette : register(t0);
 // The exported vertices: POSITION float3, NORMAL float3, TANGENT float4 (40 bytes).
 ByteAddressBuffer Position : register(t1);
@@ -877,13 +905,13 @@ ByteAddressBuffer Blend : register(t2);
 // (vertex count, weight buffer stride,
 //  weight offset | weight format << 16 (0 none, 1 R32G32B32A32_FLOAT, 2 R16G16B16A16_FLOAT,
 //                                       3 R16G16B16A16_UNORM, 4 R8G8B8A8_UNORM),
-//  index offset | one bone << 16 | first frame << 17)
+//  index offset | one bone << 16)
 Buffer<uint4> Params : register(t3);
+// Row 0: (1 when the bones of every component of this copy were found, 0, 0, 0).
+Buffer<uint4> Choice : register(t4);
 
 // Skinned vertices, the layout of the game's stream output (40 bytes).
 RWByteAddressBuffer Skinned : register(u0);
-// The skinned vertices of the previous frame (on the first frame, this frame's).
-RWByteAddressBuffer Previous : register(u1);
 
 float4 LoadWeights(uint address, uint format)
 {
@@ -920,6 +948,15 @@ void main(uint3 thread_id : SV_DispatchThreadID)
     if (vertex >= params.x)
         return;
 
+    uint target = vertex * 40;
+    if (Choice[0].x == 0)
+    {
+        Skinned.Store4(target, uint4(0, 0, 0, 0));
+        Skinned.Store4(target + 16, uint4(0, 0, 0, 0));
+        Skinned.Store2(target + 32, uint2(0, 0));
+        return;
+    }
+
     uint source = vertex * 40;
     float4 homogeneous = float4(asfloat(Position.Load3(source)), 1.0);
     float3 normal = asfloat(Position.Load3(source + 12));
@@ -948,26 +985,396 @@ void main(uint3 thread_id : SV_DispatchThreadID)
     float3 skinned_normal = float3(dot(normal, row0.xyz), dot(normal, row1.xyz), dot(normal, row2.xyz));
     float3 skinned_tangent = float3(dot(tangent.xyz, row0.xyz), dot(tangent.xyz, row1.xyz),
                                     dot(tangent.xyz, row2.xyz));
-    uint4 now0 = uint4(asuint(position), asuint(skinned_normal.x));
-    uint4 now1 = uint4(asuint(skinned_normal.yz), asuint(skinned_tangent.xy));
-    uint2 now2 = uint2(asuint(skinned_tangent.z), asuint(tangent.w));
+    Skinned.Store4(target, uint4(asuint(position), asuint(skinned_normal.x)));
+    Skinned.Store4(target + 16, uint4(asuint(skinned_normal.yz), asuint(skinned_tangent.xy)));
+    Skinned.Store2(target + 32, uint2(asuint(skinned_tangent.z), asuint(tangent.w)));
+}
+"""
 
-    uint target = vertex * 40;
-    if (params.w & 0x20000)
+INSTANCE_COMMON_HLSL = r"""
+// Affine 3x4 matrix stored as rows (column-vector convention), as the game's float4x3 bones are.
+struct Affine
+{
+    float4 r0;
+    float4 r1;
+    float4 r2;
+};
+
+float4 MulRow(float4 row, Affine b)
+{
+    return row.x * b.r0 + row.y * b.r1 + row.z * b.r2 + float4(0, 0, 0, row.w);
+}
+
+Affine Mul(Affine a, Affine b)
+{
+    Affine m;
+    m.r0 = MulRow(a.r0, b);
+    m.r1 = MulRow(a.r1, b);
+    m.r2 = MulRow(a.r2, b);
+    return m;
+}
+
+Affine Inverse(Affine m)
+{
+    float3 a = m.r0.xyz;
+    float3 b = m.r1.xyz;
+    float3 c = m.r2.xyz;
+    float3 c0 = cross(b, c);
+    float3 c1 = cross(c, a);
+    float3 c2 = cross(a, b);
+    float det = dot(a, c0);
+    Affine r;
+    r.r0 = float4(1, 0, 0, 0);
+    r.r1 = float4(0, 1, 0, 0);
+    r.r2 = float4(0, 0, 1, 0);
+    if (abs(det) >= 1e-20)
     {
-        Previous.Store4(target, now0);
-        Previous.Store4(target + 16, now1);
-        Previous.Store2(target + 32, now2);
+        float inv_det = 1.0 / det;
+        float3 i0 = float3(c0.x, c1.x, c2.x) * inv_det;
+        float3 i1 = float3(c0.y, c1.y, c2.y) * inv_det;
+        float3 i2 = float3(c0.z, c1.z, c2.z) * inv_det;
+        float3 t = float3(m.r0.w, m.r1.w, m.r2.w);
+        r.r0 = float4(i0, -dot(i0, t));
+        r.r1 = float4(i1, -dot(i1, t));
+        r.r2 = float4(i2, -dot(i2, t));
     }
-    else
+    return r;
+}
+
+// The object constants hold the root's object-to-world matrix as row vectors.
+Affine RowsToWorld(float4 r0, float4 r1, float4 r2, float4 r3)
+{
+    Affine m;
+    m.r0 = float4(r0.x, r1.x, r2.x, r3.x);
+    m.r1 = float4(r0.y, r1.y, r2.y, r3.y);
+    m.r2 = float4(r0.z, r1.z, r2.z, r3.z);
+    return m;
+}
+
+float3 Apply(Affine m, float3 p)
+{
+    float4 h = float4(p, 1.0);
+    return float3(dot(m.r0, h), dot(m.r1, h), dot(m.r2, h));
+}
+"""
+
+INSTANCE_IMPORT_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: bone import, one store slot per component instance.
+// When the character is on screen more than once, every copy skins each component into its
+// own stream-output buffers.  Each such buffer has a slot of the instance store (the ini
+// picks it by the identity of the buffer bound for the skinning draw), so the copies never
+// overwrite each other's bones.
+// Slot layout: row 0 = (table index of the component, frame number, 1, 0), then the
+// component's own bones, three rows each.
+
+tbuffer ComponentBones : register(t0)
+{
+    float4 ComponentBoneRows[3072];
+};
+
+// Two entries per merged component:
+//   [2k + 0] = (vg_offset, vg_count, parent index, 1)
+//   [2k + 1] = (anchor slot in parent, anchor slot in self, 0, 0)
+Buffer<uint4> Components : register(t1);
+
+// (table index of this component, merged component count, slot count, rows per slot)
+Buffer<uint4> Params : register(t2);
+
+// x0 = slot, y0 = frame number
+Texture1D<float4> IniParams : register(t120);
+
+RWBuffer<float4> Store : register(u0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint4 params = Params[0];
+    float4 ini = IniParams.Load(int2(0, 0));
+    uint slot = (uint)ini.x;
+    if (slot >= params.z)
+        return;
+    uint base = slot * params.w;
+    uint4 component = Components[params.x * 2];
+    uint bone = thread_id.x;
+    if (bone == 0)
+        Store[base] = float4(params.x, ini.y, 1, 0);
+    if (bone >= component.y)
+        return;
+
+    uint src = bone * 3;
+    uint dst = base + 1 + bone * 3;
+    Store[dst + 0] = ComponentBoneRows[src + 0];
+    Store[dst + 1] = ComponentBoneRows[src + 1];
+    Store[dst + 2] = ComponentBoneRows[src + 2];
+}
+"""
+
+INSTANCE_RECORD_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: where a component instance is.
+// At the draws of a component, its object constants (vs-cb1 rows 0-3) hold its root's world
+// matrix.  It is recorded for the slots of both stream-output buffers of the instance (this
+// frame's and the previous frame's, the game alternates them), so the slot skinned in the
+// next frame has a matrix of at most one frame before.
+// Record layout: five rows per slot, the matrix rows 0-3, then (table index, frame number, 1, 0).
+
+cbuffer Object : register(b0)
+{
+    float4 ObjectRows[4];
+};
+
+// (table index of this component, merged component count, slot count, rows per slot)
+Buffer<uint4> Params : register(t0);
+
+// x0 = slot of this frame's buffer, y0 = slot of the previous frame's buffer (or the same),
+// z0 = frame number, w0 = table index
+Texture1D<float4> IniParams : register(t120);
+
+RWBuffer<float4> Records : register(u0);
+
+bool IsPlacement(float4 r0, float4 r1, float4 r2, float4 r3)
+{
+    float det = determinant(float3x3(r0.xyz, r1.xyz, r2.xyz));
+    return all(abs(float3(r0.w, r1.w, r2.w)) < 1e-3) && abs(r3.w - 1.0) < 1e-3
+        && det > 0.25 && det < 4.0 && all(abs(r3.xyz) < 1e6);
+}
+
+void Write(uint slot, uint slots, float4 ini)
+{
+    if (slot >= slots)
+        return;
+    uint base = slot * 5;
+    Records[base + 0] = ObjectRows[0];
+    Records[base + 1] = ObjectRows[1];
+    Records[base + 2] = ObjectRows[2];
+    Records[base + 3] = ObjectRows[3];
+    Records[base + 4] = float4(ini.w, ini.z, 1, 0);
+}
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    if (!IsPlacement(ObjectRows[0], ObjectRows[1], ObjectRows[2], ObjectRows[3]))
+        return;
+    float4 ini = IniParams.Load(int2(0, 0));
+    uint slots = Params[0].z;
+    Write((uint)ini.x, slots, ini);
+    if ((uint)ini.y != (uint)ini.x)
+        Write((uint)ini.y, slots, ini);
+}
+"""
+
+INSTANCE_MATCH_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: which component instances belong to this copy.
+// Starting from the drawn part (its root's world matrix is in the object constants of this
+// draw), the components are reached through the bones they share (anchors).  Of the
+// instances of a component skinned in this frame, the one whose recorded world matrix puts
+// the shared bone where the already matched component puts it belongs to this copy: another
+// copy stands somewhere else or in another pose, this one agrees to within its movement of a
+// frame.  A component skinned only once this frame is taken even without a record.  The world
+// matrix of a matched component is derived through the shared bone, so it is of this frame.
+""" + INSTANCE_COMMON_HLSL + r"""
+cbuffer HostObject : register(b0)
+{
+    float4 HostRows[4];
+};
+
+Buffer<float4> Store : register(t0);
+Buffer<float4> Records : register(t1);
+
+// Two entries per merged component:
+//   [2k + 0] = (vg_offset, vg_count, parent index, 1)
+//   [2k + 1] = (anchor slot in parent, anchor slot in self, 0, 0)
+Buffer<uint4> Components : register(t2);
+
+// (table index of the drawn part, merged component count, slot count, rows per slot)
+Buffer<uint4> Params : register(t3);
+
+// Per merged component: (1 when this part reads its bones, 0, 0, 0).
+Buffer<uint4> Needed : register(t4);
+
+// x0 = slot of the drawn part, y0 = frame number
+Texture1D<float4> IniParams : register(t120);
+
+// Row 0: (1 when every needed component was found, 0, 0, 0); row 1 + k: (slot, found, 0, 0).
+RWBuffer<uint4> Choice : register(u0);
+
+static const uint MAX_COMPONENTS = 32;
+static const uint NO_SLOT = 0xFFFFFFFF;
+
+Affine LoadBone(uint slot, uint rows, uint local)
+{
+    uint base = slot * rows + 1 + local * 3;
+    Affine m;
+    m.r0 = Store[base + 0];
+    m.r1 = Store[base + 1];
+    m.r2 = Store[base + 2];
+    return m;
+}
+
+// Where a bone puts the origin of the bind pose.
+float3 Point(Affine bone)
+{
+    return float3(bone.r0.w, bone.r1.w, bone.r2.w);
+}
+
+[numthreads(1, 1, 1)]
+void main()
+{
+    uint4 params = Params[0];
+    float4 ini = IniParams.Load(int2(0, 0));
+    uint host = params.x;
+    uint count = min(params.y, MAX_COMPONENTS);
+    uint slots = params.z;
+    uint rows = params.w;
+    uint host_slot = (uint)ini.x;
+    float frame = ini.y;
+
+    uint slot_of[MAX_COMPONENTS];
+    Affine world[MAX_COMPONENTS];
+    [loop]
+    for (uint k = 0; k < MAX_COMPONENTS; ++k)
     {
-        Previous.Store4(target, Skinned.Load4(target));
-        Previous.Store4(target + 16, Skinned.Load4(target + 16));
-        Previous.Store2(target + 32, Skinned.Load2(target + 32));
+        slot_of[k] = NO_SLOT;
+        world[k].r0 = float4(1, 0, 0, 0);
+        world[k].r1 = float4(0, 1, 0, 0);
+        world[k].r2 = float4(0, 0, 1, 0);
     }
-    Skinned.Store4(target, now0);
-    Skinned.Store4(target + 16, now1);
-    Skinned.Store2(target + 32, now2);
+
+    bool host_found = host < count && host_slot < slots
+        && Store[host_slot * rows].x == (float)host && Store[host_slot * rows].y == frame;
+    if (host_found)
+    {
+        slot_of[host] = host_slot;
+        world[host] = RowsToWorld(HostRows[0], HostRows[1], HostRows[2], HostRows[3]);
+    }
+
+    [loop]
+    for (uint round = 0; round < count && host_found; ++round)
+    {
+        bool progress = false;
+        [loop]
+        for (uint c = 0; c < count; ++c)
+        {
+            uint p = Components[c * 2].z;
+            if (p == c || p >= count)
+                continue;
+            uint4 anchor = Components[c * 2 + 1];
+            uint known = 0, target = 0, known_anchor = 0, target_anchor = 0;
+            if (slot_of[p] != NO_SLOT && slot_of[c] == NO_SLOT)
+            {
+                known = p;
+                target = c;
+                known_anchor = anchor.x;
+                target_anchor = anchor.y;
+            }
+            else if (slot_of[c] != NO_SLOT && slot_of[p] == NO_SLOT)
+            {
+                known = c;
+                target = p;
+                known_anchor = anchor.y;
+                target_anchor = anchor.x;
+            }
+            else
+            {
+                continue;
+            }
+            if (Needed[target].x == 0)
+                continue;
+
+            uint target_local = target_anchor - Components[target * 2].x;
+            Affine known_bone = LoadBone(slot_of[known], rows, known_anchor - Components[known * 2].x);
+            float3 expected = Apply(world[known], Point(known_bone));
+
+            uint best = NO_SLOT;
+            float best_distance = 3.0e38;
+            uint candidates = 0;
+            [loop]
+            for (uint s = 0; s < slots; ++s)
+            {
+                float4 header = Store[s * rows];
+                if (header.x != (float)target || header.y != frame)
+                    continue;
+                candidates += 1;
+                float distance = 1.0e30;
+                float4 record = Records[s * 5 + 4];
+                if (record.x == (float)target && record.z == 1 && frame - record.y <= 2)
+                {
+                    Affine recorded = RowsToWorld(Records[s * 5], Records[s * 5 + 1], Records[s * 5 + 2], Records[s * 5 + 3]);
+                    distance = length(Apply(recorded, Point(LoadBone(s, rows, target_local))) - expected);
+                }
+                if (distance < best_distance)
+                {
+                    best_distance = distance;
+                    best = s;
+                }
+            }
+            // Without records two instances cannot be told apart.
+            if (best == NO_SLOT || (best_distance >= 1.0e30 && candidates > 1))
+                continue;
+            slot_of[target] = best;
+            world[target] = Mul(Mul(world[known], known_bone), Inverse(LoadBone(best, rows, target_local)));
+            progress = true;
+        }
+        if (!progress)
+            break;
+    }
+
+    bool all_found = host_found;
+    [loop]
+    for (uint m = 0; m < count; ++m)
+    {
+        bool found = slot_of[m] != NO_SLOT;
+        if (Needed[m].x != 0 && !found)
+            all_found = false;
+        Choice[1 + m] = uint4(found ? slot_of[m] : 0, found ? 1 : 0, 0, 0);
+    }
+    Choice[0] = uint4(all_found ? 1 : 0, 0, 0, 0);
+}
+"""
+
+INSTANCE_GATHER_SHADER_SOURCE = r"""// Zenless Zone Zero merged skeleton: the bone pool of one copy of the character.
+// Copies every component's bones from the store slot the matcher picked for this copy to the
+// component's range of the pool, which the palette builder reads.
+
+Buffer<float4> Store : register(t0);
+
+// Two entries per merged component:
+//   [2k + 0] = (vg_offset, vg_count, parent index, 1)
+//   [2k + 1] = (anchor slot in parent, anchor slot in self, 0, 0)
+Buffer<uint4> Components : register(t1);
+
+// (table index of the drawn part, merged component count, slot count, rows per slot)
+Buffer<uint4> Params : register(t2);
+
+// Row 1 + k: (slot of component k, found, 0, 0).
+Buffer<uint4> Choice : register(t3);
+
+RWBuffer<float4> Pool : register(u0);
+
+[numthreads(64, 1, 1)]
+void main(uint3 thread_id : SV_DispatchThreadID)
+{
+    uint4 params = Params[0];
+    uint bone = thread_id.x;
+    [loop]
+    for (uint k = 0; k < params.y; ++k)
+    {
+        uint4 entry = Components[k * 2];
+        if (bone < entry.x || bone >= entry.x + entry.y)
+            continue;
+        uint4 choice = Choice[1 + k];
+        float4 r0 = float4(0, 0, 0, 0);
+        float4 r1 = float4(0, 0, 0, 0);
+        float4 r2 = float4(0, 0, 0, 0);
+        if (choice.y != 0)
+        {
+            uint base = choice.x * params.w + 1 + (bone - entry.x) * 3;
+            r0 = Store[base + 0];
+            r1 = Store[base + 1];
+            r2 = Store[base + 2];
+        }
+        Pool[bone * 3 + 0] = r0;
+        Pool[bone * 3 + 1] = r1;
+        Pool[bone * 3 + 2] = r2;
+        return;
+    }
 }
 """
 
@@ -1000,20 +1407,22 @@ def same_frame_skin_layout(position_elements, blend_elements):
     return (offset, weights[0], SKIN_WEIGHT_FORMATS[weights[1]], indices[0], False), None
 
 
-def same_frame_skin_params(vertex_count: int, layout, first_frame: bool = False) -> list[int]:
+def same_frame_skin_params(vertex_count: int, layout) -> list[int]:
     stride, weight_offset, weight_format, index_offset, one_bone = layout
     return [
         int(vertex_count),
         int(stride),
         int(weight_offset) | (int(weight_format) << 16),
-        int(index_offset) | (0x10000 if one_bone else 0) | (0x20000 if first_frame else 0),
+        int(index_offset) | (0x10000 if one_bone else 0),
     ]
 
 
 def reference_same_frame_skin(palette, position_bytes: bytes, blend_bytes: bytes, params,
-                              skinned_before=None) -> tuple:
-    """What the skinning shader writes: (skinned, previous), float32 rows of 10 values."""
+                              found: bool = True) -> numpy.ndarray:
+    """What the skinning shader writes: float32 rows of 10 values (zeros when bones are missing)."""
     vertex_count, stride, weight_word, index_word = (int(value) for value in params)
+    if not found:
+        return numpy.zeros((vertex_count, 10), dtype=numpy.float32)
     palette = numpy.asarray(palette, dtype=numpy.float64).reshape(-1, 4)
     vertices = numpy.frombuffer(position_bytes, dtype=numpy.float32)[:vertex_count * 10].reshape(-1, 10)
     rows = numpy.frombuffer(blend_bytes, dtype=numpy.uint8)[:vertex_count * stride].reshape(-1, stride)
@@ -1050,11 +1459,126 @@ def reference_same_frame_skin(palette, position_bytes: bytes, blend_bytes: bytes
         skinned[vertex, 3:6] = matrix[:, :3] @ normal
         skinned[vertex, 6:9] = matrix[:, :3] @ tangent[:3]
         skinned[vertex, 9] = tangent[3]
-    if index_word & 0x20000 or skinned_before is None:
-        previous = skinned.copy()
-    else:
-        previous = numpy.asarray(skinned_before, dtype=numpy.float32).reshape(-1, 10)[:vertex_count].copy()
-    return skinned, previous
+    return skinned
+
+
+def instance_slot_count(participant_count: int) -> int:
+    """Store slots: two stream-output buffers per copy of every participating component."""
+    return 2 * MAX_INSTANCES * max(1, int(participant_count))
+
+
+def instance_slot_rows(profile: dict, component_ids) -> int:
+    """Rows of a store slot: a header, then three per bone of the largest participant."""
+    by_id = {component["component_id"]: component for component in profile["components"]}
+    return 1 + 3 * max(int(by_id[int(component_id)]["vg_count"]) for component_id in component_ids)
+
+
+def instance_params(profile: dict, component_id: int, slot_count: int, slot_rows: int) -> list[int]:
+    """``uint4`` (table index, merged component count, slot count, rows per slot)."""
+    return [runtime_component_index(profile, component_id), len(merged_components(profile)),
+            int(slot_count), int(slot_rows)]
+
+
+def instance_needed(profile: dict, component_ids) -> list[int]:
+    """``uint4`` per merged component: (1 when a drawn part reads its bones, 0, 0, 0)."""
+    wanted = {int(component_id) for component_id in component_ids}
+    values = []
+    for component in merged_components(profile):
+        values += [1 if component["component_id"] in wanted else 0, 0, 0, 0]
+    return values
+
+
+def _rows_to_world(rows) -> numpy.ndarray:
+    """4x4 column-convention matrix of object constants rows 0-3 (row vectors)."""
+    rows = numpy.asarray(rows, dtype=numpy.float64).reshape(4, 4)
+    matrix = numpy.eye(4)
+    matrix[:3, :] = rows[:, :3].T
+    return matrix
+
+
+def reference_instance_match(profile: dict, store, records, params, needed, host_rows, host_slot: int,
+                             frame: float) -> numpy.ndarray:
+    """What the match shader writes: ``uint`` rows (1 + merged count, 4)."""
+    host, count, slots, rows_per_slot = (int(value) for value in params)
+    count = min(count, MAX_INSTANCE_COMPONENTS)
+    store = numpy.asarray(store, dtype=numpy.float64).reshape(-1, 4)
+    records = numpy.asarray(records, dtype=numpy.float64).reshape(-1, 4)
+    needed = numpy.asarray(needed).reshape(-1, 4)[:, 0]
+    table = numpy.asarray(runtime_component_table(profile), dtype=numpy.int64).reshape(-1, 4)
+
+    def bone(slot, local):
+        base = slot * rows_per_slot + 1 + local * 3
+        return _to_affine44(store[base:base + 3])
+
+    slot_of = [None] * count
+    world = [numpy.eye(4)] * count
+    host_found = (host < count and host_slot < slots
+                  and store[host_slot * rows_per_slot, 0] == host and store[host_slot * rows_per_slot, 1] == frame)
+    if host_found:
+        slot_of[host] = host_slot
+        world[host] = _rows_to_world(host_rows)
+    for _ in range(count if host_found else 0):
+        progress = False
+        for c in range(count):
+            p = int(table[c * 2, 2])
+            if p == c or p >= count:
+                continue
+            anchor = table[c * 2 + 1]
+            if slot_of[p] is not None and slot_of[c] is None:
+                known, target, known_anchor, target_anchor = p, c, int(anchor[0]), int(anchor[1])
+            elif slot_of[c] is not None and slot_of[p] is None:
+                known, target, known_anchor, target_anchor = c, p, int(anchor[1]), int(anchor[0])
+            else:
+                continue
+            if needed[target] == 0:
+                continue
+            target_local = target_anchor - int(table[target * 2, 0])
+            known_bone = bone(slot_of[known], known_anchor - int(table[known * 2, 0]))
+            expected = (world[known] @ known_bone)[:3, 3]
+            best, best_distance, candidates = None, 3.0e38, 0
+            for s in range(slots):
+                header = store[s * rows_per_slot]
+                if header[0] != target or header[1] != frame:
+                    continue
+                candidates += 1
+                distance = 1.0e30
+                record = records[s * INSTANCE_RECORD_ROWS + 4]
+                if record[0] == target and record[2] == 1 and frame - record[1] <= 2:
+                    recorded = _rows_to_world(records[s * INSTANCE_RECORD_ROWS:s * INSTANCE_RECORD_ROWS + 4])
+                    distance = float(numpy.linalg.norm((recorded @ bone(s, target_local))[:3, 3] - expected))
+                if distance < best_distance:
+                    best, best_distance = s, distance
+            if best is None or (best_distance >= 1.0e30 and candidates > 1):
+                continue
+            slot_of[target] = best
+            world[target] = world[known] @ known_bone @ numpy.linalg.inv(bone(best, target_local))
+            progress = True
+        if not progress:
+            break
+    choice = numpy.zeros((1 + count, 4), dtype=numpy.uint32)
+    all_found = host_found
+    for m in range(count):
+        found = slot_of[m] is not None
+        if needed[m] and not found:
+            all_found = False
+        choice[1 + m] = [slot_of[m] if found else 0, 1 if found else 0, 0, 0]
+    choice[0, 0] = 1 if all_found else 0
+    return choice
+
+
+def reference_instance_gather(profile: dict, store, params, choice) -> numpy.ndarray:
+    """What the gather shader writes: the pool of one copy, (bones_count, 3, 4)."""
+    _, count, _, rows_per_slot = (int(value) for value in params)
+    store = numpy.asarray(store, dtype=numpy.float64).reshape(-1, 4)
+    pool = numpy.zeros((int(profile["bones_count"]), 3, 4))
+    for k, component in enumerate(merged_components(profile)[:count]):
+        slot, found = int(choice[1 + k][0]), int(choice[1 + k][1])
+        if not found:
+            continue
+        for local in range(int(component["vg_count"])):
+            base = slot * rows_per_slot + 1 + local * 3
+            pool[component["vg_offset"] + local] = store[base:base + 3]
+    return pool
 
 
 def _is_placement(m) -> bool:
@@ -1104,6 +1628,10 @@ def write_runtime_shaders(shader_folder: str, frame_delay: bool = False, same_fr
         shaders.append((PLACE_SHADER_FILENAME, PLACE_SHADER_SOURCE))
     if same_frame:
         shaders.append((SKIN_SHADER_FILENAME, SKIN_SHADER_SOURCE))
+        shaders.append((INSTANCE_IMPORT_SHADER_FILENAME, INSTANCE_IMPORT_SHADER_SOURCE))
+        shaders.append((INSTANCE_RECORD_SHADER_FILENAME, INSTANCE_RECORD_SHADER_SOURCE))
+        shaders.append((INSTANCE_MATCH_SHADER_FILENAME, INSTANCE_MATCH_SHADER_SOURCE))
+        shaders.append((INSTANCE_GATHER_SHADER_FILENAME, INSTANCE_GATHER_SHADER_SOURCE))
     for filename, source in shaders:
         path = os.path.join(shader_folder, filename)
         with open(path, "w", encoding="utf-8", newline="\n") as file:
