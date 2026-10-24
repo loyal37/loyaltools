@@ -1039,6 +1039,7 @@ class SSMT_MT_NodeMenu_Object(bpy.types.Menu):
         _add_node_entry(layout, "NTMI ModImp输出", 'EXPORT', "SSMTNode_Result_Output_NTMIModImp")
         _add_node_entry(layout, "重命名物体", 'FONT_DATA', "SSMTNode_Object_Rename")
         _add_node_entry(layout, "物体切换", 'ARROW_LEFTRIGHT', "SSMTNode_ObjectSwap")
+        _add_node_entry(layout, "半透明", 'MOD_OPACITY', "SSMTNode_Translucency")
 
 
 class SSMT_MT_NodeMenu_ShapeKey(bpy.types.Menu):

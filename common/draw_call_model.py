@@ -36,6 +36,7 @@ class DrawCallModel:
     index_count:int = field(init=False,repr=False,default=0)  # 索引数量
     vertex_count:int = field(init=False,repr=False,default=0)  # 顶点数量
     index_offset:int = field(init=False,repr=False,default=0)  # 索引偏移
+    translucency:Optional[dict] = field(init=False,repr=False,default=None)  # 半透明节点参数（EFMI TTL）
     
     def get_blender_obj_name(self) -> str:
         """获取用于查找 Blender 对象的名称

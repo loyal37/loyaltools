@@ -24,6 +24,7 @@ _NODE_TYPE_BONE_PALETTE_EXPORT = 'SSMTNode_BonePalette_Export'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
+_NODE_TYPE_TRANSLUCENCY = 'SSMTNode_Translucency'
 
 _KNOWN_NODE_TYPES = {
     _NODE_TYPE_OBJECT_INFO,
@@ -42,6 +43,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_MULTI_FILE_EXPORT,
+    _NODE_TYPE_TRANSLUCENCY,
 }
 
 
@@ -393,6 +395,13 @@ class ChainTraverser:
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
 
         elif node_type == _NODE_TYPE_DATA_TYPE:
+            chain.node_path.append(current_node)
+            chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
+
+        elif node_type == _NODE_TYPE_TRANSLUCENCY:
+            # 链上有多个半透明节点时，离物体最近的那个生效。
+            if chain.translucency is None:
+                chain.translucency = current_node.get_translucency()
             chain.node_path.append(current_node)
             chain.node_param_signatures.append(ProcessingChain.extract_node_signature(current_node))
 

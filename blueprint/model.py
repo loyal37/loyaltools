@@ -27,6 +27,7 @@ _NODE_TYPE_BONE_PALETTE_EXPORT = 'SSMTNode_BonePalette_Export'
 _NODE_TYPE_BLUEPRINT_NEST = 'SSMTNode_Blueprint_Nest'
 _NODE_TYPE_CROSS_IB = 'SSMTNode_CrossIB'
 _NODE_TYPE_MULTI_FILE_EXPORT = 'SSMTNode_MultiFile_Export'
+_NODE_TYPE_TRANSLUCENCY = 'SSMTNode_Translucency'
 
 _KNOWN_NODE_TYPES = {
     _NODE_TYPE_OBJECT_INFO,
@@ -45,6 +46,7 @@ _KNOWN_NODE_TYPES = {
     _NODE_TYPE_BLUEPRINT_NEST,
     _NODE_TYPE_CROSS_IB,
     _NODE_TYPE_MULTI_FILE_EXPORT,
+    _NODE_TYPE_TRANSLUCENCY,
 }
 
 
@@ -88,6 +90,7 @@ class ProcessingChain:
     vertex_group_process_nodes: List[bpy.types.Node] = field(default_factory=list)
     vertex_group_mapping_nodes: List[bpy.types.Node] = field(default_factory=list)
     export_object_name_override: str = ""
+    translucency: Optional[dict] = None
 
     reached_output: bool = False
     is_valid: bool = True
@@ -205,6 +208,10 @@ class ProcessingChain:
                 params.append(f"ib={draw_ib_match}")
             return f"DataType[{','.join(params)}]" if params else "DataType[]"
 
+        elif node_type == 'Translucency':
+            from .node_translucency import SSMTNode_Translucency
+            return SSMTNode_Translucency.generate_signature(node)
+
         elif node_type == 'ObjectSwap':
             params = []
             tree_name = node.id_data.name if hasattr(node, 'id_data') and node.id_data else ""
@@ -316,6 +323,7 @@ class ProcessingChain:
         new_chain.vertex_group_process_nodes = list(self.vertex_group_process_nodes)
         new_chain.vertex_group_mapping_nodes = list(self.vertex_group_mapping_nodes)
         new_chain.export_object_name_override = self.export_object_name_override
+        new_chain.translucency = copy.deepcopy(self.translucency, memo)
         new_chain.reached_output = self.reached_output
         new_chain.is_valid = self.is_valid
         return new_chain
@@ -336,6 +344,7 @@ class ProcessingChain:
                 obj_model.source_obj_name = self.original_object_name
 
         obj_model.work_key_list = copy.deepcopy(self.shapekey_params)
+        obj_model.translucency = copy.deepcopy(self.translucency)
 
         return obj_model
 

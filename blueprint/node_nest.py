@@ -20,6 +20,7 @@ class SSMTNode_Blueprint_Nest(SSMTNodeBase):
         'SSMTNode_ShapeKey_Output': '形态键输出',
         'SSMTNode_Object_Rename': '重命名',
         'SSMTNode_ObjectSwap': '物体切换',
+        'SSMTNode_Translucency': '半透明',
         'SSMTNode_DataType': '数据类型',
         'SSMTNode_VertexGroupMatch': '顶点组匹配',
         'SSMTNode_VertexGroupProcess': '顶点组处理',

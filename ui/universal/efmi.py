@@ -28,6 +28,7 @@ from ...common.efmi_merged_texture import (
     resolve_merged_auto_textures,
 )
 from ...utils.format_utils import FormatUtils
+from ...blueprint.node_translucency import MASK_DIFFUSE_A, MASK_TEXTURE
 
 import os
 import re
@@ -101,6 +102,11 @@ class ExportEFMI:
         self.merged_skeleton_mode = (
             explicit_merged_skeleton or automatic_merged_skeleton
         )
+        if not self.merged_skeleton_mode and any(
+            draw_call_model.translucency
+            for draw_call_model in self.blueprint_model.ordered_draw_obj_data_model_list
+        ):
+            raise ValueError("半透明节点只支持 EFMI 骨骼合并导出。")
         self.merged_skeleton_profile = None
         self.merged_connected_cpu_unique_strs = set()
         merged_gpu_unique_strs = None
@@ -1420,14 +1426,149 @@ class ExportEFMI:
             + "，新复制文件: " + str(copied_count)
         )
 
-    def _append_merged_draw_lines(self, section, drawcalls):
-        for line in M_IniHelper.get_drawindexed_str_list(drawcalls):
-            section.append(line)
+    def _get_merged_diffuse_resource_name(self, submesh_model, drawib_model):
+        '''本组件 CommandList 绑定的导出漫射贴图，没有时返回空字符串。'''
+        if GlobalProterties.forbid_auto_texture_ini() or drawib_model is None:
+            return ""
+        for texture_info in self._get_merged_texture_binding_list(
+            submesh_model, drawib_model
+        ):
+            if (
+                getattr(texture_info, "mark_type", "") == "Slot"
+                and texture_info.mark_name == "DiffuseMap"
+            ):
+                return texture_info.get_resource_name()
+        return ""
+
+    def _get_merged_translucency_mask_resource(self, drawcall, translucency):
+        '''半透明节点 R/G/B 通道用的遮罩贴图：每张只声明一次，导出时复制到 Textures。'''
+        source_path = translucency["texture"]
+        channel_name = "RGB"[translucency["channel"]]
+        if not source_path:
+            raise ValueError(
+                "半透明节点选择了 " + channel_name + " 通道，但没有填遮罩贴图 ("
+                + drawcall.obj_name + ")。"
+            )
+        if not os.path.isfile(source_path):
+            raise ValueError("找不到半透明遮罩贴图: " + source_path)
+
+        filename = os.path.basename(source_path)
+        source_key = os.path.normcase(os.path.abspath(source_path))
+        record = self.merged_translucency_mask_textures.get(filename.lower())
+        if record is not None:
+            if record["source_key"] != source_key:
+                raise ValueError(
+                    "两张不同的半透明遮罩贴图同名，导出到 Textures 会冲突: "
+                    + record["source_path"] + " / " + source_path
+                )
+            return record["resource"]
+
+        used_names = {
+            known["resource"] for known in self.merged_translucency_mask_textures.values()
+        }
+        base_name = "Resource-TTLMask-" + re.sub(
+            r"[^0-9A-Za-z_.-]", "_", os.path.splitext(filename)[0]
+        )
+        resource_name = base_name
+        suffix = 2
+        while resource_name in used_names:
+            resource_name = base_name + "-" + str(suffix)
+            suffix += 1
+        self.merged_translucency_mask_textures[filename.lower()] = {
+            "source_key": source_key,
+            "source_path": source_path,
+            "filename": filename,
+            "resource": resource_name,
+        }
+        return resource_name
+
+    def _append_merged_translucency_mask_resources(self, ini_builder):
+        mask_resources = M_IniSection(M_SectionType.ResourceTexture)
+        for record in self.merged_translucency_mask_textures.values():
+            mask_resources.append("[" + record["resource"] + "]")
+            mask_resources.append("filename = Textures/" + record["filename"])
+            mask_resources.new_line()
+        ini_builder.append_section(mask_resources)
+
+    def _copy_merged_translucency_mask_textures(self):
+        if not self.merged_translucency_mask_textures:
+            return
+        # 与自动贴图相同：Textures 里已有同名文件时保留，不覆盖。
+        output_folder = GlobalConfig.path_generatemod_texture_folder(draw_ib="EFMITTL")
+        for record in self.merged_translucency_mask_textures.values():
+            target_path = os.path.join(output_folder, record["filename"])
+            if os.path.exists(target_path):
+                print("[EFMI TTL] 遮罩贴图已在 Textures，保留: " + record["filename"])
+                continue
+            shutil.copy2(record["source_path"], target_path)
+            print("[EFMI TTL] 遮罩贴图已复制: " + record["source_path"])
+
+    def _get_merged_translucent_draw_lines(self, drawcall, diffuse_resource):
+        '''把一次 drawindexed 换成 EFMI TTL 的调用；参数在库里每次调用后复位，所以每处都要写。'''
+        translucency = drawcall.translucency
+        lines = []
+        if translucency["mask"] == MASK_DIFFUSE_A:
+            # 不写 alpha：库在带遮罩时默认 alpha = 1，完全由 A 通道决定。
+            if not diffuse_resource:
+                raise ValueError(
+                    "半透明节点选择了 A 通道，但 " + drawcall.obj_name
+                    + " 所在组件没有导出的漫射贴图 (DiffuseMap)。"
+                )
+            lines.append("Resource\\EFMITTL\\Mask = ref " + diffuse_resource)
+            lines.append("$\\EFMITTL\\mask_channel = 3")
+        elif translucency["mask"] == MASK_TEXTURE:
+            lines.append(
+                "Resource\\EFMITTL\\Mask = ref "
+                + self._get_merged_translucency_mask_resource(drawcall, translucency)
+            )
+            lines.append("$\\EFMITTL\\mask_channel = " + str(translucency["channel"]))
+        else:
+            alpha = ("%.3f" % float(translucency["alpha"])).rstrip("0").rstrip(".")
+            lines.append("$\\EFMITTL\\alpha = " + alpha)
+        lines.append("$\\EFMITTL\\count = " + str(drawcall.index_count))
+        lines.append("$\\EFMITTL\\first = " + str(drawcall.index_offset))
+        lines.append("run = CommandList\\EFMITTL\\Draw")
+        lines.append("; EFMI TTL: " + drawcall.get_drawindexed_str())
+        self.merged_translucent_draw_names.append(drawcall.obj_name)
+        return lines
+
+    def _append_merged_draw_lines(self, section, drawcalls, diffuse_resource=""):
+        if not any(drawcall.translucency for drawcall in drawcalls):
+            for line in M_IniHelper.get_drawindexed_str_list(drawcalls):
+                section.append(line)
+            return
+
+        # 与 M_IniHelper.get_drawindexed_str_list 相同的条件分组，只把半透明的绘制换成 EFMI TTL 调用。
+        condition_drawcalls = {}
+        for drawcall in drawcalls:
+            condition_drawcalls.setdefault(drawcall.get_condition_str(), []).append(drawcall)
+        for condition_str, condition_group in condition_drawcalls.items():
+            indent = "  " if condition_str else ""
+            if condition_str:
+                section.append("if " + condition_str)
+            for drawcall in condition_group:
+                display_name = str(drawcall.obj_name or getattr(drawcall, "display_name", "") or "")
+                section.append(
+                    indent + "; [mesh:" + display_name + "] [vertex_count:"
+                    + str(drawcall.vertex_count) + "]"
+                )
+                if drawcall.translucency:
+                    draw_lines = self._get_merged_translucent_draw_lines(
+                        drawcall, diffuse_resource
+                    )
+                else:
+                    draw_lines = [drawcall.get_drawindexed_str()]
+                for line in draw_lines:
+                    section.append(indent + line)
+            if condition_str:
+                section.append("endif")
+            section.append("")
 
     def _append_merged_incoming_cross_ib_draws(
         self,
         section,
         target_key,
+        diffuse_resource="",
     ):
         for source_key in self.cross_ib_target_info.get(target_key, []):
             source_submesh = self._find_source_submesh_by_ib_key(source_key)
@@ -1450,7 +1591,10 @@ class ExportEFMI:
             # 骨骼合并跨 IB 只替换几何。目标组件在本 CommandList
             # 前面已经完成贴图绑定；这里不写任何贴图行即可自然沿用，
             # 也避免重复生成目标贴图或错误恢复源 IB 贴图。
-            self._append_merged_draw_lines(section, incoming_drawcalls)
+            # 半透明遮罩因此也用目标组件的漫射贴图。
+            self._append_merged_draw_lines(
+                section, incoming_drawcalls, diffuse_resource
+            )
 
     @staticmethod
     def _merged_entrypoint_signature(source):
@@ -1638,6 +1782,8 @@ class ExportEFMI:
         command_lists.append("endif")
         command_lists.new_line()
 
+        self.merged_translucent_draw_names = []
+        self.merged_translucency_mask_textures = {}
         for component in active_components:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
@@ -1657,10 +1803,15 @@ class ExportEFMI:
                 command_lists.new_line()
                 continue
             current_key = "indexcount_" + str(component["index_count"])
+            diffuse_resource = ""
             if submesh is not None:
                 self._append_merged_buffer_bindings(command_lists, submesh)
                 self._append_merged_slot_texture_bindings(
                     command_lists,
+                    submesh,
+                    drawib_drawibmodel_dict.get(submesh.match_draw_ib),
+                )
+                diffuse_resource = self._get_merged_diffuse_resource_name(
                     submesh,
                     drawib_drawibmodel_dict.get(submesh.match_draw_ib),
                 )
@@ -1672,7 +1823,9 @@ class ExportEFMI:
                     )
                 else:
                     own_drawcalls = submesh.drawcall_model_list
-                self._append_merged_draw_lines(command_lists, own_drawcalls)
+                self._append_merged_draw_lines(
+                    command_lists, own_drawcalls, diffuse_resource
+                )
             else:
                 command_lists.append(
                     "; 蓝图中已删除该 GPU 组件：仅提供合并骨骼，不绑定或绘制网格"
@@ -1680,8 +1833,18 @@ class ExportEFMI:
             self._append_merged_incoming_cross_ib_draws(
                 command_lists,
                 current_key,
+                diffuse_resource,
             )
             command_lists.new_line()
+
+        if self.merged_translucent_draw_names:
+            # EFMI TTL 每次调用占一层，每帧最多 4 层；切换条件下互斥的绘制不会同时占用。
+            print(
+                "[EFMI TTL] 半透明绘制 " + str(len(self.merged_translucent_draw_names))
+                + " 处: " + ", ".join(self.merged_translucent_draw_names)
+            )
+            if len(self.merged_translucent_draw_names) > 4:
+                print("[EFMI TTL] 警告: 同时绘制的半透明部件超过 4 个时，第 5 个起与第 4 层共用。")
 
         command_lists.append("[CommandList_Component_DrawInstances]")
         command_lists.append("handling = skip")
@@ -1984,6 +2147,7 @@ class ExportEFMI:
                     )
                     texture_resources.new_line()
             ini_builder.append_section(texture_resources)
+        self._append_merged_translucency_mask_resources(ini_builder)
 
         mod_info = M_IniSection(M_SectionType.ResourceModInfo)
         mod_info.append("[ResourceModName]")
@@ -1998,6 +2162,7 @@ class ExportEFMI:
         for drawib_model in self.drawib_model_list:
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
         self._copy_merged_auto_texture_files()
+        self._copy_merged_translucency_mask_textures()
         GlobalKeyCountHelper.generated_mod_number = len(self.drawib_model_list)
         M_IniHelper.add_branch_key_sections(
             ini_builder=ini_builder,

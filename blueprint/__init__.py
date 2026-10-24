@@ -72,6 +72,7 @@ _MODULE_REGISTRY = [
     {"name": "nest_navigate", "required": False},
     {"name": "node_nest", "required": False},
     {"name": "node_cross_ib", "required": False},
+    {"name": "node_translucency", "required": False},
     {"name": "node_multifile_export", "required": False},
     {"name": "node_bone_palette_export", "required": False},
     {"name": "node_postprocess_base", "required": False},
