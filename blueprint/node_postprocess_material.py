@@ -946,10 +946,14 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
         if not stripped:
             return False
 
+        # EFMITTL 只认这三种贴图：Resource\EFMITTL\Mask 是半透明节点写的，不能当成材质行删掉。
         generated_prefixes = (
             "Resource\\RabbitFX\\",
             "Resource\\RabbitFx\\",
             "Resource\\ZZMI\\",
+            "Resource\\EFMITTL\\Diffuse",
+            "Resource\\EFMITTL\\LightMap",
+            "Resource\\EFMITTL\\NormalMap",
             "ps-t",
             "$\\RabbitFX\\brightness",
         )
@@ -957,6 +961,7 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             "run = CommandList\\RabbitFX\\SetTextures",
             "run = CommandList\\RabbitFx\\SetTextures",
             "run = CommandList\\ZZMI\\SetTextures",
+            "run = CommandList\\EFMITTL\\SetTextures",
             "run = CommandList\\RabbitFX\\Run",
         }
         return (
@@ -1032,16 +1037,19 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             
             new_lines_for_this_mesh = []
             generated_zzmi_style, generated_rabbitfx_style, generated_glowmap, generated_fxmap = False, False, False, False
+            generated_efmittl_style = False
             generated_ps_slots = set()
             is_pst_style = any(k.lower().startswith("ps-t") for k in ini_mapping.keys())
             is_zzmi_style = any(k.lower().startswith("resource\\zzmi\\") for k in ini_mapping.keys())
             is_rabbitfx_style = any(k.lower().startswith("resource\\rabbitfx\\") for k in ini_mapping.keys())
-            if is_pst_style or is_zzmi_style or is_rabbitfx_style:
+            is_efmittl_style = any(k.lower().startswith("resource\\efmittl\\") for k in ini_mapping.keys())
+            if is_pst_style or is_zzmi_style or is_rabbitfx_style or is_efmittl_style:
                 for param_name, texture_type in ini_mapping.items():
                     is_zzmi_param = param_name.lower().startswith("resource\\zzmi\\")
                     is_rabbitfx_param = param_name.lower().startswith("resource\\rabbitfx\\")
+                    is_efmittl_param = param_name.lower().startswith("resource\\efmittl\\")
 
-                    if not is_zzmi_param and not is_rabbitfx_param and not param_name.lower().startswith("ps-t"):
+                    if not is_zzmi_param and not is_rabbitfx_param and not is_efmittl_param and not param_name.lower().startswith("ps-t"):
                         continue
                     matching_materials = self.find_matching_materials(obj, texture_type)
                     if matching_materials:
@@ -1050,6 +1058,8 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
                             generated_zzmi_style = True
                         elif is_rabbitfx_param:
                             generated_rabbitfx_style = True
+                        elif is_efmittl_param:
+                            generated_efmittl_style = True
                         resource_name_provider = None
                         if param_name.lower().startswith("ps-t"):
                             resource_name_provider = lambda material, index: self._ps_texture_material_resource_name(material)
@@ -1101,6 +1111,7 @@ class SSMTNode_PostProcess_Material(SSMTNode_PostProcess_Base):
             
             if generated_zzmi_style: new_lines_for_this_mesh.append("run = CommandList\\ZZMI\\SetTextures")
             if generated_rabbitfx_style: new_lines_for_this_mesh.append("run = CommandList\\RabbitFX\\SetTextures")
+            if generated_efmittl_style: new_lines_for_this_mesh.append("run = CommandList\\EFMITTL\\SetTextures")
             new_lines_for_this_mesh.extend(fxmap_lines)
             lines[insert_index + 1:insert_index + 1] = new_lines_for_this_mesh
             reset_lines = []

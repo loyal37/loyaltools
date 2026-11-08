@@ -453,6 +453,7 @@ class SSMTNode_Result_Output(SSMTNodeBase):
 
         if GlobalConfig.logic_name == LogicName.EFMI:
             layout.prop(context.scene.global_properties, "use_rabbitfx_slot")
+            layout.prop(context.scene.global_properties, "use_efmittl_slot")
 
         from .export_helper import BlueprintExportHelper
         has_mod_panel_node = BlueprintExportHelper.has_mod_panel_node(tree=self.id_data)

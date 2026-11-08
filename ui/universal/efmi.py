@@ -36,6 +36,14 @@ import shutil
 import bpy
 import numpy
 
+# 漫射/光照/法线在 RabbitFX 与 EFMITTL 接口里的名字（Resource\<接口>\<名字>）。
+_INTERFACE_TEXTURE_ROLES = {
+    "DiffuseMap": "Diffuse",
+    "LightMap": "LightMap",
+    "NormalMap": "NormalMap",
+}
+
+
 @dataclass
 class ExportEFMI:
 
@@ -1292,29 +1300,39 @@ class ExportEFMI:
         texture_markup_info_list = self._get_merged_texture_binding_list(
             submesh_model, drawib_model
         )
-        self._append_merged_texture_binding_lines(
+        self._append_texture_binding_lines(
             section, texture_markup_info_list, indent=indent
         )
 
-    def _append_merged_texture_binding_lines(
+    def _append_texture_binding_lines(
         self, section, texture_markup_info_list, indent=""
     ):
-        if GlobalProterties.use_rabbitfx_slot():
+        # RabbitFX 和 EFMITTL 接口只接管这三种贴图，其余贴图仍写固定槽位。
+        if GlobalProterties.use_efmittl_slot():
+            interface = "EFMITTL"
+        elif GlobalProterties.use_rabbitfx_slot():
+            interface = "RabbitFx"
+        else:
+            interface = ""
+        if interface:
+            role_count = 0
             for texture_info in texture_markup_info_list:
                 if getattr(texture_info, "mark_type", "") != "Slot":
                     continue
-                resource_name = texture_info.get_resource_name()
-                if texture_info.mark_name == "DiffuseMap":
-                    section.append(indent + "Resource\\RabbitFx\\Diffuse = ref " + resource_name)
-                elif texture_info.mark_name == "LightMap":
-                    section.append(indent + "Resource\\RabbitFx\\LightMap = ref " + resource_name)
-                elif texture_info.mark_name == "NormalMap":
-                    section.append(indent + "Resource\\RabbitFx\\NormalMap = ref " + resource_name)
-            section.append(indent + "run = CommandList\\RabbitFx\\SetTextures")
+                role = _INTERFACE_TEXTURE_ROLES.get(texture_info.mark_name)
+                if role:
+                    section.append(
+                        indent + "Resource\\" + interface + "\\" + role
+                        + " = ref " + texture_info.get_resource_name()
+                    )
+                    role_count += 1
+            # RabbitFX 一直无条件调用；EFMITTL 没有这三种贴图时不调用。
+            if role_count or interface == "RabbitFx":
+                section.append(indent + "run = CommandList\\" + interface + "\\SetTextures")
             for texture_info in texture_markup_info_list:
                 if getattr(texture_info, "mark_type", "") != "Slot":
                     continue
-                if texture_info.mark_name in ("DiffuseMap", "LightMap", "NormalMap"):
+                if texture_info.mark_name in _INTERFACE_TEXTURE_ROLES:
                     continue
                 slot = texture_info.mark_slot
                 if slot and not slot.lower().startswith("ps-t"):
@@ -1793,7 +1811,7 @@ class ExportEFMI:
                 cpu_texture_bindings = self._get_merged_profile_texture_binding_list(
                     component
                 )
-                self._append_merged_texture_binding_lines(
+                self._append_texture_binding_lines(
                     command_lists, cpu_texture_bindings
                 )
                 command_lists.append(
@@ -2252,38 +2270,9 @@ class ExportEFMI:
 
             if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
                 texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
-                if GlobalProterties.use_rabbitfx_slot():
-                    for texture_markup_info in texture_markup_info_list:
-                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
-                            continue
-                        if texture_markup_info.mark_name == "DiffuseMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\Diffuse = ref " + texture_markup_info.get_resource_name())
-                        elif texture_markup_info.mark_name == "LightMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\LightMap = ref " + texture_markup_info.get_resource_name())
-                        elif texture_markup_info.mark_name == "NormalMap":
-                            texture_override_ib_section.append("Resource\\RabbitFx\\NormalMap = ref " + texture_markup_info.get_resource_name())
-                    
-                    texture_override_ib_section.append("run = CommandList\\RabbitFx\\SetTextures")
-                    
-                    for texture_markup_info in texture_markup_info_list:
-                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
-                            continue
-                        if texture_markup_info.mark_name in ["DiffuseMap", "LightMap", "NormalMap"]:
-                            pass
-                        else:
-                            slot = texture_markup_info.mark_slot
-                            if slot and not slot.lower().startswith("ps-t"):
-                                num_match = re.search(r'\d+', slot)
-                                if num_match:
-                                    slot = "ps-t" + num_match.group()
-                                else:
-                                    slot = "ps-t" + slot
-                            texture_override_ib_section.append(slot + " = " + texture_markup_info.get_resource_name())
-                else:
-                    for texture_markup_info in texture_markup_info_list:
-                        if getattr(texture_markup_info, "mark_type", "") != "Slot":
-                            continue
-                        texture_override_ib_section.append(texture_markup_info.mark_slot + " = " + texture_markup_info.get_resource_name())
+                self._append_texture_binding_lines(
+                    texture_override_ib_section, texture_markup_info_list
+                )
 
             is_both_source_and_target = is_source_ib and is_target_ib and self.has_cross_ib
 

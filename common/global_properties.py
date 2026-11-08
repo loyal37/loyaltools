@@ -91,6 +91,17 @@ def _update_parallel_preprocess_toggle(self, context):
         self.parallel_blender_executable = bpy.app.binary_path or ""
 
 
+# RabbitFX 槽位风格与 EFMITTL 动态槽位只能选一个。
+def _update_rabbitfx_slot(self, context):
+    if self.use_rabbitfx_slot and self.use_efmittl_slot:
+        self.use_efmittl_slot = False
+
+
+def _update_efmittl_slot(self, context):
+    if self.use_efmittl_slot and self.use_rabbitfx_slot:
+        self.use_rabbitfx_slot = False
+
+
 class GlobalProterties(bpy.types.PropertyGroup):
     object_swap_variable_counter: bpy.props.IntProperty(
         name="Object Swap Variable Counter",
@@ -159,6 +170,14 @@ class GlobalProterties(bpy.types.PropertyGroup):
         name="使用RabbitFX槽位风格",
         description="勾选后，使用RabbitFX槽位风格生成贴图相关ini部分",
         default=False,
+        update=_update_rabbitfx_slot,
+    ) # type: ignore
+
+    use_efmittl_slot: bpy.props.BoolProperty(
+        name="EFMITTL动态槽位",
+        description="勾选后，漫射/光照/法线贴图交给 EFMI TTL 库按着色器找槽位（需要 Mods 里装有 EFMITTL 0.5.4 及以上）",
+        default=False,
+        update=_update_efmittl_slot,
     ) # type: ignore
 
     recalculate_tangent: bpy.props.BoolProperty(
@@ -429,6 +448,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def use_rabbitfx_slot(cls):
         return cls._instance().use_rabbitfx_slot
+
+    @classmethod
+    def use_efmittl_slot(cls):
+        return cls._instance().use_efmittl_slot
 
     @classmethod
     def generate_branch_mod_gui(cls):
