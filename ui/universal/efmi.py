@@ -16,7 +16,9 @@ from ...utils.timer_utils import TimerUtils
 from ...common.efmi_merged_skeleton import (
     audit_exported_global_vgs,
     build_component_private_vg_remap,
+    build_lod_missing_bone_substitution,
     build_stale_pool_substitution,
+    compute_lod_bone_errors,
     format_id_ranges,
     load_profile,
     normalize_first_vertex,
@@ -850,6 +852,10 @@ class ExportEFMI:
                 submesh_model.unique_str, blend_values, active_mask,
                 drawing_component,
             )
+            lod_stand_in_channel_count = self._substitute_lod_stand_in_bones(
+                submesh_model.unique_str, blend_values, active_mask,
+                drawing_component,
+            )
 
             changed_channel_count = int(numpy.count_nonzero(
                 blend_values != original_values
@@ -865,6 +871,7 @@ class ExportEFMI:
                 "rewrite_map_by_component": applied_rewrite_maps,
                 "segment_count": len(segments),
                 "stale_pool_substituted_channel_count": substituted_channel_count,
+                "lod_stand_in_substituted_channel_count": lod_stand_in_channel_count,
             }
 
             self._audit_merged_exported_vgs(
@@ -904,6 +911,74 @@ class ExportEFMI:
             + format_id_ranges(substitution.keys()) + " 改读等价骨骼 "
             + format_id_ranges(substitution.values()) + "。"
         )
+        return changed
+
+    def _get_merged_lod_bone_errors(self):
+        """Per component and LoD level, how far each bone's remap source lies.
+
+        Computed once per export from the workspace and the LoD preview meshes.
+        Without them nothing can be checked and nothing is moved.
+        """
+        errors = getattr(self, "merged_lod_bone_errors", None)
+        if errors is None:
+            try:
+                errors = compute_lod_bone_errors(
+                    GlobalConfig.path_workspace_folder(),
+                    self.merged_skeleton_profile,
+                )
+            except Exception as exc:
+                print("[EFMI骨骼合并][警告] 无法核对远景骨骼来源: " + repr(exc))
+                errors = {}
+            self.merged_lod_bone_errors = errors
+        return errors
+
+    def _substitute_lod_stand_in_bones(
+        self, label, blend_values, active_mask, drawing_component
+    ):
+        """Move weighted bone ids whose pool reads a stand-in bone at distance.
+
+        A component's LoD table lists only the bones its own LoD mesh uses, so
+        a bone missing there is remapped to the nearest bone that is left.
+        When another component's LoD has the bone itself, the weights read
+        that component's slot instead: the same bone up close, the right one
+        at distance.  Returns the changed channel count.
+        """
+        channel_mask = (
+            active_mask if active_mask is not None
+            else numpy.ones(blend_values.shape, dtype=bool)
+        )
+        if not channel_mask.any():
+            return 0
+        lod_bone_errors = self._get_merged_lod_bone_errors()
+        if not lod_bone_errors:
+            return 0
+        substitution, unresolved = build_lod_missing_bone_substitution(
+            self.merged_skeleton_profile,
+            numpy.unique(blend_values[channel_mask]).tolist(),
+            drawing_component,
+            lod_bone_errors,
+        )
+        changed = 0
+        if substitution:
+            current_values = blend_values.copy()
+            for stand_in_id, target_id in substitution.items():
+                blend_values[channel_mask & (current_values == stand_in_id)] = target_id
+            changed = int(numpy.count_nonzero(blend_values != current_values))
+            print(
+                "[EFMI骨骼合并] 远景缺骨改读: " + label + "，"
+                + str(changed) + " 个 BLENDINDICES 通道的骨骼 "
+                + format_id_ranges(substitution.keys())
+                + " 在所属组件的 LOD 里没有，改读其他组件的同一骨骼 "
+                + format_id_ranges(substitution.values()) + "。"
+            )
+        if unresolved:
+            farthest = max(unresolved.values())
+            print(
+                "[EFMI骨骼合并][警告] " + label + ": 骨骼 "
+                + format_id_ranges(unresolved.keys())
+                + " 在远景只能由附近的骨骼代替（最远约 "
+                + str(round(farthest * 100)) + " cm），没有其他组件的 LOD 提供。"
+            )
         return changed
 
     def _audit_merged_exported_vgs(

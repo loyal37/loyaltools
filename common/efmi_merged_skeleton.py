@@ -883,6 +883,307 @@ def build_stale_pool_substitution(
     return substitution
 
 
+# ---------------------------------------------------------------------------
+# Bones that a component's LoD skeleton does not list.
+#
+# A LoD draw supplies only the bones its own simplified mesh uses, so a
+# component's LoD table can lack bones of its full skeleton (the forearms of a
+# skin part, say) while another component's LoD table still has them.  The LoD
+# remap must give every full bone some source, and the matcher picks the
+# nearest bone that is left, which can lie a long way off.  The game's own LoD
+# mesh never uses such a bone, but a mod mesh weighted to it follows the wrong
+# bone at distance.  EFMI imports a component's bones only from that
+# component's own draw, so the remap cannot borrow from another component;
+# the exported weights can, by reading the same bone from that component's
+# pool (equal matrices at LoD 0 by the deduplication contract).
+# ---------------------------------------------------------------------------
+
+# A remap whose source lies farther than this from the bone (rest-pose
+# centroid of the vertices on each side, in model units: metres in Endfield)
+# reads a stand-in bone.  Real matches measured within ~4 cm, stand-ins ~30 cm.
+LOD_BONE_STAND_IN_DISTANCE = 0.05
+# Another component's source must be at least this many times closer.
+LOD_BONE_STAND_IN_RATIO = 3.0
+
+_FORMAT_COMPONENT_DTYPES = {
+    ("FLOAT", 32): "<f4",
+    ("FLOAT", 16): "<f2",
+    ("UNORM", 8): "u1",
+    ("UNORM", 16): "<u2",
+    ("UINT", 8): "u1",
+    ("UINT", 16): "<u2",
+    ("UINT", 32): "<u4",
+}
+
+
+def _decode_vertex_element(rows, offset: int, element: dict):
+    """Decode one element of a workspace category buffer, or None if unreadable."""
+    import re
+    import numpy
+
+    fmt = str(element.get("Format", "")).upper()
+    match = re.fullmatch(r"((?:[RGBA]\d+)+)_(FLOAT|UNORM|UINT)", fmt)
+    if not match:
+        return None
+    bits = [int(value) for value in re.findall(r"\d+", match.group(1))]
+    dtype = _FORMAT_COMPONENT_DTYPES.get((match.group(2), bits[0]))
+    width = int(element.get("ByteWidth", 0))
+    if dtype is None or len(set(bits)) != 1 or width != len(bits) * bits[0] // 8:
+        return None
+    raw = numpy.ascontiguousarray(rows[:, offset:offset + width])
+    values = raw.view(numpy.dtype(dtype)).reshape(len(rows), len(bits))
+    if match.group(2) == "UINT":
+        return values.astype(numpy.int64)
+    values = values.astype(numpy.float64)
+    if match.group(2) == "UNORM":
+        values /= float((1 << bits[0]) - 1)
+    return values
+
+
+def read_workspace_skin(workspace_folder: str, unique_str: str):
+    """Rest-pose positions, local bone ids and weights of one extracted mesh.
+
+    Reads ``<workspace_folder>/<unique_str>/TYPE_*/<unique_str>.json`` and its
+    category buffers, as both the main workspace and a LoD preview workspace
+    store them.  Returns ``(positions, indices, weights)`` or ``None`` when the
+    mesh is not there or uses a layout this check does not read.
+    """
+    import numpy
+
+    mesh_folder = os.path.join(str(workspace_folder), str(unique_str))
+    if not os.path.isdir(mesh_folder):
+        return None
+    type_folders = sorted(
+        name for name in os.listdir(mesh_folder) if name.startswith("TYPE_")
+    )
+    type_folders.sort(key=lambda name: name != "TYPE_GPU-EFMI")
+    for type_folder in type_folders:
+        folder = os.path.join(mesh_folder, type_folder)
+        try:
+            with open(
+                os.path.join(folder, str(unique_str) + ".json"), "r", encoding="utf-8"
+            ) as file:
+                metadata = json.load(file)
+        except (OSError, ValueError):
+            continue
+
+        found = {}
+        for category_buffer in metadata.get("CategoryBufferList", []):
+            elements = category_buffer.get("D3D11ElementList", [])
+            stride = sum(int(element.get("ByteWidth", 0)) for element in elements)
+            offset = 0
+            for element in elements:
+                name = str(element.get("SemanticName", "")).upper()
+                if name == "BLENDWEIGHT":
+                    name = "BLENDWEIGHTS"
+                if (
+                    int(element.get("SemanticIndex", 0)) == 0
+                    and name in ("POSITION", "BLENDWEIGHTS", "BLENDINDICES")
+                    and name not in found
+                ):
+                    found[name] = (category_buffer.get("FileName", ""), stride, offset, element)
+                offset += int(element.get("ByteWidth", 0))
+        if "POSITION" not in found or "BLENDINDICES" not in found:
+            continue
+
+        decoded = {}
+        for name, (file_name, stride, offset, element) in found.items():
+            try:
+                data = numpy.fromfile(os.path.join(folder, file_name), dtype=numpy.uint8)
+            except OSError:
+                data = None
+            if data is None or stride <= 0 or data.size % stride:
+                break
+            values = _decode_vertex_element(data.reshape(-1, stride), offset, element)
+            if values is None:
+                break
+            decoded[name] = values
+        else:
+            positions = decoded["POSITION"][:, :3]
+            indices = decoded["BLENDINDICES"]
+            weights = decoded.get("BLENDWEIGHTS")
+            if weights is None:
+                weights = numpy.zeros(indices.shape, dtype=numpy.float64)
+                weights[:, 0] = 1.0
+            if not (len(positions) == len(indices) == len(weights)):
+                continue
+            if weights.shape[1] != indices.shape[1]:
+                continue
+            return positions, indices, weights
+    return None
+
+
+def _bone_centroids(skin, count: int):
+    """Weighted rest-pose centroid of each local bone's vertices (NaN if none)."""
+    import numpy
+
+    positions, indices, weights = skin
+    count = max(int(count), int(indices.max()) + 1 if indices.size else 0)
+    accumulated = numpy.zeros((count, 3), dtype=numpy.float64)
+    totals = numpy.zeros(count, dtype=numpy.float64)
+    for channel in range(indices.shape[1]):
+        ids = indices[:, channel]
+        channel_weights = weights[:, channel]
+        mask = (channel_weights > 0) & (ids >= 0)
+        numpy.add.at(accumulated, ids[mask], positions[mask] * channel_weights[mask, None])
+        numpy.add.at(totals, ids[mask], channel_weights[mask])
+    centroids = numpy.full((count, 3), numpy.nan, dtype=numpy.float64)
+    present = totals > 0
+    centroids[present] = accumulated[present] / totals[present, None]
+    return centroids
+
+
+def _lod_preview_folder(workspace_folder: str, profile: dict, object_name: str) -> str:
+    recorded = profile.get("lod_preview_workspaces", {}).get(object_name, "")
+    if recorded:
+        return recorded if os.path.isabs(recorded) else os.path.join(
+            str(workspace_folder), recorded
+        )
+    # Same folder name as DumpWorkspaceExtractor.get_lod_preview_workspace_folder.
+    import re
+
+    token = re.sub(r"[^0-9A-Za-z._ -]+", "_", str(object_name or "LOD")).strip(" .")
+    if not token or token in (".", ".."):
+        token = "LOD"
+    return os.path.join(str(workspace_folder), "LODPreview", token)
+
+
+def compute_lod_bone_errors(workspace_folder: str, profile: dict) -> dict:
+    """How far each component's LoD remap source lies from the bone itself.
+
+    Returns ``{component_id: {lod_level: [distance or None per local VG]}}``
+    for GPU components at every LoD level that has an independent entry.  The
+    distance compares the rest-pose weighted centroid of the full mesh's
+    vertices on a local VG with that of the LoD mesh's vertices on the LoD VG
+    the remap reads (unlisted VGs read the same id, as in EFMI).  An empty
+    ``vg_map`` means the LoD uses the full skeleton, so every distance is 0.
+    ``None`` marks a VG that cannot be checked: no vertices on one side, or
+    the mesh is not in the workspace (the LoD side is read from the preview
+    workspace that LoD mapping writes).
+    """
+    full_skins: dict[str, object] = {}
+    lod_skins: dict[tuple[str, str], object] = {}
+    errors: dict[int, dict[int, list]] = {}
+    for component in profile.get("components", []):
+        if component.get("cpu_posed", False):
+            continue
+        component_id = int(component["component_id"])
+        vg_count = int(component.get("vg_count", 0))
+        for level, lod in enumerate(component.get("lods", []), start=1):
+            if lod.get("is_fallback", False):
+                continue
+            vg_map = {
+                int(local): int(source)
+                for local, source in (lod.get("vg_map") or {}).items()
+            }
+            if not vg_map:
+                errors.setdefault(component_id, {})[level] = [0.0] * vg_count
+                continue
+
+            unique_str = component["unique_str"]
+            if unique_str not in full_skins:
+                full_skins[unique_str] = read_workspace_skin(workspace_folder, unique_str)
+            object_name = str(lod.get("lod_object_name", ""))
+            lod_key = (object_name, str(lod.get("unique_str", "")))
+            if lod_key not in lod_skins:
+                lod_skins[lod_key] = read_workspace_skin(
+                    _lod_preview_folder(workspace_folder, profile, object_name),
+                    lod_key[1],
+                )
+            full_skin, lod_skin = full_skins[unique_str], lod_skins[lod_key]
+            if full_skin is None or lod_skin is None:
+                errors.setdefault(component_id, {})[level] = [None] * vg_count
+                continue
+
+            full_centroids = _bone_centroids(full_skin, vg_count)
+            lod_centroids = _bone_centroids(
+                lod_skin, max(vg_map.values(), default=0) + 1
+            )
+            level_errors = []
+            for local_id in range(vg_count):
+                source_id = vg_map.get(local_id, local_id)
+                if source_id >= len(lod_centroids):
+                    level_errors.append(None)
+                    continue
+                difference = full_centroids[local_id] - lod_centroids[source_id]
+                distance = float((difference ** 2).sum() ** 0.5)
+                level_errors.append(None if distance != distance else distance)
+            errors.setdefault(component_id, {})[level] = level_errors
+    return errors
+
+
+def build_lod_missing_bone_substitution(
+    profile: dict,
+    used_global_ids,
+    drawing_component: dict | None,
+    lod_bone_errors: dict,
+) -> tuple[dict[int, int], dict[int, float]]:
+    """Redirect bone ids whose pool reads a stand-in bone at a visible LoD.
+
+    For every used id whose own pool is refreshed but reads a bone farther
+    than ``LOD_BONE_STAND_IN_DISTANCE`` away at some level where the draw is
+    visible, the same canonical bone is looked up in the other refreshed
+    pools (``vg_map`` of every component); the closest one is used when it is
+    at least ``LOD_BONE_STAND_IN_RATIO`` times closer.  Pools that are not
+    refreshed at all are left to ``build_stale_pool_substitution``.
+
+    Returns ``(substitution, unresolved)``: ``{id: new_id}`` and
+    ``{id: distance}`` for stand-ins no other pool improves.
+    """
+    draw_levels = component_draw_levels(profile, drawing_component)
+    if not draw_levels or not lod_bone_errors:
+        return {}, {}
+
+    def worst_distance(component: dict, local_id: int):
+        per_level = lod_bone_errors.get(int(component["component_id"]), {})
+        worst = 0.0
+        for level in draw_levels:
+            level_errors = per_level.get(level)
+            if level_errors is None or local_id >= len(level_errors):
+                return None
+            if level_errors[local_id] is None:
+                return None
+            worst = max(worst, float(level_errors[local_id]))
+        return worst
+
+    suppliers: dict[int, list[tuple[dict, int]]] = {}
+    for component in profile.get("components", []):
+        if not _pool_refreshed_at(component, draw_levels):
+            continue
+        vg_map = normalize_vg_map(component.get("vg_map", {}), "component.vg_map")
+        for local_id, bone in vg_map.items():
+            suppliers.setdefault(int(bone), []).append((component, int(local_id)))
+
+    substitution: dict[int, int] = {}
+    unresolved: dict[int, float] = {}
+    for slot in sorted({int(value) for value in used_global_ids}):
+        owner = find_component_owning_global_vg(profile, slot)
+        if owner is None or not _pool_refreshed_at(owner, draw_levels):
+            continue
+        local_id = slot - int(owner.get("vg_offset", 0))
+        owner_distance = worst_distance(owner, local_id)
+        if owner_distance is None or owner_distance <= LOD_BONE_STAND_IN_DISTANCE:
+            continue
+        owner_map = normalize_vg_map(owner.get("vg_map", {}), "component.vg_map")
+        bone = int(owner_map.get(str(local_id), slot))
+
+        best = None
+        for component, candidate_local in suppliers.get(bone, []):
+            if component is owner and candidate_local == local_id:
+                continue
+            distance = worst_distance(component, candidate_local)
+            if distance is None:
+                continue
+            candidate = (distance, int(component.get("vg_offset", 0)) + candidate_local)
+            if best is None or candidate < best:
+                best = candidate
+        if best is not None and best[0] * LOD_BONE_STAND_IN_RATIO < owner_distance:
+            substitution[slot] = best[1]
+        else:
+            unresolved[slot] = owner_distance
+    return substitution, unresolved
+
+
 def audit_exported_global_vgs(
     profile: dict,
     used_global_ids,
