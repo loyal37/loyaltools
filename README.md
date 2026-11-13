@@ -129,6 +129,14 @@ The node also offers an experimental same-frame skinning option, which removes t
 
 Same-frame skinning also supports several copies of the character on screen at once (up to eight). The game skins the copies' components interleaved, and nothing in a skinning draw tells them apart except the buffer it writes to, so every such buffer gets its own slot for the bones, and each component records where its root is when it is drawn. When a copy of a merged part is drawn, it is matched with the instance of every other component whose shared bones are at the same place in the world, and it is skinned with those bones into a buffer of its own. A copy keeps the instances it was matched with, so another copy never takes them. A copy that cannot be told apart from another yet is hidden for a frame instead of being drawn with another copy's bones. Same-frame skinning relies on features of the current XXMI loader (resource pools, resource identity, constant buffer regions and `FRAME_NUMBER`); with an older 3DMigoto build the option does not work, while exports without it are unaffected.
 
+### Translucency for Zenless Zone Zero
+
+Starting with v1.7.9, connect an object through the **Translucency** blueprint node before **Generate Mod**. ZZMI exports use the `TTL` API from TTLib 2.3.0 in `ZZMI/Core/ZZMI/Libraries/TTLib`; the library must be enabled in ZZMI and is not bundled in the generated mod. Standard character exports, Cross IB, and Merged Skeleton exports (including uniform one-frame delay and same-frame skinning) use the same node.
+
+With no channel selected, **Opacity** controls the whole object. R/G/B read an external mask texture, which is copied into `Textures/`; A reads the exported drawing component's Slot-marked `DiffuseMap` (the target component for Cross IB). A requires automatic texture bindings to be enabled. Selecting a channel disables the opacity slider: black is transparent and white is opaque, matching the Endfield node. The exporter translates this to TTLib with `mask_invert = 1` and `alpha = 1`, then clears the mask resource and draw arguments after each call. Existing mask files in the output folder are preserved on re-export.
+
+Merged Skeleton face components that retain the game's shape-keyed mesh do not support this node; export reports an error if one is connected. Extraction/export regression tests cover the node and skinning modes, but in-game appearance, depth occlusion, and character-screen compositing still require verification with TTLib enabled.
+
 ## Notes
 
 - **Do not enable LoyalTools and TheHerta4 at the same time.** They share many internal operator, panel, and node identifiers, which causes registration conflicts.

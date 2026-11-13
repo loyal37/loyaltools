@@ -25,7 +25,7 @@ def _keep_one_channel(prop_name):
 
 
 class SSMTNode_Translucency(SSMTNodeBase):
-    '''用 EFMI TTL 半透明库绘制连到它的物体（仅 EFMI 骨骼合并导出）'''
+    '''用游戏对应的 TTL 库绘制连到它的物体（EFMI 骨骼合并 / ZZMI）'''
     bl_idname = 'SSMTNode_Translucency'
     bl_label = '半透明'
     bl_icon = 'MOD_OPACITY'

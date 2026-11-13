@@ -10,6 +10,7 @@ from ...common.m_ini_helper_gui import M_IniHelperGUI
 from ...common.m_ini_builder import M_IniBuilder, M_IniSection, M_SectionType
 from .unity import ExportUnity
 from .zzmi_merged_export import ZZMIMergedSkeletonExport
+from .zzmi_translucency import ZZMITranslucency
 from ...common.zzmi_outline import compute_outline_texcoord
 from ...extract.zzmi_dump_extractor import FRAME_EXTRACT_KEY
 from ...utils.timer_utils import TimerUtils
@@ -54,6 +55,12 @@ class ExportZZMI(ExportUnity):
 
         # 骨骼合并 (由提取时写入的蓝图/物体标记自动启用，普通工作空间不受影响)
         self.merged_skeleton = ZZMIMergedSkeletonExport(blueprint_model, self.drawib_model_list)
+        self.translucency = ZZMITranslucency()
+        for drawib_model in self.drawib_model_list:
+            if self.merged_skeleton.is_shape_keyed(drawib_model.draw_ib):
+                if any(drawcall.translucency for submesh in drawib_model.submesh_model_list
+                       for drawcall in submesh.drawcall_model_list):
+                    raise ValueError("ZZMI 半透明节点不支持保留游戏原网格的形态键部件（脸部）: " + drawib_model.draw_ib)
 
     def _get_submesh_ib_key(self, submesh_model, draw_ib):
         return f"{draw_ib}_{submesh_model.match_first_index}"
@@ -277,6 +284,11 @@ class ExportZZMI(ExportUnity):
             texture_override_ib_section.append("ib = " + ib_resource_name)
 
             texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
+            diffuse_resource = ""
+            if not GlobalProterties.forbid_auto_texture_ini():
+                for texture_markup_info in texture_markup_info_list:
+                    if texture_markup_info.mark_type == "Slot" and texture_markup_info.mark_name == ZZMITextureMarkName.DiffuseMap:
+                        diffuse_resource = texture_markup_info.get_resource_name()
             if not GlobalProterties.forbid_auto_texture_ini() and texture_markup_info_list:
                 uses_slot_fix = False
 
@@ -323,17 +335,19 @@ class ExportZZMI(ExportUnity):
 
                 print(f"[CrossIB ZZMI] 源块绘制非跨IB物体: {len(non_cross_ib_drawcalls)} 个")
 
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                for drawindexed_str in self.translucency.draw_lines(
                     non_cross_ib_drawcalls,
                     obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+                    diffuse_resource=diffuse_resource,
                 ):
                     texture_override_ib_section.append(drawindexed_str)
             else:
                 print(f"[CrossIB ZZMI] 非源块绘制物体: {len(submesh_model.drawcall_model_list)} 个")
 
-                for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                for drawindexed_str in self.translucency.draw_lines(
                     submesh_model.drawcall_model_list,
                     obj_name_draw_offset_dict=drawib_model.obj_name_draw_offset,
+                    diffuse_resource=diffuse_resource,
                 ):
                     texture_override_ib_section.append(drawindexed_str)
 
@@ -380,9 +394,10 @@ class ExportZZMI(ExportUnity):
                         print(f"[CrossIB ZZMI] 跨IB物体数量: {len(cross_ib_drawcalls)}")
 
                         if cross_ib_drawcalls:
-                            for drawindexed_str in M_IniHelper.get_drawindexed_str_list(
+                            for drawindexed_str in self.translucency.draw_lines(
                                 cross_ib_drawcalls,
                                 obj_name_draw_offset_dict=source_drawib_model.obj_name_draw_offset,
+                                diffuse_resource=diffuse_resource,
                             ):
                                 texture_override_ib_section.append(drawindexed_str)
                     else:
@@ -484,6 +499,8 @@ class ExportZZMI(ExportUnity):
             M_IniHelper.move_slot_style_textures(draw_ib_model=drawib_model)
             GlobalKeyCountHelper.generated_mod_number = GlobalKeyCountHelper.generated_mod_number + 1
 
+        self.translucency.append_resources(ini_builder)
+        self.translucency.copy_textures()
         self.merged_skeleton.add_runtime_sections(ini_builder)
         self.merged_skeleton.write_shaders(GlobalConfig.path_generate_mod_folder())
 
