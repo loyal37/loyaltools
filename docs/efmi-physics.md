@@ -148,3 +148,10 @@ files are limited to registration, optional export-plan plumbing, original-bone
 audit masking, per-draw fallback binding, and managed preview modifier handling.
 The feature does not install anything into a running game, rewrite captured
 workspace profiles, or change existing extraction and texture workflows.
+
+## Contributors
+
+Contributors to this feature:
+
+- [Hajimicat-1](https://github.com/Hajimicat-1): feature specification, workflow design, in-game testing, and validation.
+- ChatGPT (OpenAI): AI-assisted implementation, debugging, regression testing, and technical review.
