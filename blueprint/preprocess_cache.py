@@ -9,6 +9,7 @@ import tempfile
 import shutil
 
 from ..common.global_properties import GlobalProterties
+from ..common.global_config import GlobalConfig
 from ..utils.log_utils import LOG
 from ..common.object_prefix_helper import ObjectPrefixHelper
 
@@ -383,6 +384,17 @@ class PreProcessCache:
             hasher.update(constraint.type.encode('utf-8'))
             hasher.update(constraint.name.encode('utf-8'))
             cls._hash_rna_properties(hasher, constraint)
+
+        # The optional physics preview rig is stripped from enabled EFMI export
+        # copies. Keep that cache distinct from the legacy (modifier-baked)
+        # path without changing keys for disabled or unregistered objects.
+        settings = getattr(bpy.context.scene, 'loyaltools_efmi_physics', None)
+        if settings is not None and settings.enabled and GlobalConfig.logic_name == 'EFMI':
+            from ..efmi_physics.rig import managed_physics_entry
+            if any(modifier.type == 'ARMATURE' and getattr(modifier, 'object', None) is not None
+                   and managed_physics_entry(bpy.context.scene, obj, getattr(modifier, 'object', None)) is not None
+                   for modifier in obj.modifiers):
+                hasher.update(b'EFMI_PHYSICS_MANAGED_PREVIEW_STRIP_V2')
 
         return hasher.hexdigest()
 
