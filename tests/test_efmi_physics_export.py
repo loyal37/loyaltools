@@ -100,6 +100,48 @@ def prefixed_records():
 
 
 class ExportRegressionTests(unittest.TestCase):
+    def test_anchor_resolution_updates_runtime_and_fallback_not_authoring(self):
+        p = profile()
+        p['components'][0]['lods'][0]['is_fallback'] = True
+        rec = records()
+        original = copy.deepcopy(rec)
+        plan = physics.prepare_physics_plan(rec, p)
+        physics.resolve_plan_anchors(plan, p, {'meshA': [p['components'][1]], 'meshB': [p['components'][1]]},
+                                     {1: {1: [0.0, 0.0, 0.0]}}, merged.resolve_physics_anchor)
+        self.assertEqual(plan['chains'][0]['anchor'], 3)
+        self.assertEqual(plan['chains'][0]['component_id'], 1)
+        self.assertEqual(plan['chains'][0]['follow_group_id'], 0)
+        self.assertEqual(plan['bones'][0]['parent_global_id'], 3)
+        self.assertEqual(plan['chains'][1]['anchor'], 4)
+        self.assertEqual(rec, original)
+        raw = np.array([[6, 7, 8, 0]], dtype=np.uint16).view(np.uint8).ravel()
+        fallback = physics.build_anchor_fallback_buffers({'Blend': raw}, blend_type(), plan)['Blend']
+        np.testing.assert_array_equal(fallback.view(np.uint16), [3, 3, 4, 0])
+        np.testing.assert_array_equal(raw.view(np.uint16), [6, 7, 8, 0])
+
+    def test_anchor_missing_bone_uses_same_canonical_bone(self):
+        p = profile()
+        errors = {0: {1: [0.28, 0.0, 0.0]}, 1: {1: [0.008, 0.0, 0.0]}}
+        self.assertEqual(merged.resolve_physics_anchor(p, 0, [p['components'][0]], errors), (3, 1, []))
+        self.assertEqual(merged.resolve_physics_anchor(p, 1, [p['components'][0]], errors), (1, 0, []))
+        errors[1][1][0] = 0.2
+        with self.assertRaisesRegex(ValueError, '可靠'):
+            merged.resolve_physics_anchor(p, 0, [p['components'][0]], errors)
+
+    def test_anchor_checks_union_of_consumers_and_rejects_stale_without_equivalent(self):
+        p = profile()
+        p['components'][0]['lods'][0]['is_fallback'] = True
+        errors = {1: {1: [0.0] * 3}}
+        self.assertEqual(merged.resolve_physics_anchor(p, 0, [p['components'][0]], errors), (0, 0, []))
+        self.assertEqual(merged.resolve_physics_anchor(p, 0, p['components'], errors), (3, 1, []))
+        p['components'][1]['vg_map']['0'] = 99
+        with self.assertRaisesRegex(ValueError, '等价骨骼池'):
+            merged.resolve_physics_anchor(p, 0, p['components'], errors)
+
+    def test_anchor_missing_evidence_is_reported_not_guessed(self):
+        p = profile()
+        self.assertEqual(merged.resolve_physics_anchor(p, 0, p['components'], {}), (0, 0, [1]))
+
     def test_disabled_and_empty_are_exact_noops(self):
         values = np.array([[7, 3, 0, 0]], dtype=np.uint16)
         buffers = {"Blend": values.view(np.uint8).ravel()}

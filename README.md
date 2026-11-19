@@ -9,6 +9,8 @@ LoyalTools is based on **TheHerta4** and integrates the Frame Analysis parsing c
 
 ## Optional EFMI physics bones
 
+Starting with v1.7.10, physics anchors use an equivalent native bone provider that remains available at every LOD required by their exported meshes. The exporter applies the existing stale-pool and missing-LOD-bone corrections to the anchor, its update source and fallback weights together. Blender follow groups and painted weights stay unchanged. A known unsafe anchor without a reliable replacement stops export; missing LOD verification data produces a warning. Regenerate existing physics mods to apply the correction.
+
 The EFMI Merged Skeleton workflow includes an optional **EFMI Physics Bones** panel for
 editable armature chains, dedicated prefixed weight groups, and character-wide
 physical-bone export across IBs and LoDs. Original merged weights must be prepared

@@ -23,6 +23,7 @@ from ...common.efmi_merged_skeleton import (
     load_profile,
     normalize_first_vertex,
     resolve_weight_owner_component,
+    resolve_physics_anchor,
 )
 from ...common.object_prefix_helper import ObjectPrefixHelper
 from ...common.efmi_merged_texture import (
@@ -34,6 +35,7 @@ from ...common.efmi_physics_export import (
     base_bone_mask,
     build_anchor_fallback_buffers,
     prepare_physics_plan,
+    resolve_plan_anchors,
     reject_disabled_physics_weights,
     runtime_profile,
     serialize_authoring_records,
@@ -231,6 +233,18 @@ class ExportEFMI:
                 "global_to_palette": {}, "meshes": [],
             })
             if self.efmi_physics_plan:
+                components_by_unique = {
+                    c["unique_str"]: c for c in self.merged_skeleton_profile["components"]
+                }
+                object_components = {}
+                for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list:
+                    object_components.setdefault(drawcall.get_blender_obj_name(), []).append(
+                        components_by_unique.get(drawcall.get_unique_str())
+                    )
+                resolve_plan_anchors(
+                    self.efmi_physics_plan, self.merged_skeleton_profile,
+                    object_components, self._get_merged_lod_bone_errors(), resolve_physics_anchor,
+                )
                 self.efmi_physics_runtime = build_physics_runtime(
                     self.efmi_physics_plan, runtime_profile(self.merged_skeleton_profile),
                 )

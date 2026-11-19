@@ -1184,6 +1184,45 @@ def build_lod_missing_bone_substitution(
     return substitution, unresolved
 
 
+def resolve_physics_anchor(profile, anchor, drawing_components, lod_bone_errors):
+    """Resolve one export-only anchor for the union of all consuming draws.
+
+    Reuse native weight corrections, but reject known unsafe anchors instead
+    of letting physics latch a stale matrix indefinitely. Unknown centroid
+    evidence is reported explicitly; it is not evidence of a missing bone.
+    """
+    levels = set()
+    for component in drawing_components or [None]:
+        levels.update(component_draw_levels(profile, component))
+    scope = {"component_id": -1, "cpu_posed": False, "lods": [
+        {"is_fallback": level not in levels}
+        for level in range(1, int(profile.get("max_lod_count", 0)) + 1)
+    ]}
+    original = int(anchor)
+    replacement = build_stale_pool_substitution(profile, [original], scope)
+    anchor = replacement.get(original, original)
+    owner = find_component_owning_global_vg(profile, anchor)
+    if owner is None or not _pool_refreshed_at(owner, levels):
+        raise ValueError(f"EFMI 物理导出: 挂点 {original} 没有覆盖所需 LOD 的等价骨骼池。")
+    replacement, unresolved = build_lod_missing_bone_substitution(
+        profile, [anchor], scope, lod_bone_errors,
+    )
+    if unresolved:
+        raise ValueError(f"EFMI 物理导出: 挂点 {original} 的远景骨是替代骨，找不到可靠的等价挂点。")
+    anchor = replacement.get(anchor, anchor)
+    owner = find_component_owning_global_vg(profile, anchor)
+    local = anchor - int(owner["vg_offset"])
+    unknown = []
+    for level in sorted(levels):
+        distances = lod_bone_errors.get(int(owner["component_id"]), {}).get(level, [])
+        distance = distances[local] if local < len(distances) else None
+        if distance is None:
+            unknown.append(level)
+        elif distance > LOD_BONE_STAND_IN_DISTANCE:
+            raise ValueError(f"EFMI 物理导出: 挂点 {original} 的候选骨 {anchor} 仍缺少可靠的 LOD{level} 来源。")
+    return anchor, int(owner["component_id"]), unknown
+
+
 def audit_exported_global_vgs(
     profile: dict,
     used_global_ids,

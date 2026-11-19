@@ -150,6 +150,36 @@ def prepare_physics_plan(records, profile, *, mirror_x=False):
     return result
 
 
+def resolve_plan_anchors(plan, profile, object_components, lod_bone_errors, resolver):
+    """Change only the export plan; preserve authoring IDs, groups and rest pose.
+
+    A chain can be consumed by multiple meshes and multiple blueprint draws.
+    All of those draws constrain its one stable runtime provider.
+    """
+    by_id = {int(bone["global_id"]): bone for bone in plan["bones"]}
+    for chain in plan["chains"]:
+        segment_ids = set(chain["segments"])
+        consumers = []
+        for mesh in plan["meshes"]:
+            active = set(mesh.get("active_group_names", mesh.get("vg_mapping", {})))
+            if not any(name in active and int(value) in segment_ids
+                       for name, value in mesh.get("vg_mapping", {}).items()):
+                continue
+            names = [mesh["object_name"], *mesh.get("export_object_names", [])]
+            for name in names:
+                consumers.extend(object_components.get(name, [None]))
+        original = int(chain["anchor"])
+        anchor, component_id, unknown = resolver(profile, original, consumers, lod_bone_errors)
+        chain["authoring_anchor"] = original
+        chain["anchor"] = anchor
+        chain["component_id"] = component_id
+        by_id[chain["segments"][0]]["parent_global_id"] = anchor
+        if anchor != original:
+            print(f"[EFMI物理] 链 {chain['chain_id']}: 挂点 {original} → {anchor}，更新来源组件 {component_id}。")
+        if unknown:
+            print(f"[EFMI物理][警告] 链 {chain['chain_id']}: 挂点 {anchor} 缺少 LOD {unknown} 的骨骼核对数据，请补全 LOD 预览后验证。")
+
+
 def validate_object_weights(objects, plan):
     """Reject unknown weighted groups, including unmanaged copies carrying custom IDs."""
     base = plan["base_bone_count"]
