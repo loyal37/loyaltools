@@ -29,6 +29,7 @@ class ExportHelper:
         blueprint_model:BluePrintModel,
         efmi_merged_skeleton:bool = False,
         efmi_merged_skeleton_unique_strs:set[str] | None = None,
+        efmi_physics_plan:dict | None = None,
     ) -> list[SubMeshModel]:
         '''
         从蓝图中解析出一个Submesh Model列表
@@ -74,6 +75,7 @@ class ExportHelper:
                 source_obj_unique_str_count=source_obj_unique_str_count,
                 has_multi_file_export_nodes=has_multi_file_export_nodes,
                 efmi_merged_skeleton=widen_blendindices,
+                efmi_physics_plan=efmi_physics_plan,
             )
             submesh_model_list.append(submesh_model)
         

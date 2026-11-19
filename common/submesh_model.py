@@ -33,6 +33,7 @@ class SubMeshModel:
     source_obj_unique_str_count:dict[str, int] = field(default_factory=dict, repr=False)
     has_multi_file_export_nodes:bool = False
     efmi_merged_skeleton:bool = False
+    efmi_physics_plan:dict | None = field(default=None, repr=False)
 
     # post_init中计算得到这些属性
     match_draw_ib:str = field(init=False, default="")
@@ -287,6 +288,14 @@ class SubMeshModel:
         )
         self.ib = obj_buffer_result.ib
         self.category_buffer_dict = obj_buffer_result.category_buffer_dict
+        if self.efmi_physics_plan:
+            from .efmi_physics_export import remap_joined_vertex_groups
+            remap_joined_vertex_groups(
+                self.category_buffer_dict, self.d3d11_game_type,
+                submesh_merged_obj.vertex_groups, self.efmi_physics_plan,
+                active_group_indices={int(group.group) for vertex in submesh_merged_obj.data.vertices
+                                      for group in vertex.groups if float(group.weight) > 0},
+            )
         self.index_vertex_id_dict = obj_buffer_result.index_loop_id_dict
         self.unique_first_loop_indices = obj_buffer_result.unique_first_loop_indices
         self.efmi_packed_tbn = obj_buffer_result.efmi_packed_tbn

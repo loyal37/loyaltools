@@ -10,6 +10,23 @@ import threading
 from .node_base import SSMTNodeBase
 
 
+def _owned_physics_groups(obj):
+    """Protect only a verified managed object's groups while the feature is ON."""
+    settings = getattr(bpy.context.scene, 'loyaltools_efmi_physics', None)
+    if settings is None or not settings.enabled:
+        return set()
+    from ..common.global_config import GlobalConfig
+    from ..common.logic_name import LogicName
+    if GlobalConfig.logic_name != LogicName.EFMI:
+        return set()
+    from ..efmi_physics.rig import managed_physics_entry
+    entry = managed_physics_entry(bpy.context.scene, obj)
+    if entry is None:
+        return set()
+    return {segment.group_name or str(segment.bone_id)
+            for chain in entry.chains for segment in chain.segments}
+
+
 class SSMTNode_VertexGroupProcess(SSMTNodeBase):
     '''顶点组处理节点：在前处理流程中自动执行顶点组重命名、合并、清理、填充和排序'''
     bl_idname = 'SSMTNode_VertexGroupProcess'
@@ -550,13 +567,14 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
 
     def _rename_vertex_groups(self, obj, mapping):
         temp_prefix = f"__temp_{uuid.uuid4().hex[:8]}_"
+        protected = _owned_physics_groups(obj)
 
         vg_dict = {vg.name: vg for vg in obj.vertex_groups}
         rename_pairs = []
         for vg_name, vg in vg_dict.items():
             if vg_name in mapping:
                 new_name = mapping[vg_name]
-                if vg_name != new_name:
+                if vg_name != new_name and vg_name not in protected and new_name not in protected:
                     rename_pairs.append((vg_name, new_name))
 
         if not rename_pairs:
@@ -602,13 +620,16 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return renamed_count
 
     def _merge_vertex_groups_by_prefix(self, obj):
+        protected = _owned_physics_groups(obj)
         prefix_map = defaultdict(list)
         vg_by_name = {}
 
         for vg in obj.vertex_groups:
             vg_by_name[vg.name] = vg
+            if vg.name in protected:
+                continue
             match = re.match(r'^(\d+)', vg.name)
-            if match:
+            if match and match.group(1) not in protected:
                 prefix_map[match.group(1)].append(vg)
 
         merge_needed = {}
@@ -684,7 +705,8 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return len(merge_needed)
 
     def _remove_non_numeric_vertex_groups(self, obj):
-        groups_to_remove = [vg for vg in obj.vertex_groups if not vg.name.isdigit()]
+        protected = _owned_physics_groups(obj)
+        groups_to_remove = [vg for vg in obj.vertex_groups if not vg.name.isdigit() and vg.name not in protected]
         for vg in reversed(groups_to_remove):
             try:
                 obj.vertex_groups.remove(vg)
@@ -693,6 +715,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return len(groups_to_remove)
 
     def _fill_vertex_group_gaps(self, obj):
+        protected = _owned_physics_groups(obj)
         numeric_names = set()
         for vg in obj.vertex_groups:
             if vg.name.isdigit():
@@ -702,7 +725,10 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
             return 0
 
         try:
-            max_num = max(int(name) for name in numeric_names)
+            ordinary_names = numeric_names - protected
+            if not ordinary_names:
+                return 0
+            max_num = max(int(name) for name in ordinary_names)
         except (ValueError, TypeError):
             return 0
 
@@ -729,6 +755,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
             return
 
         try:
+            protected = _owned_physics_groups(obj)
             vg_index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
 
             vg_weights = {vg.name: defaultdict(list) for vg in obj.vertex_groups}
@@ -745,9 +772,11 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
                 else:
                     return (1, name)
 
-            sorted_names = sorted(vg_weights.keys(), key=sort_key)
+            sorted_names = sorted(set(vg_weights) - protected, key=sort_key)
 
             for vg in list(obj.vertex_groups):
+                if vg.name in protected:
+                    continue
                 try:
                     obj.vertex_groups.remove(vg)
                 except Exception:

@@ -10,8 +10,10 @@ from ..utils.shapekey_utils import ShapeKeyUtils
 from .export_helper import BlueprintExportHelper
 from .preprocess_cache import PreProcessCache
 from ..common.global_properties import GlobalProterties
+from ..common.global_config import GlobalConfig
 from ..common.non_mirror_workflow import NonMirrorWorkflowHelper
 from ..common.object_prefix_helper import ObjectPrefixHelper
+from ..common.logic_name import LogicName
 
 
 class PreProcessHelper:
@@ -1120,6 +1122,11 @@ class PreProcessHelper:
             if obj.type != 'MESH':
                 LOG.info(f"   {obj_name}: 非网格物体，跳过")
                 continue
+
+            # Physics rigs are authoring/preview data. Only strip their modifiers
+            # from export copies: the game runtime performs this deformation.
+            if obj_name in cls.created_copies:
+                cls._strip_efmi_physics_preview_modifiers(obj)
             
             modifier_count = len(obj.modifiers)
             has_shape_keys = obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 0
@@ -1206,6 +1213,25 @@ class PreProcessHelper:
             if len(failure_messages) > 10:
                 details += f"\n... and {len(failure_messages) - 10} more"
             raise RuntimeError(f"Preprocess modifier application failed:\n{details}")
+
+    @staticmethod
+    def _strip_efmi_physics_preview_modifiers(obj):
+        settings = getattr(bpy.context.scene, 'loyaltools_efmi_physics', None)
+        if (not settings or not settings.enabled
+                or not bool(obj.get('LoyalTools:EFMIMergedSkeleton', False))
+                or GlobalConfig.logic_name != LogicName.EFMI):
+            return 0
+        from ..efmi_physics.rig import managed_physics_entry
+        removed = 0
+        for modifier in list(obj.modifiers):
+            rig = getattr(modifier, 'object', None)
+            if (modifier.type == 'ARMATURE' and rig is not None
+                    and managed_physics_entry(bpy.context.scene, obj, rig) is not None):
+                obj.modifiers.remove(modifier)
+                removed += 1
+        if removed:
+            LOG.info(f"   {obj.name}: 跳过 {removed} 个 EFMI 物理骨预览修改器（仅导出副本）")
+        return removed
 
     @classmethod
     def _triangulate_objects(cls, object_names: List[str]):

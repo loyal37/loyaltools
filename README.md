@@ -7,6 +7,15 @@ LoyalTools is based on **TheHerta4** and integrates the Frame Analysis parsing c
 - Panel location: Blender 3D Viewport → Sidebar (`N`) → `LoyalTools`
 - Required Blender version: 4.5+
 
+## Optional EFMI physics bones
+
+The EFMI Merged Skeleton workflow includes an optional **EFMI Physics Bones** panel for
+editable armature chains, dedicated prefixed weight groups, and character-wide
+physical-bone export across IBs and LoDs. Original merged weights must be prepared
+before adding a mesh. The feature is disabled by default; standard export and
+ZZMI retain their existing workflows. See [EFMI physics bones](docs/efmi-physics.md)
+for authoring steps, supported runtime features, and validation commands.
+
 ## Installation
 
 1. Open [GitHub Releases](https://github.com/loyal37/loyaltools/releases) and download the attached file named `LoyalTools-vX.Y.Z-Blender.zip`.

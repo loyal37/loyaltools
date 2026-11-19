@@ -29,10 +29,24 @@ from ...common.efmi_merged_texture import (
     copy_merged_auto_textures,
     resolve_merged_auto_textures,
 )
+from ...common.efmi_physics_export import (
+    atomic_ini_target,
+    base_bone_mask,
+    build_anchor_fallback_buffers,
+    prepare_physics_plan,
+    reject_disabled_physics_weights,
+    runtime_profile,
+    serialize_authoring_records,
+    split_runtime_sections,
+    validate_object_weights,
+    verified_physics_binding,
+    write_runtime_files,
+)
 from ...utils.format_utils import FormatUtils
 from ...blueprint.node_translucency import MASK_DIFFUSE_A, MASK_TEXTURE
 
 import os
+import copy
 import re
 import shutil
 import bpy
@@ -166,10 +180,73 @@ class ExportEFMI:
                 + "、".join(detection_reason)
             )
 
+        # All enabled-physics validation and shader generation precede the first
+        # buffer/INI write.  The default path does not import the optional UI.
+        self.efmi_physics_plan = None
+        self.efmi_physics_runtime = None
+        settings = getattr(bpy.context.scene, "loyaltools_efmi_physics", None)
+        export_objects = list({
+            drawcall.get_blender_obj_name(): bpy.data.objects.get(drawcall.get_blender_obj_name())
+            for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list
+            if merged_gpu_unique_strs is None or drawcall.get_unique_str() in merged_gpu_unique_strs
+        }.values())
+        export_objects = [obj for obj in export_objects if obj is not None]
+        owned_group_names = {}
+        owned_sources = {}
+        relevant_physics_objects = False
+        if settings is not None and len(settings.objects):
+            from ...efmi_physics.rig import is_managed_export_copy
+            from ...blueprint.preprocess import PreProcessHelper
+            from ...blueprint.preprocess_cache import PreProcessCache
+            for obj in export_objects:
+                binding = verified_physics_binding(obj, settings, is_export_copy=is_managed_export_copy, allow_inherited=True)
+                if binding:
+                    owned_group_names[obj.name] = binding[0]
+                # Relevance must not imply valid ownership: damaged registered
+                # targets still enter strict collection, which reports errors.
+                sources = [obj]
+                if obj.name in PreProcessHelper.created_copies:
+                    sources.extend(PreProcessCache.resolve_source_object(requested)[0]
+                                   for requested, target_name in PreProcessHelper.original_to_copy_map.items()
+                                   if target_name == obj.name)
+                if binding:
+                    # A copied registry UID proves which group names are
+                    # reserved, but it does not make the original registry
+                    # mesh the selected duplicate's preprocessing source.
+                    owned_sources[obj.name] = next((source for source in sources[1:] if source is not None), obj)
+                if any(entry.object is not None and entry.object in sources for entry in settings.objects):
+                    relevant_physics_objects = True
+                if obj.get("LoyalTools:EFMIPhysicsObject") and obj.get("LoyalTools:EFMIPhysicsOwnedGroups"):
+                    relevant_physics_objects = True
+        if self.merged_skeleton_mode and settings is not None and settings.enabled and relevant_physics_objects:
+            from ...efmi_physics.rig import collect_export_records
+            from ...efmi_physics.runtime import build_physics_runtime
+            records = collect_export_records(bpy.context.scene, export_objects, self.merged_skeleton_profile)
+            self.efmi_physics_plan = prepare_physics_plan(
+                records, self.merged_skeleton_profile,
+                mirror_x=GlobalProterties.enable_non_mirror_workflow(),
+            )
+            validate_object_weights(export_objects, self.efmi_physics_plan or {
+                "base_bone_count": int(self.merged_skeleton_profile["bones_count"]),
+                "global_to_palette": {}, "meshes": [],
+            })
+            if self.efmi_physics_plan:
+                self.efmi_physics_runtime = build_physics_runtime(
+                    self.efmi_physics_plan, runtime_profile(self.merged_skeleton_profile),
+                )
+                self.efmi_physics_runtime.files["res/EFMIPhysics/authoring.json"] = serialize_authoring_records(self.efmi_physics_plan)
+        else:
+            # OFF performs no authoring collection/migration or physics output.
+            # Reject nonzero reserved weights before any export file can change.
+            reject_disabled_physics_weights(
+                export_objects, owned_group_names=owned_group_names, owned_sources=owned_sources,
+                merged_mode=self.merged_skeleton_mode,
+            )
         self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(
             self.blueprint_model,
             efmi_merged_skeleton=self.merged_skeleton_mode,
             efmi_merged_skeleton_unique_strs=merged_gpu_unique_strs,
+            efmi_physics_plan=self.efmi_physics_plan,
         )
         # EFMI 直接复用已经解析好的 SubMeshModel，避免同一轮导出把几何解析做两遍。
         self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_submesh_model_list(
@@ -180,9 +257,12 @@ class ExportEFMI:
         self.merged_lod_variant_buffers = {}
         self.merged_lod_blend_remaps = {}
         self.merged_private_vg_rewrite_stats = {}
+        self.efmi_physics_fallback_buffers = {}
         if self.merged_skeleton_mode:
             self._prepare_merged_component_blend_buffers()
             self._build_merged_lod_export_buffers()
+            if self.efmi_physics_plan:
+                self._build_physics_fallback_buffers()
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
         print(f"[CrossIB EFMI] 初始化: has_cross_ib={self.has_cross_ib}")
@@ -207,6 +287,9 @@ class ExportEFMI:
                     category_buf.tofile(f)
 
         if self.merged_skeleton_mode:
+            for fallback in getattr(self, "efmi_physics_fallback_buffers", {}).values():
+                with open(os.path.join(buf_output_folder, fallback["filename"]), "wb") as file:
+                    fallback["data"].tofile(file)
             for variant in self.merged_lod_variant_buffers.values():
                 filepath = os.path.join(buf_output_folder, variant["filename"])
                 with open(filepath, 'wb') as file:
@@ -645,6 +728,11 @@ class ExportEFMI:
     def _merged_resource_prefix(submesh_model):
         return "Resource_" + submesh_model.unique_str.replace("-", "_")
 
+    def _merged_draw_callback_name(self, component_id):
+        command = "CommandList_Draw_Component" + str(component_id)
+        runtime = getattr(self, "efmi_physics_runtime", None)
+        return runtime.metadata["callback_wrappers"].get(command, command) if runtime else command
+
     def _get_merged_profile_component(self, unique_str):
         if not self.merged_skeleton_profile:
             return None
@@ -847,6 +935,9 @@ class ExportEFMI:
             )
             active_mask = self._build_active_blend_weight_mask(
                 game_type, category, buffer_rows, vertex_count
+            )
+            active_mask = base_bone_mask(
+                blend_values, active_mask, getattr(self, "efmi_physics_plan", None)
             )
             substituted_channel_count = self._substitute_stale_pool_vgs(
                 submesh_model.unique_str, blend_values, active_mask,
@@ -1332,6 +1423,7 @@ class ExportEFMI:
         self, section, submesh_model, lod_level, indent=""
     ):
         prefix = self._merged_resource_prefix(submesh_model)
+        fallback_buffers = getattr(self, "efmi_physics_fallback_buffers", {})
         for category in submesh_model.category_buffer_dict.keys():
             slot = submesh_model.d3d11_game_type.CategoryExtractSlotDict.get(
                 category, "unknown_slot"
@@ -1342,9 +1434,75 @@ class ExportEFMI:
             resource_name = (
                 variant["resource_name"] if variant else prefix + "_" + category
             )
-            section.append(indent + slot + " = " + resource_name)
-            if slot.lower() == "vb0":
-                section.append(indent + "vb3 = " + resource_name)
+            fallback = fallback_buffers.get(resource_name)
+            if fallback:
+                section.append(indent + "if " + fallback.get("ready_condition", self.efmi_physics_runtime.metadata["bound_variable"]))
+                section.append(indent + "    " + slot + " = " + resource_name)
+                if slot.lower() == "vb0":
+                    section.append(indent + "    vb3 = " + resource_name)
+                section.append(indent + "else")
+                section.append(indent + "    " + slot + " = " + fallback["resource_name"])
+                if slot.lower() == "vb0":
+                    section.append(indent + "    vb3 = " + fallback["resource_name"])
+                section.append(indent + "endif")
+            else:
+                section.append(indent + slot + " = " + resource_name)
+                if slot.lower() == "vb0":
+                    section.append(indent + "vb3 = " + resource_name)
+
+    def _build_physics_fallback_buffers(self):
+        palette_chain = {
+            int(self.efmi_physics_plan["global_to_palette"][str(global_id)]): chain_index
+            for chain_index, chain in enumerate(self.efmi_physics_plan["chains"])
+            for global_id in chain["segments"]
+        }
+        for submesh in self.submesh_model_list:
+            buffers = build_anchor_fallback_buffers(
+                submesh.category_buffer_dict, submesh.d3d11_game_type, self.efmi_physics_plan,
+            )
+            if not buffers:
+                continue
+            prefix = self._merged_resource_prefix(submesh)
+            ready_conditions = {}
+            for category, data in buffers.items():
+                game_type = submesh.d3d11_game_type
+                stride = int(game_type.CategoryStrideDict[category])
+                rows = numpy.asarray(submesh.category_buffer_dict[category], dtype=numpy.uint8).reshape(-1, stride)
+                used_chains = set()
+                for element in game_type.D3D11ElementList:
+                    if element.Category != category or element.SemanticName != "BLENDINDICES":
+                        continue
+                    offset = self._source_category_element_offset(game_type, element)
+                    values = numpy.ascontiguousarray(rows[:, offset:offset + int(element.ByteWidth)]).view(numpy.uint16).reshape(-1, 4)
+                    active = self._build_active_blend_weight_mask(game_type, category, rows, len(rows))
+                    used = values if active is None else values[active]
+                    used_chains.update(palette_chain[int(value)] for value in numpy.unique(used) if int(value) in palette_chain)
+                ready_conditions[category] = " && ".join(
+                    [self.efmi_physics_runtime.metadata["bound_variable"]]
+                    + [self.efmi_physics_runtime.metadata["chain_ready_variables"][index] for index in sorted(used_chains)]
+                )
+                original_resource = prefix + "_" + category
+                self.efmi_physics_fallback_buffers[original_resource] = {
+                    "resource_name": original_resource + "_PhysicsFallback",
+                    "filename": submesh.unique_str + "-" + category + "-PhysicsFallback.buf",
+                    "stride": int(submesh.d3d11_game_type.CategoryStrideDict[category]), "data": data,
+                    "ready_condition": ready_conditions[category],
+                }
+            fallback_submesh = copy.copy(submesh)
+            fallback_submesh.category_buffer_dict = dict(submesh.category_buffer_dict, **buffers)
+            component = self._get_merged_profile_component(submesh.unique_str)
+            for lod_level, lod in enumerate(component.get("lods", []), 1):
+                for slot, slot_format in lod.get("vb_formats", {}).items():
+                    original = self.merged_lod_variant_buffers.get((submesh.unique_str, lod_level, slot.upper()))
+                    if not original or original["category"] not in buffers:
+                        continue
+                    _, stride, data = self._build_lod_slot_buffer(fallback_submesh, slot, slot_format)
+                    self.efmi_physics_fallback_buffers[original["resource_name"]] = {
+                        "resource_name": original["resource_name"] + "_PhysicsFallback",
+                        "filename": original["filename"][:-4] + "-PhysicsFallback.buf",
+                        "stride": stride, "data": data,
+                        "ready_condition": ready_conditions[original["category"]],
+                    }
 
     def _append_merged_buffer_bindings(self, section, submesh_model, indent=""):
         prefix = self._merged_resource_prefix(submesh_model)
@@ -2059,9 +2217,10 @@ class ExportEFMI:
                 for lod in component.get("lods", [])
             ):
                 entrypoints.append("    $lod_level = 0")
+            draw_command = self._merged_draw_callback_name(component_id)
             entrypoints.append(
                 "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
-                "ref CommandList_Draw_Component" + str(component_id)
+                "ref " + draw_command
             )
             entrypoints.append("    run = CommandList_Component_DrawInstances")
             if submesh is not None and self.blueprint_model.keyname_mkey_dict:
@@ -2103,9 +2262,10 @@ class ExportEFMI:
                     + ("0" if component["cpu_posed"] else "1")
                 )
                 entrypoints.append("    $lod_level = " + str(lod_level))
+                draw_command = self._merged_draw_callback_name(component_id)
                 entrypoints.append(
                     "    CommandList\\EFMIv1\\Callback_Component_DrawCustom = "
-                    "ref CommandList_Draw_Component" + str(component_id)
+                    "ref " + draw_command
                 )
                 entrypoints.append("    run = CommandList_Component_DrawInstances")
                 if submesh is not None and self.blueprint_model.keyname_mkey_dict:
@@ -2207,6 +2367,12 @@ class ExportEFMI:
                 "filename = " + buffer_folder_name + "\\" + remap["filename"]
             )
             resources.new_line()
+        for fallback in getattr(self, "efmi_physics_fallback_buffers", {}).values():
+            resources.append("[" + fallback["resource_name"] + "]")
+            resources.append("type = Buffer")
+            resources.append("stride = " + str(fallback["stride"]))
+            resources.append("filename = " + buffer_folder_name + "\\" + fallback["filename"])
+            resources.new_line()
         ini_builder.append_section(resources)
 
         if not GlobalProterties.forbid_auto_texture_ini():
@@ -2270,7 +2436,28 @@ class ExportEFMI:
             GlobalConfig.path_generate_mod_folder(),
             GlobalConfig.get_workspace_name() + ".ini",
         )
-        ini_builder.save_to_file(ini_filepath)
+        runtime = getattr(self, "efmi_physics_runtime", None)
+        if runtime:
+            # Append generated sections to the builder so its content hash also
+            # covers the optional runtime.  Commit the INI last, atomically.
+            physics_constants, physics_present, physics_lines = split_runtime_sections(
+                runtime.ini_text,
+            )
+            for line in physics_constants:
+                constants.append(line)
+            for line in physics_present:
+                present.append(line)
+            physics_section = M_IniSection(M_SectionType.CommandList)
+            for line in physics_lines:
+                physics_section.append(line)
+            ini_builder.append_section(physics_section)
+            with atomic_ini_target(ini_filepath) as temporary_ini:
+                ini_builder.save_to_file(temporary_ini)
+                write_runtime_files(
+                    GlobalConfig.path_generate_mod_folder(), runtime.files,
+                )
+        else:
+            ini_builder.save_to_file(ini_filepath)
 
     def generate_ini_file(self):
         if self.merged_skeleton_mode:

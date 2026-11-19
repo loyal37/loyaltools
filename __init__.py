@@ -20,6 +20,7 @@ from .ui import ui_panel_extract
 from .ui import ui_panel_texture_mark
 
 from . import toolkit
+from . import efmi_physics
 
 from . import addon_updater_ops
 
@@ -166,11 +167,14 @@ def register():
     ui_panel_extract.register()
     ui_panel_texture_mark.register()
 
+    efmi_physics.register()
+
     toolkit.register()
 
 
 
 def unregister():
+    efmi_physics.unregister()
     toolkit.unregister()
 
     # LoyalTools 新增模块
