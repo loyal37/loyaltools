@@ -20,8 +20,10 @@ class EFMIPhysicsSegment(bpy.types.PropertyGroup):
 class EFMIPhysicsChain(bpy.types.PropertyGroup):
     uid: StringProperty()
     name: StringProperty(name="物理链", default="物理链")
-    follow_group_id: IntProperty(name="原骨编号", min=0, max=65535,
-        description="跟随的原合并顶点组名称，必须小于原骨数量 B，且物体上已存在")
+    follow_group_id: IntProperty(name="Native Bone ID", min=-1, max=65535,
+        description="The native merged vertex group this chain follows. Animation attachments use -1.")
+    animation_anchor_group: StringProperty(name="Animation Attachment", default="", options=set(),
+        description="The registered animation bone vertex group on this mesh")
     segments: CollectionProperty(type=EFMIPhysicsSegment)
     active_segment_index: IntProperty(min=0)
     damping: FloatProperty(name="阻尼", default=0.08, min=0.0, max=1.0)

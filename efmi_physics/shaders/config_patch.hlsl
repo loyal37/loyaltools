@@ -17,9 +17,10 @@ void main(uint3 id:SV_DispatchThreadID)
         float4 l=Profile[0],r=IniParams.Load(int2(0,0)),r2=IniParams.Load(int2(2,0));
         if(all(isfinite(l))&&all(isfinite(r))&&all(isfinite(r2))&&all(l>=0))
         {
-            uint B=(uint)(l.x+0.5),K=(uint)(l.y+0.5),N=(uint)(l.z+0.5),I=(uint)max(0,floor(r2.y+0.5));
+            uint B=(uint)(l.x+0.5),K=(uint)((r2.w > 0 ? r2.w : l.y)+0.5);
+            uint N=(uint)(l.z+0.5),I=(uint)max(0,floor(r2.y+0.5));
             uint slot=(uint)max(0,floor(r.y+0.5));
-            if(B>0&&K>0&&K<=64&&B+K<=65536&&N>0&&N<=32&&slot<N&&I<=(uint)l.w)
+            if(B>0&&K>0&&K<=(r2.w > 0 ? 128 : 64)&&B+K<=65536&&N>0&&N<=32&&slot<N&&I<=(uint)l.w)
             {
                 uint base=(I+2*(B+K)*slot)*3;
                 if(value.x>=I*3) value.x=base-3;

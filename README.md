@@ -18,6 +18,10 @@ before adding a mesh. The feature is disabled by default; standard export and
 ZZMI retain their existing workflows. See [EFMI physics bones](docs/efmi-physics.md)
 for authoring steps, supported runtime features, and validation commands.
 
+The optional **EFMI Bone Animation** panel adds Blender-keyframed branches with
+independent looping clips. A physics chain can use an animation bone as its
+single attachment instead of a native bone. See [EFMI bone animation](docs/efmi-animation.md).
+
 ## Installation
 
 1. Open [GitHub Releases](https://github.com/loyal37/loyaltools/releases) and download the attached file named `LoyalTools-vX.Y.Z-Blender.zip`.

@@ -21,6 +21,7 @@ from .ui import ui_panel_texture_mark
 
 from . import toolkit
 from . import efmi_physics
+from . import efmi_animation
 
 from . import addon_updater_ops
 
@@ -32,7 +33,7 @@ importlib.reload(ui_prefix_quick_ops)
 
 bl_info = {
     "name": "LoyalTools",
-    "description": "明日方舟终末地 / 绝区零 Mod 制作插件（基于 TheHerta4，集成 EFMI-Tools 提取能力与 XXMI-Tools 的绝区零支持，两款游戏都支持骨骼合并，无需 SSMT4）",
+    "description": "Blender add-on for creating Arknights: Endfield and Zenless Zone Zero mods",
     "blender": (4, 5, 0),
     "version": (1, 7, 10),
     "location": "View3D",
@@ -168,12 +169,14 @@ def register():
     ui_panel_texture_mark.register()
 
     efmi_physics.register()
+    efmi_animation.register()
 
     toolkit.register()
 
 
 
 def unregister():
+    efmi_animation.unregister()
     efmi_physics.unregister()
     toolkit.unregister()
 

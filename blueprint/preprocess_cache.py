@@ -396,6 +396,14 @@ class PreProcessCache:
                    for modifier in obj.modifiers):
                 hasher.update(b'EFMI_PHYSICS_MANAGED_PREVIEW_STRIP_V2')
 
+        animation = getattr(bpy.context.scene, 'loyaltools_efmi_animation', None)
+        if animation is not None and animation.objects and GlobalConfig.logic_name == 'EFMI':
+            from ..efmi_animation.rig import is_preview_modifier, managed_animation_entry
+
+            entry = managed_animation_entry(bpy.context.scene, obj)
+            if entry and any(is_preview_modifier(entry, modifier) for modifier in obj.modifiers):
+                hasher.update(b'EFMI_ANIMATION_MANAGED_PREVIEW_STRIP_V1')
+
         return hasher.hexdigest()
 
     @classmethod
