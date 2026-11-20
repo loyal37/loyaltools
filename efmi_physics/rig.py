@@ -1040,6 +1040,8 @@ def collect_export_records(scene, objects, profile):
                 raise ValueError(target.name + " 是未登记的物理网格副本，请先添加物体以分配独立骨编号。")
     seen_ids = set()
     seen_objects = set()
+    animation_settings = getattr(scene, 'loyaltools_efmi_animation', None)
+    animation_enabled = bool(animation_settings and animation_settings.enabled)
     for entry in settings.objects:
         obj = entry.object
         targets = [obj] if export_objects is None else [
@@ -1089,8 +1091,22 @@ def collect_export_records(scene, objects, profile):
                     mesh_record['vg_index_mapping'][group.index] = segment.bone_id
             result["meshes"].append(mesh_record)
         for chain in entry.chains:
-            follow = chain.follow_group_id
-            if not 0 <= follow < base or obj.vertex_groups.get(str(follow)) is None:
+            follow = int(chain.follow_group_id)
+            animation_anchor_group = getattr(chain, 'animation_anchor_group', '')
+            animation_source_anchor = None
+            anchor_label = obj.name + '/' + chain.name
+            if animation_anchor_group:
+                if not animation_enabled:
+                    raise ValueError(anchor_label + " uses an animation bone attachment. "
+                                     "Enable EFMI Bone Animation or select a native bone attachment.")
+                if follow != -1:
+                    raise ValueError(anchor_label + " has both native and animation bone attachments. Select one attachment.")
+                from ..efmi_animation.rig import require_follow_component, resolve_animation_anchor
+
+                animation, animation_root, _ = resolve_animation_anchor(scene, obj, animation_anchor_group)
+                require_follow_component(animation.object, animation_root, profile)
+                animation_source_anchor = int(animation_root.follow_group_id)
+            elif not 0 <= follow < base or obj.vertex_groups.get(str(follow)) is None:
                 raise ValueError(obj.name + "/" + chain.name + " 跟随组必须是已存在的原合并骨编号 (0..B-1)。")
             if not chain.segments:
                 raise ValueError(chain.name + " 没有父骨，请同步检查。")
@@ -1132,10 +1148,14 @@ def collect_export_records(scene, objects, profile):
                 })
                 bone_ids.append(number)
                 previous = bone
-            result["chains"].append({"chain_id": chain.uid, "name": chain.name,
-                "object_name": target.name, "source_object_name": obj.name, "rig_name": entry.rig.name,
-                "follow_group_id": follow, "bone_ids": bone_ids,
-                "root_head": root_head, "params": chain_params(chain)})
+            chain_record = {"chain_id": chain.uid, "name": chain.name,
+                            "object_name": target.name, "source_object_name": obj.name, "rig_name": entry.rig.name,
+                            "follow_group_id": follow, "bone_ids": bone_ids,
+                            "root_head": root_head, "params": chain_params(chain)}
+            if animation_anchor_group:
+                chain_record.update(animation_anchor_group=animation_anchor_group,
+                                    animation_source_anchor=animation_source_anchor)
+            result["chains"].append(chain_record)
     result["bone_count"] = len(seen_ids)
     return result
 

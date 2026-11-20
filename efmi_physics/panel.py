@@ -2,6 +2,7 @@
 
 import bpy
 
+from ..efmi_animation import rig as animation_rig
 from . import rig
 
 
@@ -15,7 +16,10 @@ class EFMI_UL_PhysicsObjects(bpy.types.UIList):
 class EFMI_UL_PhysicsChains(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_propname):
         layout.prop(item, "name", text="", emboss=False, icon='BONE_DATA')
-        layout.label(text="原骨 " + str(item.follow_group_id) + " · " + str(len(item.segments)) + " 段")
+        anchor = "Animation Bone" if item.animation_anchor_group else f"Native Bone {item.follow_group_id}"
+        count = len(item.segments)
+        segment_label = "segment" if count == 1 else "segments"
+        layout.label(text=f"{anchor} / {count} {segment_label}")
 
 
 class EFMI_UL_PhysicsSegments(bpy.types.UIList):
@@ -73,7 +77,18 @@ class EFMI_PT_Physics(bpy.types.Panel):
             if chain:
                 box = layout.box()
                 box.prop(chain, "name")
-                box.operator("efmi.physics_follow_group", text="跟随原骨：" + str(chain.follow_group_id), icon='VIEWZOOM')
+                linked = chain.animation_anchor_group
+                if linked:
+                    box.operator("efmi.physics_follow_group", text="Animation Bone " + linked, icon='VIEWZOOM')
+                    try:
+                        _, root, _ = animation_rig.resolve_animation_anchor(context.scene, entry.object, chain.animation_anchor_group)
+                        box.label(text=f"{root.name} follows Native Bone {root.follow_group_id}")
+                    except (ValueError, RuntimeError):
+                        box.label(text="Choose a new attachment.", icon='ERROR')
+                else:
+                    label = (f"Native Bone {chain.follow_group_id}"
+                             if chain.follow_group_id >= 0 else "Choose Attachment")
+                    box.operator("efmi.physics_follow_group", text=label, icon='VIEWZOOM')
                 box.label(text="父骨头部 = 挂点；骨头 / 尾部 / Roll 可真实编辑。", icon='INFO')
                 box.template_list("EFMI_UL_PhysicsSegments", "", chain, "segments", chain,
                                   "active_segment_index", rows=3)

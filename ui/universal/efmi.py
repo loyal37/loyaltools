@@ -182,10 +182,11 @@ class ExportEFMI:
                 + "、".join(detection_reason)
             )
 
-        # All enabled-physics validation and shader generation precede the first
-        # buffer/INI write.  The default path does not import the optional UI.
+        # Validate the extra bones before writing buffers or an INI.
         self.efmi_physics_plan = None
         self.efmi_physics_runtime = None
+        self.efmi_animation_plan = None
+        self.efmi_palette_plan = None
         settings = getattr(bpy.context.scene, "loyaltools_efmi_physics", None)
         export_objects = list({
             drawcall.get_blender_obj_name(): bpy.data.objects.get(drawcall.get_blender_obj_name())
@@ -222,33 +223,11 @@ class ExportEFMI:
                     relevant_physics_objects = True
         if self.merged_skeleton_mode and settings is not None and settings.enabled and relevant_physics_objects:
             from ...efmi_physics.rig import collect_export_records
-            from ...efmi_physics.runtime import build_physics_runtime
             records = collect_export_records(bpy.context.scene, export_objects, self.merged_skeleton_profile)
             self.efmi_physics_plan = prepare_physics_plan(
                 records, self.merged_skeleton_profile,
                 mirror_x=GlobalProterties.enable_non_mirror_workflow(),
             )
-            validate_object_weights(export_objects, self.efmi_physics_plan or {
-                "base_bone_count": int(self.merged_skeleton_profile["bones_count"]),
-                "global_to_palette": {}, "meshes": [],
-            })
-            if self.efmi_physics_plan:
-                components_by_unique = {
-                    c["unique_str"]: c for c in self.merged_skeleton_profile["components"]
-                }
-                object_components = {}
-                for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list:
-                    object_components.setdefault(drawcall.get_blender_obj_name(), []).append(
-                        components_by_unique.get(drawcall.get_unique_str())
-                    )
-                resolve_plan_anchors(
-                    self.efmi_physics_plan, self.merged_skeleton_profile,
-                    object_components, self._get_merged_lod_bone_errors(), resolve_physics_anchor,
-                )
-                self.efmi_physics_runtime = build_physics_runtime(
-                    self.efmi_physics_plan, runtime_profile(self.merged_skeleton_profile),
-                )
-                self.efmi_physics_runtime.files["res/EFMIPhysics/authoring.json"] = serialize_authoring_records(self.efmi_physics_plan)
         else:
             # OFF performs no authoring collection/migration or physics output.
             # Reject nonzero reserved weights before any export file can change.
@@ -256,11 +235,13 @@ class ExportEFMI:
                 export_objects, owned_group_names=owned_group_names, owned_sources=owned_sources,
                 merged_mode=self.merged_skeleton_mode,
             )
+        if export_objects or getattr(self, "merged_connected_cpu_unique_strs", ()):
+            self._prepare_extra_bone_export(export_objects, settings, relevant_physics_objects)
         self.submesh_model_list = ExportHelper.parse_submesh_model_list_from_blueprint_model(
             self.blueprint_model,
             efmi_merged_skeleton=self.merged_skeleton_mode,
             efmi_merged_skeleton_unique_strs=merged_gpu_unique_strs,
-            efmi_physics_plan=self.efmi_physics_plan,
+            efmi_physics_plan=self.efmi_palette_plan,
         )
         # EFMI 直接复用已经解析好的 SubMeshModel，避免同一轮导出把几何解析做两遍。
         self.drawib_model_list = ExportHelper.parse_drawib_model_list_from_submesh_model_list(
@@ -272,10 +253,11 @@ class ExportEFMI:
         self.merged_lod_blend_remaps = {}
         self.merged_private_vg_rewrite_stats = {}
         self.efmi_physics_fallback_buffers = {}
+        self.efmi_linked_submeshes = set()
         if self.merged_skeleton_mode:
             self._prepare_merged_component_blend_buffers()
             self._build_merged_lod_export_buffers()
-            if self.efmi_physics_plan:
+            if self.efmi_palette_plan:
                 self._build_physics_fallback_buffers()
         print("SubMeshModel列表初始化完成，共有 " + str(len(self.submesh_model_list)) + " 个SubMeshModel")
 
@@ -283,6 +265,89 @@ class ExportEFMI:
         print(f"[CrossIB EFMI] cross_ib_info_dict={self.cross_ib_info_dict}")
         print(f"[CrossIB EFMI] cross_ib_object_names={self.cross_ib_object_names}")
         print(f"[CrossIB EFMI] cross_ib_mapping_objects={self.cross_ib_mapping_objects}")
+
+    def _prepare_extra_bone_export(self, export_objects, settings, relevant_physics_objects):
+        cpu_objects = {
+            bpy.data.objects.get(drawcall.get_blender_obj_name())
+            for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list
+            if drawcall.get_unique_str() in self.merged_connected_cpu_unique_strs
+        }
+        cpu_objects.discard(None)
+        physics = self.efmi_physics_plan
+        linked_chains = [chain for chain in (physics or {}).get("chains", []) if chain.get("animation_anchor_group")]
+        has_animation_attachment = relevant_physics_objects and any(
+            chain.animation_anchor_group for entry in settings.objects for chain in entry.chains
+        )
+        has_animation_groups = any(
+            group.name.startswith("EFMI_ANIM_")
+            for obj in [*export_objects, *cpu_objects] if obj.type == "MESH"
+            for group in obj.vertex_groups
+        )
+        profile = self.merged_skeleton_profile
+        if linked_chains or has_animation_attachment or has_animation_groups:
+            from ...efmi_animation.sampling import prepare_animation_plan, validate_animation_support
+
+            validate_animation_support(cpu_objects, None, enabled=False)
+            if profile is not None:
+                required_groups = {}
+                for chain in linked_chains:
+                    required_groups.setdefault(chain["source_object_name"], set()).add(chain["animation_anchor_group"])
+                self.efmi_animation_plan = prepare_animation_plan(
+                    bpy.context.scene, export_objects, profile,
+                    mirror_x=GlobalProterties.enable_non_mirror_workflow(),
+                    palette_start=physics["extended_bone_count"] if physics else None,
+                    required_animation_groups=required_groups,
+                )
+            else:
+                validate_animation_support(export_objects, None, enabled=False)
+        if profile is None:
+            return
+
+        base = int(profile["bones_count"])
+        animation = self.efmi_animation_plan
+        if linked_chains:
+            by_group = {bone["group_name"]: bone for bone in animation["bones"]}
+            for chain in linked_chains:
+                parent = by_group[chain["animation_anchor_group"]]
+                chain["animation_anchor_palette"] = parent["palette_index"]
+                chain["animation_anchor_component"] = animation["chains"][parent["chain_index"]]["component_id"]
+        if settings is not None and settings.enabled and relevant_physics_objects:
+            animation_weights = {mesh["object_name"]: mesh["active_group_names"]
+                                 for mesh in animation["meshes"]} if animation else None
+            validate_object_weights(export_objects, physics or {
+                "base_bone_count": base, "global_to_palette": {}, "meshes": [],
+            }, animation_weights=animation_weights)
+        if physics:
+            components_by_unique = {
+                component["unique_str"]: component for component in profile["components"]
+            }
+            object_components = {}
+            for drawcall in self.blueprint_model.ordered_draw_obj_data_model_list:
+                object_components.setdefault(drawcall.get_blender_obj_name(), []).append(
+                    components_by_unique.get(drawcall.get_unique_str())
+                )
+            resolve_plan_anchors(
+                physics, profile, object_components, self._get_merged_lod_bone_errors(), resolve_physics_anchor,
+            )
+
+        if animation:
+            physics_groups = physics or {}
+            self.efmi_palette_plan = {
+                "base_bone_count": base,
+                "group_to_palette": {**physics_groups.get("group_to_palette", {}), **animation["group_to_palette"]},
+                "global_to_palette": {**physics_groups.get("global_to_palette", {}), **animation["global_to_palette"]},
+                "chains": [*physics_groups.get("chains", []), *animation["chains"]],
+            }
+        else:
+            self.efmi_palette_plan = physics
+        if self.efmi_palette_plan:
+            from ...efmi_physics.runtime import build_physics_runtime
+
+            self.efmi_physics_runtime = build_physics_runtime(
+                physics or {"base_bone_count": base}, runtime_profile(profile), animation=animation,
+            )
+            if physics:
+                self.efmi_physics_runtime.files["res/EFMIPhysics/authoring.json"] = serialize_authoring_records(physics)
 
     def generate_buffer_files(self):
         buf_output_folder = GlobalConfig.path_generatemod_buffer_folder()
@@ -951,7 +1016,8 @@ class ExportEFMI:
                 game_type, category, buffer_rows, vertex_count
             )
             active_mask = base_bone_mask(
-                blend_values, active_mask, getattr(self, "efmi_physics_plan", None)
+                blend_values, active_mask,
+                getattr(self, "efmi_palette_plan", getattr(self, "efmi_physics_plan", None)),
             )
             substituted_channel_count = self._substitute_stale_pool_vgs(
                 submesh_model.unique_str, blend_values, active_mask,
@@ -1465,40 +1531,64 @@ class ExportEFMI:
                     section.append(indent + "vb3 = " + resource_name)
 
     def _build_physics_fallback_buffers(self):
+        plan = getattr(self, "efmi_palette_plan", self.efmi_physics_plan)
+        animation = getattr(self, "efmi_animation_plan", None)
+        fallback_suffix = "ExtraBoneFallback" if animation else "PhysicsFallback"
         palette_chain = {
-            int(self.efmi_physics_plan["global_to_palette"][str(global_id)]): chain_index
-            for chain_index, chain in enumerate(self.efmi_physics_plan["chains"])
+            int(plan["global_to_palette"][str(global_id)]): chain_index
+            for chain_index, chain in enumerate(plan["chains"])
+            for global_id in chain["segments"]
+        }
+        linked_palette = {
+            plan["global_to_palette"][str(global_id)]
+            for chain in plan["chains"] if chain.get("animation_anchor_group")
             for global_id in chain["segments"]
         }
         for submesh in self.submesh_model_list:
+            game_type = submesh.d3d11_game_type
+            if linked_palette:
+                for element in game_type.D3D11ElementList:
+                    if element.SemanticName != "BLENDINDICES":
+                        continue
+                    category = element.Category
+                    stride = int(game_type.CategoryStrideDict[category])
+                    rows = numpy.asarray(submesh.category_buffer_dict[category], dtype=numpy.uint8).reshape(-1, stride)
+                    offset = self._source_category_element_offset(game_type, element)
+                    channels = numpy.ascontiguousarray(rows[:, offset:offset + int(element.ByteWidth)])
+                    values = channels.view(numpy.uint16).reshape(len(rows), int(element.ByteWidth) // 2)
+                    active = self._build_active_blend_weight_mask(game_type, category, rows, len(rows))
+                    used = values if active is None else values[active]
+                    if not linked_palette.isdisjoint(numpy.unique(used)):
+                        self.efmi_linked_submeshes.add(submesh.unique_str)
+                        break
             buffers = build_anchor_fallback_buffers(
-                submesh.category_buffer_dict, submesh.d3d11_game_type, self.efmi_physics_plan,
+                submesh.category_buffer_dict, game_type, plan,
             )
             if not buffers:
                 continue
             prefix = self._merged_resource_prefix(submesh)
             ready_conditions = {}
             for category, data in buffers.items():
-                game_type = submesh.d3d11_game_type
                 stride = int(game_type.CategoryStrideDict[category])
-                rows = numpy.asarray(submesh.category_buffer_dict[category], dtype=numpy.uint8).reshape(-1, stride)
                 used_chains = set()
-                for element in game_type.D3D11ElementList:
-                    if element.Category != category or element.SemanticName != "BLENDINDICES":
-                        continue
-                    offset = self._source_category_element_offset(game_type, element)
-                    values = numpy.ascontiguousarray(rows[:, offset:offset + int(element.ByteWidth)]).view(numpy.uint16).reshape(-1, 4)
-                    active = self._build_active_blend_weight_mask(game_type, category, rows, len(rows))
-                    used = values if active is None else values[active]
-                    used_chains.update(palette_chain[int(value)] for value in numpy.unique(used) if int(value) in palette_chain)
+                if not animation:
+                    rows = numpy.asarray(submesh.category_buffer_dict[category], dtype=numpy.uint8).reshape(-1, stride)
+                    for element in game_type.D3D11ElementList:
+                        if element.Category != category or element.SemanticName != "BLENDINDICES":
+                            continue
+                        offset = self._source_category_element_offset(game_type, element)
+                        values = numpy.ascontiguousarray(rows[:, offset:offset + int(element.ByteWidth)]).view(numpy.uint16).reshape(-1, 4)
+                        active = self._build_active_blend_weight_mask(game_type, category, rows, len(rows))
+                        used = values if active is None else values[active]
+                        used_chains.update(palette_chain[int(value)] for value in numpy.unique(used) if int(value) in palette_chain)
                 ready_conditions[category] = " && ".join(
                     [self.efmi_physics_runtime.metadata["bound_variable"]]
                     + [self.efmi_physics_runtime.metadata["chain_ready_variables"][index] for index in sorted(used_chains)]
                 )
                 original_resource = prefix + "_" + category
                 self.efmi_physics_fallback_buffers[original_resource] = {
-                    "resource_name": original_resource + "_PhysicsFallback",
-                    "filename": submesh.unique_str + "-" + category + "-PhysicsFallback.buf",
+                    "resource_name": original_resource + "_" + fallback_suffix,
+                    "filename": submesh.unique_str + "-" + category + "-" + fallback_suffix + ".buf",
                     "stride": int(submesh.d3d11_game_type.CategoryStrideDict[category]), "data": data,
                     "ready_condition": ready_conditions[category],
                 }
@@ -1512,8 +1602,8 @@ class ExportEFMI:
                         continue
                     _, stride, data = self._build_lod_slot_buffer(fallback_submesh, slot, slot_format)
                     self.efmi_physics_fallback_buffers[original["resource_name"]] = {
-                        "resource_name": original["resource_name"] + "_PhysicsFallback",
-                        "filename": original["filename"][:-4] + "-PhysicsFallback.buf",
+                        "resource_name": original["resource_name"] + "_" + fallback_suffix,
+                        "filename": original["filename"][:-4] + "-" + fallback_suffix + ".buf",
                         "stride": stride, "data": data,
                         "ready_condition": ready_conditions[original["category"]],
                     }
@@ -1846,6 +1936,7 @@ class ExportEFMI:
             )
             if not incoming_drawcalls:
                 continue
+            needs_attachment = self._begin_merged_attachment_draw(section, source_submesh)
             section.append(
                 "; 骨骼合并跨 IB: "
                 + source_submesh.unique_str
@@ -1860,6 +1951,16 @@ class ExportEFMI:
             self._append_merged_draw_lines(
                 section, incoming_drawcalls, diffuse_resource
             )
+            if needs_attachment:
+                section.append("endif")
+
+    def _begin_merged_attachment_draw(self, section, submesh):
+        if submesh.unique_str not in getattr(self, "efmi_linked_submeshes", ()):
+            return False
+        # An attachment with no active rolling palette has no safe alternative
+        # vertex weights. Skip its replacement draw and keep other draws intact.
+        section.append("if " + self.efmi_physics_runtime.metadata["bound_variable"])
+        return True
 
     @staticmethod
     def _merged_entrypoint_signature(source):
@@ -2070,6 +2171,7 @@ class ExportEFMI:
             current_key = "indexcount_" + str(component["index_count"])
             diffuse_resource = ""
             if submesh is not None:
+                needs_attachment = self._begin_merged_attachment_draw(command_lists, submesh)
                 self._append_merged_buffer_bindings(command_lists, submesh)
                 self._append_merged_slot_texture_bindings(
                     command_lists,
@@ -2091,6 +2193,8 @@ class ExportEFMI:
                 self._append_merged_draw_lines(
                     command_lists, own_drawcalls, diffuse_resource
                 )
+                if needs_attachment:
+                    command_lists.append("endif")
             else:
                 command_lists.append(
                     "; 蓝图中已删除该 GPU 组件：仅提供合并骨骼，不绑定或绘制网格"

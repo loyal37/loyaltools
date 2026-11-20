@@ -17,6 +17,9 @@ static const uint MASK=1048575;
 static const uint SR=24;
 static const uint CR=4;
 static const uint PENDING=1, PUBLISHED=2, RESET_HISTORY=4;
+// Only linked chains use the anchor snapshots in the first segment's
+// previously unused state rows. The original per-segment ABI stays intact.
+static const uint PENDING_ANCHOR=14, CURRENT_ANCHOR=17, HISTORY_ANCHOR=20;
 uint Number(float v) { return (uint)max(0.0,floor(v+0.5)); }
 bool Finite3(float3 v) { return all(isfinite(v)); }
 bool Finite4(float4 v) { return all(isfinite(v)); }
@@ -43,6 +46,25 @@ void Multiply(float4 a,float4 b,float4 c,float4 i0,float4 i1,float4 i2,
     s0=a.x*i0+a.y*i1+a.z*i2+a.w*last;
     s1=b.x*i0+b.y*i1+b.z*i2+b.w*last;
     s2=c.x*i0+c.y*i1+c.z*i2+c.w*last;
+}
+void CopyAnchor(uint dest,uint source)
+{
+    State[dest]=State[source];State[dest+1]=State[source+1];State[dest+2]=State[source+2];
+}
+bool AnchorCorrection(uint desired,uint previous,out float4 d0,out float4 d1,out float4 d2)
+{
+    Identity(d0,d1,d2);
+    float4 a=State[previous],b=State[previous+1],c=State[previous+2];
+    float3 col0=cross(b.xyz,c.xyz),col1=cross(c.xyz,a.xyz),col2=cross(a.xyz,b.xyz);
+    float det=dot(a.xyz,col0);
+    if(!isfinite(det)||abs(det)<=1e-10) return false;
+    float3 t=float3(a.w,b.w,c.w);
+    float3 x=float3(col0.x,col1.x,col2.x)/det;
+    float3 y=float3(col0.y,col1.y,col2.y)/det;
+    float3 z=float3(col0.z,col1.z,col2.z)/det;
+    Multiply(ExpandedPalette[desired],ExpandedPalette[desired+1],ExpandedPalette[desired+2],
+             float4(x,-dot(x,t)),float4(y,-dot(y,t)),float4(z,-dot(z,t)),d0,d1,d2);
+    return Finite4(d0)&&Finite4(d1)&&Finite4(d2);
 }
 void Skin(float3 head,float3 tail,float3 targetX,float3 targetY,float3 fallbackX,
           float4 i0,float4 i1,float4 i2,out float4 s0,out float4 s1,out float4 s2)
@@ -85,15 +107,17 @@ void main(uint3 dispatchId:SV_DispatchThreadID)
     uint sc,ss,ec,es,stc,sts,cc,cs;
     SourcePalette.GetDimensions(sc,ss);ExpandedPalette.GetDimensions(ec,es);
     State.GetDimensions(stc,sts);ChainState.GetDimensions(cc,cs);
-    uint E=B+K,srcBase=(I+2*B*slot)*3,extBase=(I+2*E*slot)*3;
+    // With animation, its dispatch already seeded both banks and any rigid
+    // fallbacks. The signed width selects whether this chain may publish.
+    uint E=B+(r2.w==0 ? K : Number(abs(r2.w))),srcBase=(I+2*B*slot)*3,extBase=(I+2*E*slot)*3;
     uint srcRows=3*B,extRows=3*E,implicitRows=3*I;
     uint ct=(slot*C+chain)*CR;
-    if(ss!=16||es!=16||sts!=16||cs!=16||srcBase+2*srcRows>sc||extBase+2*extRows>ec||
+    if(E<B+K||E>65536||ss!=16||es!=16||sts!=16||cs!=16||srcBase+2*srcRows>sc||extBase+2*extRows>ec||
        implicitRows>sc||implicitRows>ec||N*K*SR>stc||ct+CR>cc) return;
     uint tid=dispatchId.x;
     // Disjoint source-copy and extra-bone writes. No cross-group dependency.
-    if(tid<implicitRows) ExpandedPalette[tid]=SourcePalette[tid];
-    else if(tid-implicitRows<2*srcRows)
+    if(r2.w==0 && tid<implicitRows) ExpandedPalette[tid]=SourcePalette[tid];
+    else if(r2.w==0 && tid-implicitRows<2*srcRows)
     {
         uint n=tid-implicitRows;
         ExpandedPalette[extBase+(n/srcRows)*extRows+n%srcRows]=SourcePalette[srcBase+n];
@@ -105,6 +129,10 @@ void main(uint3 dispatchId:SV_DispatchThreadID)
     if(!Finite4(anchorInfo)||!Finite4(range)||count==0||count>64||first+count>K||
        anchorID>=B||offset>=B||componentCount==0||componentCount>B-offset||
        anchorID<offset||anchorID>=offset+componentCount) return;
+    uint animationID=Number(range.z);
+    bool linked=r2.x>=2.0&&animationID>B+K&&animationID<=E;
+    uint animationAt=linked?extBase+3*(animationID-1):0;
+    uint anchorState=(slot*K+first)*SR;
 
     float4 rawMeta=ChainState[ct];
     uint4 meta=(uint4)max(0.0,rawMeta);
@@ -136,6 +164,16 @@ void main(uint3 dispatchId:SV_DispatchThreadID)
     }
     else if(meta.y!=frame)
     {
+        if(linked)
+        {
+            // Pair the pending/published physics poses with their own anchor
+            // snapshots so both banks can be rebased to this draw's pose.
+            bool publish=(flags&PENDING)!=0;
+            bool resetHistory=(flags&PUBLISHED)==0||(flags&RESET_HISTORY)!=0;
+            uint history=publish&&resetHistory?PENDING_ANCHOR:CURRENT_ANCHOR;
+            CopyAnchor(anchorState+HISTORY_ANCHOR,anchorState+history);
+            if(publish) CopyAnchor(anchorState+CURRENT_ANCHOR,anchorState+PENDING_ANCHOR);
+        }
         [loop] for(uint j=0;j<count;j++)
         {
             uint st=(slot*K+first+j)*SR;
@@ -158,9 +196,15 @@ void main(uint3 dispatchId:SV_DispatchThreadID)
     {
         uint at=srcBase+anchorID*3;
         float4 a0=SourcePalette[at],a1=SourcePalette[at+1],a2=SourcePalette[at+2];
+        if(linked)
+        {
+            a0=ExpandedPalette[animationAt];
+            a1=ExpandedPalette[animationAt+1];
+            a2=ExpandedPalette[animationAt+2];
+        }
         bool valid=Finite4(a0)&&Finite4(a1)&&Finite4(a2);
         float dt=r1.x,maxDt=clamp(limits.x,0.001,0.25);
-        bool rigid=r2.x<0.5;
+        bool rigid=(r2.x-(linked?2.0:0.0))<0.5;
         bool restart=(flags&PENDING)==0||!isfinite(dt)||dt<0||dt>maxDt||
                      ((frame-meta.z)&MASK)>Number(limits.z);
         float4 root=Profile[segmentStart+first*stride+1];
@@ -222,17 +266,49 @@ void main(uint3 dispatchId:SV_DispatchThreadID)
                 parent0=s0;parent1=s1;parent2=s2;previousTail=tail;
             }
         }
-        if(valid) {flags|=PENDING;times.x=r1.y;times.w+=1;ChainState[ct+2]=float4(anchor,0);}
+        if(valid)
+        {
+            flags|=PENDING;times.x=r1.y;times.w+=1;ChainState[ct+2]=float4(anchor,0);
+            if(linked)
+            {
+                State[anchorState+PENDING_ANCHOR]=a0;
+                State[anchorState+PENDING_ANCHOR+1]=a1;
+                State[anchorState+PENDING_ANCHOR+2]=a2;
+            }
+        }
         else {flags&=~PENDING;flags|=RESET_HISTORY;reason=2;}
         meta.z=frame;
     }
-    [loop] for(uint j=0;j<count;j++)
+    // Pending physics still advances once per frame. Rebase the published
+    // bend to the current animation anchor so fast clips do not detach the
+    // physics root for a frame. History uses its independent paired anchor.
+    float4 d0,d1,d2,h0,h1,h2;
+    Identity(d0,d1,d2);Identity(h0,h1,h2);
+    bool publishLinked=true;
+    if(linked)
+    {
+        publishLinked=(flags&PUBLISHED)!=0;
+        if(publishLinked)
+        {
+            bool currentValid=AnchorCorrection(animationAt,anchorState+CURRENT_ANCHOR,d0,d1,d2);
+            bool historyValid=AnchorCorrection(animationAt+extRows,anchorState+HISTORY_ANCHOR,h0,h1,h2);
+            publishLinked=currentValid&&historyValid;
+        }
+    }
+    [loop] for(uint j=0;r2.w>=0&&publishLinked&&j<count;j++)
     {
         uint seg=first+j,st=(slot*K+seg)*SR,palette=Number(Profile[segmentStart+seg*stride].x);
         if(palette<B||palette>=E) continue;
         uint outAt=extBase+3*palette;
-        ExpandedPalette[outAt]=State[st+5];ExpandedPalette[outAt+1]=State[st+6];ExpandedPalette[outAt+2]=State[st+7];
-        ExpandedPalette[outAt+extRows]=State[st+8];ExpandedPalette[outAt+extRows+1]=State[st+9];ExpandedPalette[outAt+extRows+2]=State[st+10];
+        float4 a=State[st+5],b=State[st+6],c=State[st+7];
+        float4 aPrev=State[st+8],bPrev=State[st+9],cPrev=State[st+10];
+        if(linked)
+        {
+            Multiply(d0,d1,d2,a,b,c,a,b,c);
+            Multiply(h0,h1,h2,aPrev,bPrev,cPrev,aPrev,bPrev,cPrev);
+        }
+        ExpandedPalette[outAt]=a;ExpandedPalette[outAt+1]=b;ExpandedPalette[outAt+2]=c;
+        ExpandedPalette[outAt+extRows]=aPrev;ExpandedPalette[outAt+extRows+1]=bPrev;ExpandedPalette[outAt+extRows+2]=cPrev;
     }
     times.z=(float)flags;ChainState[ct]=(float4)meta;ChainState[ct+1]=times;
     ChainState[ct+3]=float4(frame,reason,allowed?1:0,(flags&PUBLISHED)!=0?1:0);

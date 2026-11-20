@@ -27,6 +27,20 @@ def _owned_physics_groups(obj):
             for chain in entry.chains for segment in chain.segments}
 
 
+def _protected_extra_bone_groups(obj):
+    from ..common.global_config import GlobalConfig
+    from ..common.logic_name import LogicName
+
+    names = _owned_physics_groups(obj)
+    if GlobalConfig.logic_name == LogicName.EFMI:
+        from ..efmi_animation.rig import GROUP_PREFIX
+
+        # Preserve reserved animation names so the exporter can validate their
+        # provenance and report weighted groups even while playback is disabled.
+        names.update(group.name for group in obj.vertex_groups if group.name.startswith(GROUP_PREFIX))
+    return names
+
+
 class SSMTNode_VertexGroupProcess(SSMTNodeBase):
     '''顶点组处理节点：在前处理流程中自动执行顶点组重命名、合并、清理、填充和排序'''
     bl_idname = 'SSMTNode_VertexGroupProcess'
@@ -567,7 +581,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
 
     def _rename_vertex_groups(self, obj, mapping):
         temp_prefix = f"__temp_{uuid.uuid4().hex[:8]}_"
-        protected = _owned_physics_groups(obj)
+        protected = _protected_extra_bone_groups(obj)
 
         vg_dict = {vg.name: vg for vg in obj.vertex_groups}
         rename_pairs = []
@@ -620,7 +634,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return renamed_count
 
     def _merge_vertex_groups_by_prefix(self, obj):
-        protected = _owned_physics_groups(obj)
+        protected = _protected_extra_bone_groups(obj)
         prefix_map = defaultdict(list)
         vg_by_name = {}
 
@@ -705,7 +719,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return len(merge_needed)
 
     def _remove_non_numeric_vertex_groups(self, obj):
-        protected = _owned_physics_groups(obj)
+        protected = _protected_extra_bone_groups(obj)
         groups_to_remove = [vg for vg in obj.vertex_groups if not vg.name.isdigit() and vg.name not in protected]
         for vg in reversed(groups_to_remove):
             try:
@@ -715,7 +729,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
         return len(groups_to_remove)
 
     def _fill_vertex_group_gaps(self, obj):
-        protected = _owned_physics_groups(obj)
+        protected = _protected_extra_bone_groups(obj)
         numeric_names = set()
         for vg in obj.vertex_groups:
             if vg.name.isdigit():
@@ -755,7 +769,7 @@ class SSMTNode_VertexGroupProcess(SSMTNodeBase):
             return
 
         try:
-            protected = _owned_physics_groups(obj)
+            protected = _protected_extra_bone_groups(obj)
             vg_index_to_name = {vg.index: vg.name for vg in obj.vertex_groups}
 
             vg_weights = {vg.name: defaultdict(list) for vg in obj.vertex_groups}
