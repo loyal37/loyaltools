@@ -3,18 +3,27 @@
 import bpy
 from bpy.props import EnumProperty
 
+from ..efmi_animation import rig as animation_rig
 from . import rig
 
 _FOLLOW_ITEMS = []  # Retain strings for Blender's dynamic enum lifetime.
 
 
 def _follow_items(self, context):
-    global _FOLLOW_ITEMS
     entry = rig.active_entry(context.scene) if context and context.scene else None
     base = context.scene.loyaltools_efmi_physics.base_bone_count if entry else 0
     values = rig.original_groups(entry.object, base) if entry else []
-    _FOLLOW_ITEMS = [(str(value), "原骨 " + str(value), "跟随原合并顶点组 " + str(value))
-                     for value in values]
+    animation_settings = getattr(context.scene, 'loyaltools_efmi_animation', None) if entry else None
+    try:
+        anchors = (animation_rig.animation_anchor_options(context.scene, entry.object)
+                   if animation_settings and animation_settings.enabled else [])
+    except (ValueError, RuntimeError):
+        anchors = []
+    _FOLLOW_ITEMS[:] = [(str(value), "Native Bone " + str(value), "Follow native merged vertex group " + str(value), value)
+                        for value in values]
+    _FOLLOW_ITEMS.extend((bone.group_name, f"Animation Bone {root.name} / {bone.group_name}",
+                          "Follow the animation bone's in-game pose", number)
+                         for number, (root, bone) in enumerate(anchors, start=65536))
     return _FOLLOW_ITEMS
 
 
@@ -114,11 +123,11 @@ class EFMI_OT_PhysicsRemoveSegment(PhysicsCommand, bpy.types.Operator):
 
 class EFMI_OT_PhysicsFollowGroup(PhysicsCommand, bpy.types.Operator):
     bl_idname = "efmi.physics_follow_group"
-    bl_label = "选择原骨顶点组"
-    bl_description = "只列出此物体上编号在原骨范围 B 内的合并顶点组"
+    bl_label = "Choose Attachment"
+    bl_description = "Choose a native merged bone or an animation bone registered on this mesh"
     bl_property = "group_id"
 
-    group_id: EnumProperty(name="原合并顶点组", items=_follow_items)
+    group_id: EnumProperty(name="Attachment", items=_follow_items)
 
     def invoke(self, context, event):
         entry = rig.active_entry(context.scene)
@@ -132,13 +141,22 @@ class EFMI_OT_PhysicsFollowGroup(PhysicsCommand, bpy.types.Operator):
         entry = rig.active_entry(context.scene)
         chain = rig.active_chain(entry)
         if chain is None or not self.group_id:
-            raise ValueError("请选择有效原骨。")
+            raise ValueError("Choose a valid attachment.")
         profile = rig.current_profile()
         base = rig._check_workspace(context.scene.loyaltools_efmi_physics, profile)
+        if self.group_id.startswith(animation_rig.GROUP_PREFIX):
+            if not context.scene.loyaltools_efmi_animation.enabled:
+                raise ValueError("Enable EFMI Bone Animation first.")
+            animation, root, _ = animation_rig.resolve_animation_anchor(context.scene, entry.object, self.group_id)
+            animation_rig.require_follow_component(animation.object, root, profile)
+            chain.animation_anchor_group = self.group_id
+            chain.follow_group_id = -1
+            return
         group_id = int(self.group_id)
         if group_id not in rig.original_groups(entry.object, base):
             raise ValueError("跟随顶点组必须在原骨范围 B 内。")
         chain.follow_group_id = group_id
+        chain.animation_anchor_group = ''
 
 
 class EFMI_OT_PhysicsEditRig(PhysicsCommand, bpy.types.Operator):

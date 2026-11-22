@@ -75,7 +75,13 @@ def prepare_physics_plan(records, profile, *, mirror_x=False):
     claimed = set()
     gpu_components = [component for component in profile["components"] if not component["cpu_posed"]]
     for chain_index, chain in enumerate(chains):
-        anchor = int(chain.get("follow_group_id", chain.get("anchor", -1)))
+        linked = bool(chain.get("animation_anchor_group"))
+        native = int(chain.get("follow_group_id", chain.get("anchor", -1)))
+        if linked and native != -1:
+            raise ValueError("EFMI physics export: A physics chain can use only one attachment.")
+        # The animation bone already follows a native palette source. This
+        # index tracks freshness only and does not become an authored mount.
+        anchor = int(chain["animation_source_anchor"]) if linked else native
         _require(0 <= anchor < base, "链 " + str(chain["chain_id"]) + " 的挂点不在原骨范围。")
         owners = [component for component in gpu_components
                   if int(component["vg_offset"]) <= anchor < int(component["vg_offset"]) + int(component["vg_count"])]
@@ -83,16 +89,17 @@ def prepare_physics_plan(records, profile, *, mirror_x=False):
         segment_ids = [int(item.get("global_id", item.get("bone_id"))) if isinstance(item, dict) else int(item)
                        for item in chain.get("bone_ids", chain.get("segments", []))]
         _require(bool(segment_ids), "物理链必须至少包含一个真实骨骼。")
-        previous = anchor
+        first_parent = -1 if linked else anchor
+        previous = first_parent
         for bone_id in segment_ids:
             _require(bone_id in by_id and bone_id not in claimed, "链引用未知骨骼或重复占用骨骼 " + str(bone_id) + "。")
             bone = by_id[bone_id]
             _require(bone.get("chain_id") == chain["chain_id"], "骨骼与所属物理链不一致。")
             parent = bone.get("parent_global_id", previous)
-            parent = anchor if parent is None and previous == anchor else parent
+            parent = first_parent if parent is None and previous == first_parent else parent
             _require(parent is not None and int(parent) == previous, "骨骼父子顺序无效，请同步物理链。")
             bone["parent_global_id"] = int(parent)
-            bone["parent_index"] = -1 if previous == anchor else id_to_palette[previous] - base
+            bone["parent_index"] = -1 if previous == first_parent else id_to_palette[previous] - base
             bone["palette_index"] = id_to_palette[bone_id]
             bone["chain_index"] = chain_index
             rig_matrix = export_transform @ _matrix(bone.get("rig_matrix_world", np.eye(4)), "骨架变换")
@@ -150,6 +157,28 @@ def prepare_physics_plan(records, profile, *, mirror_x=False):
     return result
 
 
+def _chain_draw_components(chain, meshes, object_components):
+    segments = set(chain["segments"])
+    consumers = []
+    for mesh in meshes:
+        active = set(mesh.get("active_group_names", mesh.get("vg_mapping", {})))
+        if any(name in active and int(value) in segments
+               for name, value in mesh.get("vg_mapping", {}).items()):
+            for name in (mesh["object_name"], *mesh.get("export_object_names", [])):
+                consumers.extend(object_components.get(name, [None]))
+    return consumers
+
+
+def _resolve_export_anchor(chain, kind, profile, consumers, lod_bone_errors, resolver):
+    original = int(chain["anchor"])
+    anchor, component_id, unknown = resolver(profile, original, consumers, lod_bone_errors)
+    chain.update(authoring_anchor=original, anchor=anchor, component_id=component_id)
+    if anchor != original:
+        print(f"[EFMI{kind}] 链 {chain['chain_id']}: 挂点 {original} → {anchor}，更新来源组件 {component_id}。")
+    if unknown:
+        print(f"[EFMI{kind}][警告] 链 {chain['chain_id']}: 挂点 {anchor} 缺少 LOD {unknown} 的骨骼核对数据，请补全 LOD 预览后验证。")
+
+
 def resolve_plan_anchors(plan, profile, object_components, lod_bone_errors, resolver):
     """Change only the export plan; preserve authoring IDs, groups and rest pose.
 
@@ -158,29 +187,39 @@ def resolve_plan_anchors(plan, profile, object_components, lod_bone_errors, reso
     """
     by_id = {int(bone["global_id"]): bone for bone in plan["bones"]}
     for chain in plan["chains"]:
-        segment_ids = set(chain["segments"])
-        consumers = []
-        for mesh in plan["meshes"]:
-            active = set(mesh.get("active_group_names", mesh.get("vg_mapping", {})))
-            if not any(name in active and int(value) in segment_ids
-                       for name, value in mesh.get("vg_mapping", {}).items()):
+        if chain.get("animation_anchor_group"):
+            continue
+        consumers = _chain_draw_components(chain, plan["meshes"], object_components)
+        _resolve_export_anchor(chain, "物理", profile, consumers, lod_bone_errors, resolver)
+        by_id[chain["segments"][0]]["parent_global_id"] = chain["anchor"]
+
+
+def resolve_animation_anchors(animation, physics, profile, object_components, lod_bone_errors, resolver):
+    """Resolve each animation root across its mesh draws and attached physics draws."""
+    by_group = {bone["group_name"]: bone for bone in animation["bones"]}
+    chains = animation["chains"]
+    consumers = [_chain_draw_components(chain, animation["meshes"], object_components) for chain in chains]
+    links = []
+    if physics:
+        for chain in physics["chains"]:
+            group = chain.get("animation_anchor_group")
+            if not group:
                 continue
-            names = [mesh["object_name"], *mesh.get("export_object_names", [])]
-            for name in names:
-                consumers.extend(object_components.get(name, [None]))
-        original = int(chain["anchor"])
-        anchor, component_id, unknown = resolver(profile, original, consumers, lod_bone_errors)
-        chain["authoring_anchor"] = original
-        chain["anchor"] = anchor
-        chain["component_id"] = component_id
-        by_id[chain["segments"][0]]["parent_global_id"] = anchor
-        if anchor != original:
-            print(f"[EFMI物理] 链 {chain['chain_id']}: 挂点 {original} → {anchor}，更新来源组件 {component_id}。")
-        if unknown:
-            print(f"[EFMI物理][警告] 链 {chain['chain_id']}: 挂点 {anchor} 缺少 LOD {unknown} 的骨骼核对数据，请补全 LOD 预览后验证。")
+            parent = by_group[group]
+            root_index = parent["chain_index"]
+            consumers[root_index].extend(_chain_draw_components(chain, physics["meshes"], object_components))
+            links.append((chain, parent))
+
+    for chain, draws in zip(chains, consumers):
+        _resolve_export_anchor(chain, "动画", profile, draws, lod_bone_errors, resolver)
+    for chain, parent in links:
+        root = chains[parent["chain_index"]]
+        chain.update(anchor=root["anchor"], component_id=root["component_id"],
+                     animation_anchor_palette=parent["palette_index"],
+                     animation_anchor_component=root["component_id"])
 
 
-def validate_object_weights(objects, plan):
+def validate_object_weights(objects, plan, *, animation_weights=None):
     """Reject unknown weighted groups, including unmanaged copies carrying custom IDs."""
     base = plan["base_bone_count"]
     registered = {name for mesh in plan["meshes"] for name in (mesh["object_name"], *mesh.get("export_object_names", []))}
@@ -195,6 +234,8 @@ def validate_object_weights(objects, plan):
                 if float(weight.weight) <= 0:
                     continue
                 name = groups.get(int(weight.group), "")
+                if animation_weights and name in animation_weights.get(obj.name, ()):
+                    continue
                 explicit = mesh_mapping.get(obj.name, {})
                 _require(name.isdecimal() or name in explicit,
                          obj.name + " 的顶点组 " + repr(name) + " 含有未绑定的权重。")
@@ -284,9 +325,9 @@ def remap_joined_vertex_groups(category_buffers, game_type, vertex_groups, plan,
             _require(stable_id < plan["base_bone_count"] or (active_group_indices is not None and int(group.index) not in active_group_indices),
                      "合并网格包含未知额外顶点组 " + name + "。")
             index_to_id[int(group.index)] = stable_id if stable_id < plan["base_bone_count"] else 0
-        elif _is_physics_group(name):
-            _require(active_group_indices is not None and int(group.index) not in active_group_indices,
-                     "合并网格包含未绑定物理顶点组 " + name + "。")
+        elif _is_physics_group(name) or name.startswith("EFMI_ANIM_"):
+            if active_group_indices is None or int(group.index) in active_group_indices:
+                raise ValueError("EFMI export: Vertex group " + name + " has no registered bone in the merged mesh.")
             index_to_id[int(group.index)] = 0
     for element in game_type.D3D11ElementList:
         if element.SemanticName != "BLENDINDICES":

@@ -97,6 +97,54 @@ def main():
             used.extend(ids.tolist())
         assert any(any(i>=6 for i in row) for row in used)
         print('EFMI_PHYSICS_FULL_EXPORT_OK',json.dumps({'bones':4,'chains':2,'meshes':2,'lods':[0,1],'manifest':bool(manifest)}))
+        check_linked_animation_export(blueprint, ExportEFMI, profile, objects[0])
     addon.unregister()
+
+
+def check_linked_animation_export(blueprint, exporter, profile, obj):
+    from loyaltools_integration.efmi_animation import rig
+
+    scene = bpy.context.scene
+    scene.loyaltools_efmi_animation.enabled = True
+    entry = rig.add_object(bpy.context, obj, profile)
+    root = rig.add_root(bpy.context, entry, profile)
+    root.frame_start, root.frame_end = -1, 1
+    child = rig.add_child(bpy.context, entry, root, root.bones[0], profile)
+    pose = entry.rig.pose.bones[rig.find_bone(entry.rig, child).name]
+    pose.location.x = 0.0
+    pose.keyframe_insert(data_path='location', frame=-1)
+    pose.location.x = 0.2
+    pose.keyframe_insert(data_path='location', frame=1)
+    scene.loyaltools_efmi_physics.active_object_index = 0
+    chain = scene.loyaltools_efmi_physics.objects[0].chains[0]
+    chain.follow_group_id = -1
+    chain.animation_anchor_group = child.group_name
+    obj.vertex_groups[child.group_name].add([0], 0.25, 'REPLACE')
+
+    preview_mesh = bpy.data.meshes.new('Unrelated preview')
+    preview_mesh.from_pydata([(0, 0, 0)], [], [])
+    preview = bpy.data.objects.new('Unrelated preview', preview_mesh)
+    scene.collection.objects.link(preview)
+    preview.shape_key_add(name='Basis')
+    key = preview.shape_key_add(name='Manual pose')
+    key.value = 0.9
+    key.keyframe_insert(data_path='value', frame=4)
+    scene.frame_set(4, subframe=0.25)
+    key.value = 0.27
+    before = (scene.frame_current, scene.frame_subframe, key.value, len(bpy.data.scenes))
+    hybrid = exporter(blueprint())
+    hybrid.export()
+    assert (scene.frame_current, scene.frame_subframe, key.value, len(bpy.data.scenes)) == before
+    animated_child = hybrid.efmi_animation_plan['bones'][1]
+    samples = animated_child['frames']
+    assert len(samples) == 17
+    start, middle, end = [samples[i]['translation'][0] for i in (0, 8, 16)]
+    assert min(start, end) < middle < max(start, end), (start, middle, end)
+    assert abs(abs(end - start) - 0.2) < 1e-5, (start, end)
+    assert hybrid.efmi_physics_plan['chains'][0]['animation_anchor_palette'] == animated_child['palette_index']
+    assert any('ExtraBoneFallback' in fallback['filename']
+               for fallback in hybrid.efmi_physics_fallback_buffers.values())
+    print('EFMI_LINKED_ANIMATION_EXPORT_OK')
+
 
 if __name__=='__main__':main()

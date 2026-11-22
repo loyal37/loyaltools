@@ -1127,6 +1127,7 @@ class PreProcessHelper:
             # from export copies: the game runtime performs this deformation.
             if obj_name in cls.created_copies:
                 cls._strip_efmi_physics_preview_modifiers(obj)
+                cls._strip_efmi_animation_preview_modifiers(obj)
             
             modifier_count = len(obj.modifiers)
             has_shape_keys = obj.data.shape_keys and len(obj.data.shape_keys.key_blocks) > 0
@@ -1232,6 +1233,20 @@ class PreProcessHelper:
         if removed:
             LOG.info(f"   {obj.name}: 跳过 {removed} 个 EFMI 物理骨预览修改器（仅导出副本）")
         return removed
+
+    @staticmethod
+    def _strip_efmi_animation_preview_modifiers(obj):
+        scene = bpy.context.scene
+        settings = getattr(scene, 'loyaltools_efmi_animation', None)
+        if not settings or not settings.objects or GlobalConfig.logic_name != LogicName.EFMI:
+            return
+        from ..efmi_animation.rig import is_preview_modifier, managed_animation_entry
+
+        entry = managed_animation_entry(scene, obj)
+        if entry:
+            for modifier in list(obj.modifiers):
+                if is_preview_modifier(entry, modifier):
+                    obj.modifiers.remove(modifier)
 
     @classmethod
     def _triangulate_objects(cls, object_names: List[str]):
