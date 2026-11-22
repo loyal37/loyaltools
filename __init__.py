@@ -35,7 +35,7 @@ bl_info = {
     "name": "LoyalTools",
     "description": "Blender add-on for creating Arknights: Endfield and Zenless Zone Zero mods",
     "blender": (4, 5, 0),
-    "version": (1, 8, 0),
+    "version": (1, 8, 1),
     "location": "View3D",
     "category": "Generic"
 }
