@@ -142,6 +142,51 @@ class ExportRegressionTests(unittest.TestCase):
         p = profile()
         self.assertEqual(merged.resolve_physics_anchor(p, 0, p['components'], {}), (0, 0, [1]))
 
+    def test_animation_anchor_includes_linked_physics_draw_lods(self):
+        p = profile()
+        near, distant = p['components']
+        near['lods'][0]['is_fallback'] = True
+        animation = {
+            'chains': [{'chain_id': 'animation', 'anchor': 0, 'component_id': 0, 'segments': [-1, -2]}],
+            'bones': [{'group_name': 'EFMI_ANIM_000002', 'palette_index': 8, 'chain_index': 0}],
+            'meshes': [{'object_name': 'animated', 'vg_mapping': {'EFMI_ANIM_000001': -1}}],
+        }
+        linked = {
+            'chains': [{'chain_id': 'physics', 'anchor': 0, 'component_id': 0,
+                        'animation_anchor_group': 'EFMI_ANIM_000002', 'segments': [65536]}],
+            'meshes': [{'object_name': 'routed', 'vg_mapping': {'EFMI_PHYS_000001': 65536}}],
+        }
+        physics.resolve_animation_anchors(
+            animation, linked, p, {'animated': [near], 'routed': [distant]},
+            {1: {1: [0.0] * 3}}, merged.resolve_physics_anchor,
+        )
+        root, attached = animation['chains'][0], linked['chains'][0]
+        self.assertEqual((root['authoring_anchor'], root['anchor'], root['component_id']), (0, 3, 1))
+        self.assertEqual((attached['anchor'], attached['component_id']), (3, 1))
+        self.assertEqual((attached['animation_anchor_palette'], attached['animation_anchor_component']), (8, 1))
+
+        plan = {'chains': [attached, root], 'global_to_palette': {'65536': 6, '-1': 7, '-2': 8}}
+        raw = np.array([[6, 7, 8, 1]], dtype=np.uint16).view(np.uint8).ravel()
+        fallback = physics.build_anchor_fallback_buffers({'Blend': raw}, blend_type(), plan)['Blend']
+        np.testing.assert_array_equal(fallback.view(np.uint16), [3, 3, 3, 1])
+        np.testing.assert_array_equal(raw.view(np.uint16), [6, 7, 8, 1])
+
+    def test_draw_components_follow_only_the_mesh_routed_by_cross_ib(self):
+        Export = exporter_methods('_extra_bone_draw_components', '_get_submesh_ib_key')
+        exporter = Export()
+        exporter.has_cross_ib = True
+        exporter.cross_ib_match_mode = 'INDEX_COUNT'
+        exporter.cross_ib_mapping_objects = {('indexcount_3', 'indexcount_6'): {'redirected'}}
+        near = {'unique_str': 'near', 'cpu_posed': False, 'index_count': 3}
+        distant = {'unique_str': 'distant', 'cpu_posed': False, 'index_count': 6}
+        redirected = NS(obj_name='redirected', match_index_count=3,
+                        get_unique_str=lambda: 'near', get_blender_obj_name=lambda: 'redirected_copy')
+        ordinary = NS(obj_name='ordinary', match_index_count=3,
+                      get_unique_str=lambda: 'near', get_blender_obj_name=lambda: 'ordinary_copy')
+        exporter.blueprint_model = NS(ordered_draw_obj_data_model_list=[redirected, ordinary])
+        draw_components = exporter._extra_bone_draw_components({'components': [near, distant]})
+        self.assertEqual(draw_components, {'redirected_copy': [distant], 'ordinary_copy': [near]})
+
     def test_disabled_and_empty_are_exact_noops(self):
         values = np.array([[7, 3, 0, 0]], dtype=np.uint16)
         buffers = {"Blend": values.view(np.uint8).ravel()}

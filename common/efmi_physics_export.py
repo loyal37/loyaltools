@@ -157,6 +157,28 @@ def prepare_physics_plan(records, profile, *, mirror_x=False):
     return result
 
 
+def _chain_draw_components(chain, meshes, object_components):
+    segments = set(chain["segments"])
+    consumers = []
+    for mesh in meshes:
+        active = set(mesh.get("active_group_names", mesh.get("vg_mapping", {})))
+        if any(name in active and int(value) in segments
+               for name, value in mesh.get("vg_mapping", {}).items()):
+            for name in (mesh["object_name"], *mesh.get("export_object_names", [])):
+                consumers.extend(object_components.get(name, [None]))
+    return consumers
+
+
+def _resolve_export_anchor(chain, kind, profile, consumers, lod_bone_errors, resolver):
+    original = int(chain["anchor"])
+    anchor, component_id, unknown = resolver(profile, original, consumers, lod_bone_errors)
+    chain.update(authoring_anchor=original, anchor=anchor, component_id=component_id)
+    if anchor != original:
+        print(f"[EFMI{kind}] 链 {chain['chain_id']}: 挂点 {original} → {anchor}，更新来源组件 {component_id}。")
+    if unknown:
+        print(f"[EFMI{kind}][警告] 链 {chain['chain_id']}: 挂点 {anchor} 缺少 LOD {unknown} 的骨骼核对数据，请补全 LOD 预览后验证。")
+
+
 def resolve_plan_anchors(plan, profile, object_components, lod_bone_errors, resolver):
     """Change only the export plan; preserve authoring IDs, groups and rest pose.
 
@@ -167,26 +189,34 @@ def resolve_plan_anchors(plan, profile, object_components, lod_bone_errors, reso
     for chain in plan["chains"]:
         if chain.get("animation_anchor_group"):
             continue
-        segment_ids = set(chain["segments"])
-        consumers = []
-        for mesh in plan["meshes"]:
-            active = set(mesh.get("active_group_names", mesh.get("vg_mapping", {})))
-            if not any(name in active and int(value) in segment_ids
-                       for name, value in mesh.get("vg_mapping", {}).items()):
+        consumers = _chain_draw_components(chain, plan["meshes"], object_components)
+        _resolve_export_anchor(chain, "物理", profile, consumers, lod_bone_errors, resolver)
+        by_id[chain["segments"][0]]["parent_global_id"] = chain["anchor"]
+
+
+def resolve_animation_anchors(animation, physics, profile, object_components, lod_bone_errors, resolver):
+    """Resolve each animation root across its mesh draws and attached physics draws."""
+    by_group = {bone["group_name"]: bone for bone in animation["bones"]}
+    chains = animation["chains"]
+    consumers = [_chain_draw_components(chain, animation["meshes"], object_components) for chain in chains]
+    links = []
+    if physics:
+        for chain in physics["chains"]:
+            group = chain.get("animation_anchor_group")
+            if not group:
                 continue
-            names = [mesh["object_name"], *mesh.get("export_object_names", [])]
-            for name in names:
-                consumers.extend(object_components.get(name, [None]))
-        original = int(chain["anchor"])
-        anchor, component_id, unknown = resolver(profile, original, consumers, lod_bone_errors)
-        chain["authoring_anchor"] = original
-        chain["anchor"] = anchor
-        chain["component_id"] = component_id
-        by_id[chain["segments"][0]]["parent_global_id"] = anchor
-        if anchor != original:
-            print(f"[EFMI物理] 链 {chain['chain_id']}: 挂点 {original} → {anchor}，更新来源组件 {component_id}。")
-        if unknown:
-            print(f"[EFMI物理][警告] 链 {chain['chain_id']}: 挂点 {anchor} 缺少 LOD {unknown} 的骨骼核对数据，请补全 LOD 预览后验证。")
+            parent = by_group[group]
+            root_index = parent["chain_index"]
+            consumers[root_index].extend(_chain_draw_components(chain, physics["meshes"], object_components))
+            links.append((chain, parent))
+
+    for chain, draws in zip(chains, consumers):
+        _resolve_export_anchor(chain, "动画", profile, draws, lod_bone_errors, resolver)
+    for chain, parent in links:
+        root = chains[parent["chain_index"]]
+        chain.update(anchor=root["anchor"], component_id=root["component_id"],
+                     animation_anchor_palette=parent["palette_index"],
+                     animation_anchor_component=root["component_id"])
 
 
 def validate_object_weights(objects, plan, *, animation_weights=None):
@@ -341,8 +371,6 @@ def build_anchor_fallback_buffers(category_buffers, game_type, plan):
         return {}
     mapping = {}
     for chain in plan["chains"]:
-        if chain.get("animation_anchor_group"):
-            continue
         for global_id in chain["segments"]:
             mapping[int(plan["global_to_palette"][str(global_id)])] = int(chain["anchor"])
     result = {}

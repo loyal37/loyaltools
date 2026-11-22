@@ -147,15 +147,18 @@ def _sample(scene, tracks, plan, mirror):
         for tick in range(first, first + chain['sample_count']):
             by_tick[tick].append(track)
     starting_matrices = {}
-    saved_time = scene.frame_current + scene.frame_subframe
+    # Keep the sampling graph inactive. Evaluated animation then stays in the
+    # graph and is not copied back over the original pose or other preview values.
+    sample_scene = scene.copy()
     try:
+        view_layer = sample_scene.view_layers[bpy.context.view_layer.name]
         for tick in sorted(by_tick):
             frame, substep = divmod(tick, SAMPLES_PER_FRAME)
             subframe = substep / SAMPLES_PER_FRAME
-            scene.frame_set(frame, subframe=subframe)
-            _require(scene.frame_current + scene.frame_subframe == frame + subframe,
+            sample_scene.frame_set(frame, subframe=subframe)
+            _require(sample_scene.frame_current + sample_scene.frame_subframe == frame + subframe,
                      f"Could not sample frame {frame + subframe:g}. Check Blender's frame range.")
-            depsgraph = bpy.context.evaluated_depsgraph_get()
+            depsgraph = view_layer.depsgraph
             evaluated_rigs = {}
             for chain, armature, indices in by_tick[tick]:
                 if armature not in evaluated_rigs:
@@ -185,10 +188,7 @@ def _sample(scene, tracks, plan, mirror):
                         chain['seamless_loop'] &= _matrices_match(starting_matrices.pop(index), local)
                     frames.append(_decompose(local, frames[-1] if frames else None, label))
     finally:
-        # Blender reports negative fractional times as a truncated frame and
-        # negative subframe, but frame_set accepts a nonnegative subframe.
-        saved_frame = math.floor(saved_time)
-        scene.frame_set(saved_frame, subframe=saved_time - saved_frame)
+        bpy.data.scenes.remove(sample_scene)
 
 
 def prepare_animation_plan(scene, export_objects, profile, *, mirror_x=False, palette_start=None,

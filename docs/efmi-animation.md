@@ -52,8 +52,9 @@ game, the attached parts continue to follow their selected animation bones rigid
 
 - Supports Blender 4.5 or later and EFMI Merged Skeleton's GPU rolling-buffer
   path. Resource binding and release were checked against EFMI 1.5.0 and XXMI
-  1.3.3. When a draw path cannot bind the extended bone palette, the mod skips
-  the replacement draw for the attached mesh.
+  1.3.3. When a draw path cannot bind the extended bone palette, animation
+  bones and any attached physics chains follow the resolved native bone
+  rigidly. Other meshes sharing the same index buffer are still drawn.
 - Each export supports up to 64 animation bones and 131,072 bone samples. Physics
   bones have their own limit. The exporter samples eight times per Blender frame.
   If a bone rotates more than 180° between samples, spread the rotation over more
@@ -66,3 +67,6 @@ game, the attached parts continue to follow their selected animation bones rigid
   the active workspace. If an anchor is invalid, choose a valid native bone in
   the animation panel. This preserves the existing weights, keyframes, and
   physics chains attached to the animation bones.
+- Export checks the root's native bone source at the levels where its weighted
+  meshes or attached physics chains are drawn. It can select an equivalent
+  slot from another component without changing the authored follow group.
