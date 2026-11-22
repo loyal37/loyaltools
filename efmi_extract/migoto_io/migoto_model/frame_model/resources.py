@@ -27,6 +27,7 @@ class Resource:
 
     buffer: NumpyBuffer | None = None
     parent: "Resource | None" = None
+    dhash: str | None = None
 
     def build_numpy_buffer(
         self,

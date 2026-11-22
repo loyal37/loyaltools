@@ -91,15 +91,23 @@ def _update_parallel_preprocess_toggle(self, context):
         self.parallel_blender_executable = bpy.app.binary_path or ""
 
 
-# RabbitFX 槽位风格与 EFMITTL 动态槽位只能选一个。
+# 三种动态贴图绑定方式互斥，也允许全部关闭。
 def _update_rabbitfx_slot(self, context):
-    if self.use_rabbitfx_slot and self.use_efmittl_slot:
+    if self.use_rabbitfx_slot:
         self.use_efmittl_slot = False
+        self.use_dhash_texture = False
 
 
 def _update_efmittl_slot(self, context):
-    if self.use_efmittl_slot and self.use_rabbitfx_slot:
+    if self.use_efmittl_slot:
         self.use_rabbitfx_slot = False
+        self.use_dhash_texture = False
+
+
+def _update_dhash_texture(self, context):
+    if self.use_dhash_texture:
+        self.use_rabbitfx_slot = False
+        self.use_efmittl_slot = False
 
 
 class GlobalProterties(bpy.types.PropertyGroup):
@@ -178,6 +186,13 @@ class GlobalProterties(bpy.types.PropertyGroup):
         description="勾选后，漫射/光照/法线贴图交给 EFMI TTL 库按着色器找槽位（需要 Mods 里装有 EFMITTL 0.5.4 及以上）",
         default=False,
         update=_update_efmittl_slot,
+    ) # type: ignore
+
+    use_dhash_texture: bpy.props.BoolProperty(
+        name="dHash纹理",
+        description="按抓帧中原图的 dHash 匹配贴图槽位，需要带 dHash 的抓帧和 XXMI DLL 1.3.3+",
+        default=False,
+        update=_update_dhash_texture,
     ) # type: ignore
 
     recalculate_tangent: bpy.props.BoolProperty(
@@ -452,6 +467,10 @@ class GlobalProterties(bpy.types.PropertyGroup):
     @classmethod
     def use_efmittl_slot(cls):
         return cls._instance().use_efmittl_slot
+
+    @classmethod
+    def use_dhash_texture(cls):
+        return cls._instance().use_dhash_texture
 
     @classmethod
     def generate_branch_mod_gui(cls):

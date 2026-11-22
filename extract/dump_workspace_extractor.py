@@ -177,6 +177,7 @@ class _TextureEntry:
     draw_call_id: int
     src_path: Path
     filename: str = ""
+    dhash: str | None = None
 
 
 @dataclass
@@ -868,6 +869,7 @@ class DumpWorkspaceExtractor:
                     call_id=call_id,
                     draw_call_id=call_id,
                     src_path=src_path,
+                    dhash=getattr(resource, "dhash", None),
                 ))
 
         call_texture_entries.sort(
@@ -1658,6 +1660,7 @@ class DumpWorkspaceExtractor:
                 call_id=call_id,
                 draw_call_id=int(record.shader_call.id),
                 src_path=src_path,
+                dhash=getattr(resource, "dhash", None),
             ))
         return entries
 
@@ -1812,6 +1815,7 @@ class DumpWorkspaceExtractor:
             width, height = self._get_texture_dimensions(entry.src_path)
             slot_map.setdefault(slot_key, []).append({
                 "hash": entry.tex_hash,
+                "dhash": entry.dhash,
                 "filename": entry.filename,
                 "format": entry.format_name,
                 "call_id": entry.call_id,
@@ -1828,6 +1832,7 @@ class DumpWorkspaceExtractor:
             call_map.setdefault(call_key, []).append({
                 "slot": "ps-t" + str(entry.slot_id),
                 "hash": entry.tex_hash,
+                "dhash": entry.dhash,
                 "filename": entry.filename,
                 "format": entry.format_name,
                 "width": width,

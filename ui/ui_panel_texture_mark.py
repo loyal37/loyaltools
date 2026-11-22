@@ -365,6 +365,7 @@ def _refresh_texmark_items(context) -> tuple[str, int]:
         item.filename = candidate["filename"]
         item.slot = candidate["slot"]
         item.hash = candidate["hash"]
+        item.dhash = candidate.get("dhash", "")
         item.format = candidate["format"]
         item.width = int(candidate.get("width", 0) or 0)
         item.height = int(candidate.get("height", 0) or 0)
@@ -405,6 +406,7 @@ class LoyalTexMarkItem(bpy.types.PropertyGroup):
     slot: bpy.props.StringProperty(name="插槽", default="")  # type: ignore
     hash: bpy.props.StringProperty(name="Hash", default="")  # type: ignore
     format: bpy.props.StringProperty(name="格式", default="")  # type: ignore
+    dhash: bpy.props.StringProperty(default="", options={'HIDDEN'})  # type: ignore
     width: bpy.props.IntProperty(name="宽度", default=0)  # type: ignore
     height: bpy.props.IntProperty(name="高度", default=0)  # type: ignore
     call_id: bpy.props.StringProperty(name="绘制调用", default="")  # type: ignore
@@ -585,6 +587,8 @@ class LOYAL_OT_TexMarkMark(bpy.types.Operator):
                     "MarkSlot": item.slot,
                     "MarkFileName": mark_filename,
                     "SourceFileName": item.filename,
+                    "SourceDHash": item.dhash,
+                    "SourceFormat": item.format,
                 }
                 texture_mark_helper.write_mark(json_path, mark)
                 success_count += 1

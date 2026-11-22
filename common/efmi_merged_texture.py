@@ -17,6 +17,8 @@ class MergedAutoTextureBinding:
     mark_filename: str
     source_path: str
     mark_type: str = "Slot"
+    source_dhash: str = ""
+    source_format: str = ""
 
     def get_resource_name(self):
         return "Resource-" + os.path.splitext(self.mark_filename)[0]
@@ -188,6 +190,8 @@ def resolve_merged_auto_textures(
             mark_hash=str(entry.get("hash", "")).lower(),
             mark_filename=output_filename,
             source_path=source_path,
+            source_dhash=str(entry.get("dhash") or ""),
+            source_format=str(entry.get("format") or ""),
         ))
     return bindings
 

@@ -30,6 +30,7 @@ from ...common.efmi_merged_texture import (
     copy_merged_auto_textures,
     resolve_merged_auto_textures,
 )
+from ...efmi_extract.migoto_io.migoto_model.types import DXGI_FORMAT
 from ...common.efmi_physics_export import (
     atomic_ini_target,
     base_bone_mask,
@@ -61,6 +62,11 @@ _INTERFACE_TEXTURE_ROLES = {
     "LightMap": "LightMap",
     "NormalMap": "NormalMap",
 }
+_DHASH_TEXTURE_ROLES = {
+    "DiffuseMap": "Diffuse",
+    "LightMap": "Light",
+    "NormalMap": "Normal",
+}
 
 
 @dataclass
@@ -70,6 +76,7 @@ class ExportEFMI:
 
     submesh_model_list:list[SubMeshModel] = field(default_factory=list,init=False)
     drawib_model_list:list[DrawIBModel] = field(default_factory=list,init=False)
+    dhash_texture_filters:dict = field(default_factory=dict, init=False)
 
     def _get_tagged_merged_skeleton_unique_strs(self) -> set[str]:
         tagged_unique_strs = set()
@@ -1640,12 +1647,21 @@ class ExportEFMI:
             submesh_model, drawib_model
         )
         self._append_texture_binding_lines(
-            section, texture_markup_info_list, indent=indent
+            section, texture_markup_info_list, indent=indent,
+            component_id=(
+                self._get_merged_profile_component(submesh_model.unique_str)["component_id"]
+                if GlobalProterties.use_dhash_texture() else None
+            ),
         )
 
     def _append_texture_binding_lines(
-        self, section, texture_markup_info_list, indent=""
+        self, section, texture_markup_info_list, indent="", component_id=None
     ):
+        if GlobalProterties.use_dhash_texture():
+            self._append_dhash_texture_bindings(
+                section, texture_markup_info_list, component_id, indent
+            )
+            return
         # RabbitFX 和 EFMITTL 接口只接管这三种贴图，其余贴图仍写固定槽位。
         if GlobalProterties.use_efmittl_slot():
             interface = "EFMITTL"
@@ -1685,6 +1701,49 @@ class ExportEFMI:
                 section.append(
                     indent + texture_info.mark_slot + " = " + texture_info.get_resource_name()
                 )
+
+    def _append_dhash_texture_bindings(self, section, textures, component_id, indent):
+        for texture_info in textures:
+            if getattr(texture_info, "mark_type", "") != "Slot":
+                continue
+            if component_id is None:
+                raise ValueError("dHash 贴图缺少组件编号。")
+            dhash = str(getattr(texture_info, "source_dhash", "") or "").strip().lower()
+            format_name = str(getattr(texture_info, "source_format", "") or "").strip().upper()
+            format_name = format_name.removeprefix("DXGI_FORMAT_")
+            if not re.fullmatch(r"[0-9a-f]{16}", dhash) or (
+                "DXGI_FORMAT_" + format_name not in DXGI_FORMAT.__members__ or format_name == "UNKNOWN"
+            ):
+                raise ValueError(
+                    "Component" + str(component_id) + " 的贴图 " + texture_info.mark_filename
+                    + " 缺少有效的原图 dHash/格式。请使用带 dHash 的抓帧重新提取并标记贴图，"
+                    "或关闭 dHash纹理。"
+                )
+            role = _DHASH_TEXTURE_ROLES.get(texture_info.mark_name, texture_info.mark_name)
+            if not re.fullmatch(r"[A-Za-z0-9_]+", role):
+                raise ValueError("dHash 贴图标记名称无效: " + str(role))
+            filter_name = "Filter_Component" + str(component_id) + "_" + role
+            filter_key = filter_name.lower()
+            definition = (filter_name, format_name, dhash)
+            previous = self.dhash_texture_filters.get(filter_key)
+            if previous is not None:
+                if previous[1:] != definition[1:]:
+                    raise ValueError(filter_name + " 对应多张不同原图，请使用不同的贴图标记名称。")
+                filter_name = previous[0]
+            else:
+                self.dhash_texture_filters[filter_key] = definition
+            section.append(
+                indent + "ps-t[" + filter_name + "] = ref " + texture_info.get_resource_name()
+            )
+
+    def _append_dhash_texture_filters(self, ini_builder):
+        filters = M_IniSection(M_SectionType.ResourceTexture)
+        for name, format_name, dhash in self.dhash_texture_filters.values():
+            filters.append("[" + name + "]")
+            filters.append("match_format = " + format_name)
+            filters.append("match_dhash = " + dhash)
+            filters.new_line()
+        ini_builder.append_section(filters)
 
     def _get_merged_profile_texture_binding_list(self, component):
         '''解析没有自定义 SubMesh 的 profile 组件自动贴图。'''
@@ -1988,6 +2047,8 @@ class ExportEFMI:
         section.append("match_first_vertex = " + str(first_vertex))
 
     def _generate_merged_skeleton_ini_file(self):
+        self.dhash_texture_filters = {}
+        use_dhash = GlobalProterties.use_dhash_texture() and not GlobalProterties.forbid_auto_texture_ini()
         profile = self.merged_skeleton_profile
         if profile is None:
             raise ValueError("缺少 EFMI 骨骼合并工作空间配置。")
@@ -2145,18 +2206,22 @@ class ExportEFMI:
             component_id = component["component_id"]
             submesh = submesh_by_unique.get(component["unique_str"])
             command_lists.append("[CommandList_Draw_Component" + str(component_id) + "]")
+            if use_dhash:
+                command_lists.append("run = SnapshotInitialTextures")
             command_lists.append("run = CommandList\\EFMIv1\\OverrideTextures")
             if component["cpu_posed"]:
                 cpu_texture_bindings = self._get_merged_profile_texture_binding_list(
                     component
                 )
                 self._append_texture_binding_lines(
-                    command_lists, cpu_texture_bindings
+                    command_lists, cpu_texture_bindings, component_id=component_id
                 )
                 command_lists.append(
                     "; CPU posed/游戏原网格：不绑定导出的 IB/VB，使用游戏原始绘制"
                 )
                 command_lists.append("drawindexed = INDEX_COUNT, FIRST_INDEX, 0")
+                if use_dhash:
+                    command_lists.append("run = RestoreInitialTextures")
                 command_lists.new_line()
                 continue
             current_key = "indexcount_" + str(component["index_count"])
@@ -2192,6 +2257,8 @@ class ExportEFMI:
                 current_key,
                 diffuse_resource,
             )
+            if use_dhash:
+                command_lists.append("run = RestoreInitialTextures")
             command_lists.new_line()
 
         if self.merged_translucent_draw_names:
@@ -2512,6 +2579,7 @@ class ExportEFMI:
                     )
                     texture_resources.new_line()
             ini_builder.append_section(texture_resources)
+        self._append_dhash_texture_filters(ini_builder)
         self._append_merged_translucency_mask_resources(ini_builder)
 
         mod_info = M_IniSection(M_SectionType.ResourceModInfo)
@@ -2566,6 +2634,7 @@ class ExportEFMI:
             ini_builder.save_to_file(ini_filepath)
 
     def generate_ini_file(self):
+        self.dhash_texture_filters = {}
         if self.merged_skeleton_mode:
             return self._generate_merged_skeleton_ini_file()
 
@@ -2598,8 +2667,9 @@ class ExportEFMI:
         self._integrate_object_swap_ini_hook(ini_builder)
 
         texture_override_ib_section = M_IniSection(M_SectionType.TextureOverrideIB)
+        use_dhash = GlobalProterties.use_dhash_texture() and not GlobalProterties.forbid_auto_texture_ini()
 
-        for submesh_model in self.submesh_model_list:
+        for component_id, submesh_model in enumerate(self.submesh_model_list):
             drawib_model = drawib_drawibmodel_dict.get(submesh_model.match_draw_ib)
             active_index = draw_ib_active_index_dict.get(submesh_model.match_draw_ib, 0)
 
@@ -2623,6 +2693,8 @@ class ExportEFMI:
             if is_target_ib:
                 texture_override_ib_section.append("analyse_options = deferred_ctx_immediate dump_rt dump_cb dump_vb dump_ib buf txt dds dump_tex dds symlink")
 
+            if use_dhash:
+                texture_override_ib_section.append("run = SnapshotInitialTextures")
             texture_override_ib_section.append("run = CommandList\\EFMIv1\\OverrideTextures")
 
             ib_resource_name = "Resource_" + submesh_model.unique_str.replace("-","_") + "_Index"
@@ -2639,7 +2711,7 @@ class ExportEFMI:
             if not GlobalProterties.forbid_auto_texture_ini() and drawib_model is not None:
                 texture_markup_info_list = drawib_model.get_submesh_texture_markup_info_list(submesh_model)
                 self._append_texture_binding_lines(
-                    texture_override_ib_section, texture_markup_info_list
+                    texture_override_ib_section, texture_markup_info_list, component_id=component_id
                 )
 
             is_both_source_and_target = is_source_ib and is_target_ib and self.has_cross_ib
@@ -2724,9 +2796,12 @@ class ExportEFMI:
                 if GlobalProterties.generate_branch_mod_gui():
                     texture_override_ib_section.append("$ActiveCharacter = 1")
 
+            if use_dhash:
+                texture_override_ib_section.append("run = RestoreInitialTextures")
             texture_override_ib_section.new_line()
 
         ini_builder.append_section(texture_override_ib_section)
+        self._append_dhash_texture_filters(ini_builder)
 
         resource_buffer_section = M_IniSection(M_SectionType.ResourceBuffer)
         buffer_folder_name = BlueprintExportHelper.get_current_buffer_folder_name()

@@ -109,6 +109,14 @@ Editing and export follow the original TheHerta4 workflow. Use the blueprint sys
 
 In standalone mode, when no game directory is configured, the mod is written to `<workspace>/GeneratedMod/`. Copy that output into the game's Mods directory.
 
+### Optional EFMI dHash textures
+
+Starting with v1.8.2, the **Generate Mod** node offers **dHash textures**, disabled by default and mutually exclusive with RabbitFX and EFMITTL dynamic slots. Use a frame capture whose `log.txt` contains texture `dhash=` values, and XXMI DLL 1.3.3 or newer at runtime. Extraction preserves the original texture fingerprint and format. Merged Skeleton auto-selected maps and standard Slot marks carry this metadata into export. Editing the named DDS does not change the reference fingerprint.
+
+The existing LoyalTools template and resource filenames are retained. Texture bindings use `ps-t[Filter_Component0_Diffuse] = ref Resource-...`, with `Light` and `Normal` for the other standard maps. Each component has its own Filters, shared across passes and LODs, with `match_format` and `match_dhash`. Component draws capture and restore their texture bindings. Hash-style marks keep their existing behavior.
+
+This initial integration does not adapt material-switch post-processing nodes, collect separate LOD fingerprints, or upgrade old workspace metadata. A Slot mark missing its original fingerprint or format cannot be exported with dHash enabled. Existing workspaces remain usable with the option disabled.
+
 ## Zenless Zone Zero workflow
 
 Select the `ZZMI` preset in the **Basic Information** panel (enable the standalone-preset override if SSMT4 is installed with another game selected). In the standard workflow the extraction panel shows a Frame Analysis directory, the DrawIB table, two extraction buttons, and **Import**; the Merged Skeleton workflow is described [below](#merged-skeleton-for-zenless-zone-zero). Zenless Zone Zero has a single level of detail, so there is no LOD mapping.

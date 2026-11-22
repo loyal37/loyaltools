@@ -11,6 +11,8 @@ class TextureMarkUpInfo:
     mark_hash:str = field(default="",init=False)
     mark_slot:str = field(default="",init=False)
     mark_filename:str = field(default="",init=False)
+    source_dhash:str = field(default="",init=False)
+    source_format:str = field(default="",init=False)
 
     def get_resource_name(self):
         return "Resource-" + self.mark_filename.split(".")[0]
@@ -28,6 +30,8 @@ class TextureMetadataResolver:
             getattr(texture_info, "mark_hash", ""),
             getattr(texture_info, "mark_slot", ""),
             getattr(texture_info, "mark_filename", ""),
+            getattr(texture_info, "source_dhash", ""),
+            getattr(texture_info, "source_format", ""),
         )
 
     @staticmethod
@@ -62,6 +66,8 @@ class TextureMetadataResolver:
             markup_info.mark_hash = texture_info.get("MarkHash", texture_info.get("mark_hash", ""))
             markup_info.mark_slot = texture_info.get("MarkSlot", texture_info.get("mark_slot", ""))
             markup_info.mark_filename = texture_info.get("MarkFileName", texture_info.get("mark_filename", ""))
+            markup_info.source_dhash = texture_info.get("SourceDHash", texture_info.get("source_dhash", "")) or ""
+            markup_info.source_format = texture_info.get("SourceFormat", texture_info.get("source_format", "")) or ""
             normalized_texture_info_list.append(markup_info)
 
         return normalized_texture_info_list
